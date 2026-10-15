@@ -45,12 +45,12 @@ export class Scheduler {
   private readonly log: Log;
   private readonly runners: {
     prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string) => Promise<void>;
-    commandSandbox?: () => { wrap: (argv: string[]) => string[]; env: Record<string, string> };
+    commandSandbox?: () => { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string };
   };
   constructor(home: string, log: Log, runners: {
     prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string) => Promise<void>;
     /** How command jobs run: wrap the argv (the shell sandbox) and the environment they get. */
-    commandSandbox?: () => { wrap: (argv: string[]) => string[]; env: Record<string, string> };
+    commandSandbox?: () => { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string };
   }) {
     this.log = log;
     this.runners = runners;
@@ -231,11 +231,11 @@ export class Scheduler {
   }
 }
 
-export function runCommand(command: string, timeoutMs: number, groups?: Set<number>, sandbox?: { wrap: (argv: string[]) => string[]; env: Record<string, string> }): Promise<string> {
+export function runCommand(command: string, timeoutMs: number, groups?: Set<number>, sandbox?: { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string }): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!sandbox) return reject(new Error("command schedules run only in the gateway, where they run inside the shell sandbox"));
     const argv = sandbox.wrap(["/bin/bash", "-lc", command]);
-    const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], detached: true, env: sandbox.env });
+    const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], detached: true, env: sandbox.env, cwd: sandbox.cwd });
     if (child.pid) groups?.add(child.pid);
     child.on("exit", () => child.pid && groups?.delete(child.pid));
     let out = "";

@@ -81,15 +81,18 @@ test("programs the sandbox blocks are refused with the reason, not offered for a
   assert.equal(classifyCommand("openssl rand 4", rules).level, "ok");
 });
 
-test("trusted MCP tools that type into terminals or stand in for the operator ask first", async () => {
+test("trusted MCP tools ask first unless they only read", async () => {
   const { mcpVerdict } = await import("../src/guard.ts");
-  const rules = { trustedMcp: ["overseer"], askTools: [["^vault/delete_note$", "deletes a note"]] as [string, string][] };
-  assert.equal(mcpVerdict("mcp__overseer__overseer_send", rules).level, "dangerous");
-  assert.equal(mcpVerdict("mcp__overseer__overseer_job_approve", rules).level, "dangerous");
-  assert.equal(mcpVerdict("mcp__overseer__overseer_decide", rules).level, "dangerous");
-  for (const read of ["overseer_status", "overseer_read", "overseer_job_list", "overseer_job_add", "overseer_open"])
+  const rules = { trustedMcp: ["overseer", "vault", "my-tools"], allowTools: [["^my-tools/lookup$", "reads"]] as [string, string][] };
+  for (const acting of ["overseer_send", "overseer_open", "overseer_job_add", "overseer_job_dispatch", "overseer_job_approve", "overseer_message", "overseer_close", "overseer_schedule_add", "overseer_brand_new_tool"])
+    assert.equal(mcpVerdict(`mcp__overseer__${acting}`, rules).level, "dangerous", acting);
+  for (const read of ["overseer_status", "overseer_read", "overseer_job_list", "overseer_job_get", "overseer_events"])
     assert.equal(mcpVerdict(`mcp__overseer__${read}`, rules).level, "ok", read);
-  assert.equal(mcpVerdict("mcp__vault__delete_note", rules).level, "ok", "untrusted servers are sandboxed instead");
-  assert.equal(mcpVerdict("mcp__vault__delete_note", { ...rules, trustedMcp: ["overseer", "vault"] }).level, "dangerous", "operator askTools apply");
+  assert.equal(mcpVerdict("mcp__vault__search_notes", rules).level, "ok");
+  assert.equal(mcpVerdict("mcp__vault__write_note", rules).level, "dangerous");
+  // Pi turns "-" into "_"; a hashed (shortened) name is unknown, so it asks.
+  assert.equal(mcpVerdict("mcp__my_tools__lookup", rules).level, "ok", "operator allowTools apply");
+  assert.equal(mcpVerdict("mcp__my_tools__lookup_3f2a9c1b", rules).level, "dangerous");
+  assert.equal(mcpVerdict("mcp__sandboxed__anything", rules).level, "ok", "untrusted servers run in the sandbox instead");
   assert.equal(mcpVerdict("bash", rules).level, "ok");
 });

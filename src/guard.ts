@@ -28,9 +28,10 @@ export interface GuardRules {
   cwd?: string;
   /** Programs the kernel sandbox refuses to run: refused up front instead of asking for an approval that cannot help. */
   noExec?: string[];
-  /** MCP servers that run outside the sandbox; their tools matching askTools ("server/tool" patterns) ask first. */
+  /** MCP servers that run outside the sandbox: their tools ask first unless they match a read-only pattern. */
   trustedMcp?: string[];
-  askTools?: [string, string][];
+  /** Extra "server/tool" patterns of trusted servers that run without asking: [regex, reason]. */
+  allowTools?: [string, string][];
 }
 
 /** Remove quoting so `"rm" -rf '~'` reads as `rm -rf ~`. */
@@ -298,8 +299,8 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
           subject = `read ${path}`;
           verdict = readVerdict(path, rules);
         } else if (/^mcp__.+__.+$/.test(event.toolName)) {
-          // Trusted MCP servers act outside the sandbox: their tools that type into terminals or stand in for the
-          // operator's approval ask first, also when a codemode script calls them.
+          // Trusted MCP servers act outside the sandbox: everything but their read-only tools asks first, also when
+          // a codemode script calls them.
           subject = `${event.toolName}\n${JSON.stringify(event.input ?? {}, null, 1)}`;
           verdict = mcpVerdict(event.toolName, rules);
         } else {
@@ -326,21 +327,27 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
   } as InlineExtension;
 }
 
-/** Tools of trusted MCP servers that act for the operator outside the sandbox: asked first by default. */
-export const DEFAULT_ASK_TOOLS: [string, string][] = [
-  ["^overseer/overseer_send$", "types into a terminal, which runs it outside the sandbox"],
-  ["^overseer/overseer_(job_approve|decide|decisions_submit|job_waive|job_review_exception|cleanup_scope|pause|resume)$", "records the operator's decision"],
+/**
+ * Tools of trusted MCP servers that only read: they run without asking. Every other tool of a trusted server
+ * (opening workers, typing into terminals, queueing or approving work, writing notes) asks first, also from a
+ * codemode script, because it acts outside the sandbox with the operator's permissions.
+ */
+export const DEFAULT_TRUSTED_READONLY: [string, string][] = [
+  ["^overseer/overseer_(status|digest|terminals|read|profiles|events|panel|policy|concurrency|job_list|job_get|job_receiver|cleanup_status|reap_status|reap_owner_status|schedule_list|proposals|decisions_pending|decisions_packet)$", "OverSeer reads"],
+  ["^[^/]+/(list_notes|search_notes|read_note|query_records|recall_context|get_links|get_schema|get_stats|get_board|memory_context|memory_recall|memory_review)$", "Retex reads"],
 ];
 
+/** Pi names MCP tools mcp__<server>__<tool> with everything but [A-Za-z0-9_] turned into "_". */
+const mcpPrefix = (server: string) => `mcp__${server.replace(/[^A-Za-z0-9_]/g, "_")}__`;
+
 export function mcpVerdict(toolName: string, rules: GuardRules): Verdict {
-  const m = /^mcp__(.+?)__(.+)$/.exec(toolName);
-  if (!m) return { level: "ok" };
-  const [, server, tool] = m;
-  if (!(rules.trustedMcp ?? []).includes(server)) return { level: "ok" }; // sandboxed like the shell
-  // Pi sanitises names into mcp__<server>__<tool>; the tool part may carry the server's own prefix.
-  for (const [src, why] of [...DEFAULT_ASK_TOOLS, ...(rules.askTools ?? [])])
-    if (new RegExp(src).test(`${server}/${tool}`)) return { level: "dangerous", reason: `${server} ${tool} ${why}` };
-  return { level: "ok" };
+  if (!toolName.startsWith("mcp__")) return { level: "ok" };
+  const server = (rules.trustedMcp ?? []).find((s) => toolName.startsWith(mcpPrefix(s)));
+  if (!server) return { level: "ok" }; // an untrusted server runs inside the sandbox, like the shell
+  const tool = toolName.slice(mcpPrefix(server).length);
+  for (const [src] of [...DEFAULT_TRUSTED_READONLY, ...(rules.allowTools ?? [])]) if (new RegExp(src).test(`${server}/${tool}`)) return { level: "ok" };
+  // Unknown names (including Pi's hashed ones) ask: the list says what is safe, not what is dangerous.
+  return { level: "dangerous", reason: `${server} ${tool} acts outside the sandbox with your permissions` };
 }
 
 /** Run a small file utility inside the shell sandbox; the kernel then judges the real path, whatever links it went through. */

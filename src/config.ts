@@ -72,7 +72,7 @@ export interface CarlConfig {
   /** Inbound webhooks by name (POST /v1/hooks/<name>). */
   hooks: Record<string, { prompt: string; deliver: string; secretEnv?: string }>;
   /** Extra shell-guard patterns on top of the built-in ones. */
-  guard: { hardline: [string, string][]; dangerous: [string, string][]; askTools: [string, string][] };
+  guard: { hardline: [string, string][]; dangerous: [string, string][]; allowTools: [string, string][] };
   /** UltraCompress compaction (deterministic brief, no model call, plus recall): "auto" = on when the binary is installed. */
   ultracompress: "auto" | "off";
   /** Extra KEY=VALUE files read for secrets after the environment and CARL_HOME/.env (values are never copied). */
@@ -207,7 +207,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     trustedMcp: strList(raw.trustedMcp, "trustedMcp"),
     ultracompress: raw.ultracompress === "off" || raw.ultracompress === false ? "off" : "auto",
     hooks: hooksOf(raw.hooks),
-    guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous"), askTools: pairs(raw.guard?.askTools, "guard.askTools") },
+    guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous"), allowTools: pairs(raw.guard?.allowTools, "guard.allowTools") },
     claude: {
       enabled: raw.claude?.enabled === undefined ? true : bool(raw.claude.enabled, "claude.enabled"),
       command: raw.claude?.command ? abs(str(raw.claude.command, "claude", "claude.command"), home) : undefined,
