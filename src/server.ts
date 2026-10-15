@@ -117,7 +117,7 @@ export class ApiServer {
     if (lastUser && typeof lastUser.content !== "string" && !Array.isArray(lastUser.content))
       throw Object.assign(new Error("message content must be a string or an array of parts"), { status: 400 });
     if (!lastUser) throw Object.assign(new Error("messages must contain a user message"), { status: 400 });
-    const text = typeof lastUser.content === "string" ? lastUser.content : (lastUser.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
+    const text = typeof lastUser.content === "string" ? lastUser.content : lastUser.content.filter((c: any) => c && typeof c === "object" && c.type === "text" && typeof c.text === "string").map((c: any) => c.text).join("\n");
     const conversation = String(req.headers["x-carl-conversation"] ?? body.user ?? "default");
     const key = conversation.includes(":") ? conversation : `api:${conversation}`;
     this.metrics.messages++;

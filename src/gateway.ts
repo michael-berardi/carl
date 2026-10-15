@@ -9,6 +9,7 @@ import { type CarlConfig, ensureHome, secret } from "./config.ts";
 import { Log } from "./log.ts";
 import { individuationPrompt, parseIndividuation, Psyche, readJsonl } from "./psyche.ts";
 import { type Job, Scheduler } from "./scheduler.ts";
+import { cleanEnv, sandboxArgv } from "./sandbox.ts";
 import { ApiServer } from "./server.ts";
 import { carlTools, type Outbox } from "./tools.ts";
 import { VERSION } from "./version.ts";
@@ -50,6 +51,8 @@ export class Gateway {
       deliver: async (job, text) => {
         await this.send(job.deliver, `**${job.name}**\n\n${text}`);
       },
+      // Command jobs run under the shell sandbox too: the scripts and tools they call are ones the agent can change.
+      commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg) }),
     });
     this.brain = new Brain(cfg, this.psyche, this.log, () => carlTools(this.psyche, this.scheduler, outbox));
   }

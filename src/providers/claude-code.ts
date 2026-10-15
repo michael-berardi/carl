@@ -58,6 +58,8 @@ export interface ClaudeCodeOptions {
   /** Stable private working directory (Claude Code writes its cwd into the prompt; a stable one keeps the cache).
    *  Default: a private directory under the OS temp dir, away from any CLAUDE.md the CLI would pick up. */
   workdir?: string;
+  /** Where per-call files (system prompt, tool list, settings) are written. Default: the OS temp dir. */
+  tmpRoot?: string;
   log?: (level: "info" | "warn" | "error", msg: string, data?: Record<string, unknown>) => void;
 }
 
@@ -600,7 +602,8 @@ async function attempt(
   if (options?.maxTokens) body.max_tokens = options.maxTokens;
   const workdir = opts.workdir ?? defaultWorkdir();
   mkdirSync(workdir, { recursive: true, mode: 0o700 });
-  const tmp = mkdtempSync(join(tmpdir(), "carl-claude-"));
+  if (opts.tmpRoot) mkdirSync(opts.tmpRoot, { recursive: true, mode: 0o700 });
+  const tmp = mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "carl-claude-"));
   // CARL_CLAUDE_UPSTREAM exists for loopback test fixtures only (the Admission constructor refuses anything else but HTTPS).
   const admission = new Admission(process.env.CARL_CLAUDE_UPSTREAM ?? "https://api.anthropic.com", opts.idleTimeoutMs ?? 180_000, frames[frames.length - 1]?.message.content);
   let child: ChildProcess | undefined;

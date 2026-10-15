@@ -42,3 +42,10 @@ test("long text without breaks still chunks", () => {
 test("plain fallback strips tags and unescapes", () => {
   assert.equal(htmlToPlain("<b>a &lt; b</b> &amp; c"), "a < b & c");
 });
+
+test("approval cards show invisible, direction and tag characters", async () => {
+  const { visibleControls } = await import("../src/channels/format.ts");
+  const shown = visibleControls("rm­ -rf⁠ x\u{e0041}‮");
+  assert.equal(shown, "rm\\u{ad} -rf\\u{2060} x\\u{e0041}\\u{202e}");
+  assert.equal(visibleControls("plain café ✓"), "plain café ✓");
+});
