@@ -34,7 +34,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   const outside = join(root, "elsewhere-ext");
   mkdirSync(outside);
   writeFileSync(join(outside, "ext.ts"), "// operator code\n");
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ extensions: [join(outside, "ext.ts")], envFiles: [join(root, "secrets", "extra.env")], shellEnv: ["CARL_TEST_PASS", "CARL_FILE_ONLY"], api: { port: 18_765 } }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ extensions: [join(outside, "ext.ts")], envFiles: [join(root, "secrets", "extra.env")], shellEnv: ["CARL_TEST_PASS", "CARL_FILE_ONLY"], agentWritable: [root], api: { port: 18_765 } }));
   writeFileSync(join(home, ".env"), "TELEGRAM_BOT_TOKEN=1:secret\nCARL_FILE_ONLY=from-env-file\n");
   mkdirSync(join(root, "secrets"));
   writeFileSync(join(root, "secrets", "extra.env"), "OTHER=2:secret\n");
@@ -54,7 +54,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   const outsider = spawn("/bin/sleep", ["30"]);
   t.after(() => { outsider.kill(); tmuxLike.close(); if (savedTmux === undefined) delete process.env.TMUX; else process.env.TMUX = savedTmux; });
   const homeProbe = join(homedir(), `.carl-sandbox-probe-${process.pid}`);
-  t.after(() => rmSync(homeProbe, { force: true }));
+  t.after(() => { rmSync(homeProbe, { force: true }); rmSync(`/private/tmp/carl-sbx-probe-${process.pid}`, { force: true }); });
   const profile = installProfile(cfg, { controlPlane: [outside], pinned: executableChain(join(root, "bin", "tool")), apiPorts: [18_765] })!;
   process.env.TELEGRAM_BOT_TOKEN = "1:secret-from-env";
   process.env.STRIPE_TEST_KEY = "sk_must_not_leak";
@@ -95,6 +95,8 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
     `/usr/bin/python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${sock}'); print('TMUX-REACHED', s.recv(9))" 2>/dev/null || echo tmux-blocked`,
     `kill -0 ${outsider.pid} 2>/dev/null && echo SIGNAL-REACHED || echo signal-blocked`,
     `echo "PATHIS=[$PATH]" "FILEONLY=[$CARL_FILE_ONLY]"`,
+    `echo t > /private/tmp/carl-sbx-probe-${process.pid}; echo tmp-write=$?`,
+    `echo "TMPDIRIS=[$TMPDIR]"`,
   ].join(" ; "));
   api.close();
   for (const k of ["TELEGRAM_BOT_TOKEN", "STRIPE_TEST_KEY", "CARL_TEST_PASS", "HOMEBREW_GITHUB_API_TOKEN", "HTTPS_PROXY"]) delete process.env[k];
@@ -122,6 +124,8 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   assert.match(out, /signal-blocked/, "processes outside the sandbox cannot be signalled");
   assert.ok(out.includes(`PATHIS=[${process.env.PATH}]`), "agent commands get the operator's PATH, nothing prefixed");
   assert.match(out, /FILEONLY=\[from-env-file\]/, "a shellEnv name can come from the env files");
+  assert.match(out, /tmp-write=1/, "the shared /tmp is closed (other programs read what is there)");
+  assert.ok(out.includes(`TMPDIRIS=[${join(home, "spill", "tmp")}]`), "the agent gets its own temp folder");
 });
 
 test("file tools: reads and writes run in the sandbox, so a swapped symlink gains nothing", { skip: !sandboxAvailable() && "needs macOS sandbox-exec" }, async (t) => {
