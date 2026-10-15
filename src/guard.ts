@@ -298,6 +298,10 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
         } else if (event.toolName === "read") {
           subject = `read ${path}`;
           verdict = readVerdict(path, rules);
+        } else if (event.toolName === "read_mcp_resource" && (rules.trustedMcp ?? []).includes(String(event.input?.server ?? ""))) {
+          // Resources of a trusted server are read outside the sandbox (a file:// resource would bypass its read denies).
+          subject = `read_mcp_resource\n${JSON.stringify(event.input ?? {}, null, 1)}`;
+          verdict = { level: "dangerous", reason: `reads a resource of ${event.input?.server} outside the sandbox` };
         } else if (/^mcp__.+__.+$/.test(event.toolName)) {
           // Trusted MCP servers act outside the sandbox: everything but their read-only tools asks first, also when
           // a codemode script calls them.

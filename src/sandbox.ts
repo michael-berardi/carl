@@ -72,7 +72,7 @@ export function credentialStores(cfg: CarlConfig): string[] {
 
 export function secretFiles(cfg: CarlConfig): string[] {
   return [
-    join(cfg.home, ".env"), join(cfg.piAgentDir, "auth.json"), join(cfg.home, "pi", "mcp-auth.json"), ...cfg.envFiles,
+    join(cfg.home, ".env"), join(cfg.piAgentDir, "auth.json"), join(cfg.piAgentDir, "mcp-auth.json"), join(cfg.home, "pi", "mcp-auth.json"), ...cfg.envFiles,
     ...(cfg.ultraterm ? [join(cfg.ultraterm.home, ".env"), join(cfg.ultraterm.home, "auth.json"),
       // OverSeer's local HTTP token: with it a command could ask OverSeer to act outside the sandbox.
       join(dirname(dirname(cfg.ultraterm.overseerBin)), "overseer", "http-token")] : []),
@@ -256,8 +256,13 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     `(deny mach-lookup ${[...LAUNCH_SERVICES, "com.apple.SecurityServer", "com.apple.securityd.xpc"].map((n) => `(global-name "${n}")`).join(" ")})`,
     // The operator's SSH agents (their keys reach every server the operator can log in to): launchd's, GnuPG's
     // and app agents such as 1Password's. The Keychain files themselves are unreadable too.
-    `(deny network-outbound (remote unix-socket (path-regex #"^(/private)?/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$")) ${["/.gnupg", "/.ssh", "/Library/Group Containers", "/Library/Containers", "/.orbstack", "/.local/share/containers"].map((d) => `(remote unix-socket (subpath ${sbString(homedir() + d)}))`).join(" ")})`,
+    `(deny network-outbound (remote unix-socket (path-regex #"^(/private)?/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$") (path-regex #"/ssh-[^/]+/agent\\.[0-9]+$") (path-regex #"(ssh|agent)[^/]*\\.sock$")) ${["/.gnupg", "/.ssh", "/Library/Group Containers", "/Library/Containers", "/.orbstack", "/.local/share/containers", "/.lima", "/.rd"].map((d) => `(remote unix-socket (subpath ${sbString(homedir() + d)}))`).join(" ")})`,
     `(deny file-read* ${credentialStores(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
+    // ...and cannot be changed or moved aside either (matters when agentWritable covers the home folder).
+    `(deny file-write* ${credentialStores(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")} ${credentialStores(cfg).flatMap(ancestors).map(sbLiterals).join(" ")})`,
+    // UltraTerm's bot folder holds the old gateway's secrets, config and backups: closed, except its scripts
+    // (speech-to-text runs from there inside the sandbox).
+    ...(cfg.ultraterm ? [`(deny file-read* (subpath ${sbString(cfg.ultraterm.home)}))`, `(allow file-read* (subpath ${sbString(join(cfg.ultraterm.home, "scripts"))}))`] : []),
     ...(input.apiPorts.length ? [`(deny network-outbound ${input.apiPorts.map((p) => `(remote ip "*:${p}")`).join(" ")})`] : []),
   ];
   return lines.join("\n") + "\n";

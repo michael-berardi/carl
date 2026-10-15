@@ -449,7 +449,9 @@ export class TelegramChannel {
     // Speech-to-text runs inside the shell sandbox: the agent can change its scripts or models, so it gets no more power.
     const argv = sandboxArgv(this.brain.shellSandbox, args);
     return new Promise((resolve) => {
-      const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], env: cleanEnv(this.cfg) });
+      // UltraTerm's ultrabot-stt keeps its lock in ~/.ultraterm, which the sandbox closes: it gets one in Carl's temp.
+      const env = { ...cleanEnv(this.cfg), ...(this.cfg.ultraterm ? { ULTRABOT_STT_LOCK: join(this.cfg.home, "spill", "tmp", "ultrabot-stt.lock") } : {}) };
+      const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], env });
       let out = "";
       let err = "";
       child.stdout.on("data", (b) => (out += b));
