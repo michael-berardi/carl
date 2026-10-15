@@ -1,0 +1,5 @@
+#!/bin/sh
+# Carl launcher: Node >= 22.19 runs the TypeScript sources directly (type stripping, no build step).
+self=$(readlink -f "$0" 2>/dev/null || echo "$0")
+here=$(cd "$(dirname "$self")" && pwd -P)
+exec node --experimental-strip-types --no-warnings=ExperimentalWarning "$here/../src/main.ts" "$@"
