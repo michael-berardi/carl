@@ -98,7 +98,7 @@ export class Psyche {
     const full: ShadowEntry = {
       at: new Date().toISOString(),
       ...entry,
-      summary: entry.summary.slice(0, 500),
+      summary: entry.summary.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]+/g, " ").slice(0, 500),
       evidence: entry.evidence?.slice(0, 1_500),
     };
     appendFileSync(this.path("shadow.jsonl"), JSON.stringify(full) + "\n", { mode: 0o600 });
@@ -142,8 +142,16 @@ export class Psyche {
     writeFileSync(this.path(name), text.trim() + "\n", { mode: 0o600 });
   }
 
+  /** Lessons enter every prompt, so only well-formed bullets are kept: at most 12, one line each, 300 chars. */
   writeIntegrated(lessons: string): void {
-    writeFileSync(this.path("integrated.md"), lessons.trim() + "\n", { mode: 0o600 });
+    const bullets = lessons
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^[-•*]\s+\S/.test(l))
+      .map((l) => "- " + l.replace(/^[-•*]\s+/, "").replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, "").slice(0, 300))
+      .slice(0, 12);
+    if (!bullets.length) throw new Error("the individuation reply had no lesson bullets; integrated.md left unchanged");
+    writeFileSync(this.path("integrated.md"), bullets.join("\n") + "\n", { mode: 0o600 });
   }
 }
 

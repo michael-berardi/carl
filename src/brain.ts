@@ -8,6 +8,7 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
+  createBashToolDefinition,
   createCodemodeExtension,
   createMcpExtension,
   createToolSearchExtension,
@@ -22,6 +23,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { CarlConfig } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
+import { installProfile, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
 import { claudeCodeProviderConfig, PROVIDER as CLAUDE_PROVIDER } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
 import { type Approver, shellGuard } from "./guard.ts";
@@ -37,6 +39,8 @@ export interface Inbound {
 }
 
 export interface ReplySink {
+  /** The caller's run started with this id (not called when the message was steered into another run). */
+  onRunStart?(runId: number): void;
   /** A new assistant message starts (after tools the visible text restarts). */
   onMessageStart?(): void;
   /** Streaming text of the assistant message being written. */
@@ -84,6 +88,8 @@ interface Conversation {
   pending?: Promise<RunResult>;
   /** Set by stop(): an abort the operator asked for is "stopped", not "failed". */
   stopRequested?: boolean;
+  /** Increments per run, so a caller can stop its own run and nobody else's. */
+  runId?: number;
 }
 
 const IDLE_DISPOSE_MS = 30 * 60_000;
@@ -119,6 +125,9 @@ export class Brain extends EventEmitter {
     this.piDir = join(cfg.home, "pi");
   }
 
+  /** Seatbelt profile for shell commands (macOS); undefined where the kernel sandbox is unavailable. */
+  private sandboxProfile?: string;
+
   /** The vendored UltraCompress adapter, when its engine binary is installed (resolved once at init). */
   private ultracompressExt?: string;
 
@@ -127,6 +136,10 @@ export class Brain extends EventEmitter {
 
   async init(): Promise<void> {
     mkdirSync(this.piDir, { recursive: true, mode: 0o700 });
+    const extraProtected = this.cfg.ultraterm ? [join(this.cfg.ultraterm.home, "gateway_state.json"), join(this.cfg.ultraterm.home, "state.db"), join(this.cfg.ultraterm.home, "state.db-wal"), join(this.cfg.ultraterm.home, ".env")] : [];
+    this.sandboxProfile = installProfile(this.cfg, extraProtected);
+    if (this.sandboxProfile) this.log.info("shell sandbox: Seatbelt", { profile: this.sandboxProfile });
+    else this.log.warn("shell sandbox unavailable on this platform: the pattern guard and secret scrubbing still apply, but Carl's own files are not kernel-protected");
     if (this.cfg.ultracompress !== "off") {
       const bin = findUltraCompress();
       const ext = fileURLToPath(new URL("../vendor/ultracompress/index.ts", import.meta.url));
@@ -267,9 +280,11 @@ export class Brain extends EventEmitter {
         this.psyche.recordShadow({ kind: "tool_error", conversation: key, summary: `blocked: ${why}`, evidence: command.slice(0, 500) }),
         {
           ...this.cfg.guard,
-          // Carl's own control files: changing them changes what Carl may do.
-          protectedPaths: [join(this.cfg.home, "carl.json"), join(this.cfg.home, "pi"), join(this.cfg.home, "psyche", "self.md"), join(this.cfg.home, "app")],
-          secretPaths: [join(this.cfg.home, ".env"), join(this.cfg.piAgentDir, "auth.json"), ...this.cfg.envFiles],
+          // Carl's own control plane (everything in CARL_HOME but the working areas) and its secrets.
+          protectedPaths: [this.cfg.home],
+          writablePaths: writablePaths(this.cfg),
+          secretPaths: secretFiles(this.cfg),
+          cwd: this.cfg.workspace,
         }),
       resultBudget(join(this.cfg.home, "spill"), this.cfg.toolResultMaxChars),
     ];
@@ -322,8 +337,12 @@ export class Brain extends EventEmitter {
       settingsManager,
       // Pi's default built-ins are read, bash, edit, write; switch off the ones the config leaves out.
       // (An allowlist would also switch off extension tools, so Carl excludes instead.)
-      excludeTools: ["read", "bash", "edit", "write"].filter((t) => !this.cfg.tools.includes(t)),
-      customTools: this.tools(),
+      // Pi's bash is replaced by the same tool with the sandbox spawn hook.
+      excludeTools: ["read", "bash", "edit", "write"].filter((t) => t === "bash" || !this.cfg.tools.includes(t)),
+      customTools: [
+        ...(this.cfg.tools.includes("bash") ? [createBashToolDefinition(this.cfg.workspace, { spawnHook: sandboxSpawnHook(this.cfg, this.sandboxProfile) })] : []),
+        ...this.tools(),
+      ] as ToolDefinition[],
     });
     for (const err of extensionsResult.errors ?? []) this.log.error("extension failed to load", { error: String((err as any).error ?? err), path: (err as any).path });
     await session.bindExtensions({});
@@ -360,7 +379,7 @@ export class Brain extends EventEmitter {
     const text = input.preface ? `${input.preface}\n\n---\n\n${input.text}` : input.text;
     if (looksLikeCorrection(input.text)) {
       const prev = convo.session.getLastAssistantText() ?? "";
-      this.psyche.recordShadow({ kind: "correction", conversation: key, summary: input.text.slice(0, 300), evidence: prev.slice(-1_000) });
+      this.psyche.recordShadow({ kind: "correction", conversation: key, summary: input.text.replace(/\s+/g, " ").slice(0, 300), evidence: prev.slice(-1_000) });
     }
     // API clients expect an answer to each request: wait for the running turn, then run. Chat steers.
     while (convo.busy && input.source !== "telegram" && convo.pending) await convo.pending.catch(() => {});
@@ -383,6 +402,9 @@ export class Brain extends EventEmitter {
 
   private async run(convo: Conversation, text: string, images: ImageContent[] | undefined, sink: ReplySink): Promise<RunResult> {
     const started = Date.now();
+    convo.stopRequested = false;
+    convo.runId = (convo.runId ?? 0) + 1;
+    sink.onRunStart?.(convo.runId);
     let live = "";
     let toolCalls = 0;
     const errors: string[] = [];
@@ -428,7 +450,8 @@ export class Brain extends EventEmitter {
     } finally {
       unsubscribe();
     }
-    const aborted = lastAssistant?.stopReason === "aborted" || !!convo.stopRequested;
+    const operatorStop = !!convo.stopRequested;
+    const aborted = lastAssistant?.stopReason === "aborted" || operatorStop;
     convo.stopRequested = false;
     const error = aborted
       ? undefined
@@ -453,7 +476,7 @@ export class Brain extends EventEmitter {
       ms: Date.now() - started,
     };
     if (error) this.psyche.recordShadow({ kind: "run_failed", conversation: convo.key, summary: `run failed: ${error.slice(0, 200)}`, evidence: text.slice(0, 500) });
-    if (aborted) this.psyche.recordShadow({ kind: "aborted", conversation: convo.key, summary: "run stopped by the operator", evidence: text.slice(0, 300) });
+    if (aborted && operatorStop) this.psyche.recordShadow({ kind: "aborted", conversation: convo.key, summary: "run stopped by the operator", evidence: text.slice(0, 300) });
     this.log.info("run settled", { key: convo.key, ok: result.ok, ms: result.ms, toolCalls, in: usage.input, out: usage.output, cached: usage.cacheRead, error });
     sink.onDone?.(result);
     return result;
@@ -489,9 +512,11 @@ export class Brain extends EventEmitter {
     this.emit("transcript", { ...e, conversation: convo.key, sessionId: convo.session.sessionId, at: Date.now() } satisfies TranscriptEvent);
   }
 
-  async stop(key: string): Promise<boolean> {
+  /** Stop the running turn; with runId, only if that run is still the one running. */
+  async stop(key: string, runId?: number): Promise<boolean> {
     const convo = this.conversations.get(key);
     if (!convo?.busy) return false;
+    if (runId !== undefined && convo.runId !== runId) return false;
     convo.stopRequested = true;
     await convo.session.abort();
     return true;
@@ -517,13 +542,14 @@ export class Brain extends EventEmitter {
     if (convo.busy) return "Busy; try again when the current run finishes.";
     const before = convo.session.getContextUsage()?.tokens;
     convo.busy = true;
-    try {
-      await convo.session.compact();
-    } catch (e) {
-      return `Not compacted: ${(e as Error).message}`;
-    } finally {
-      convo.busy = false;
-    }
+    const job = convo.session.compact().then(() => undefined, (e: Error) => e);
+    // Other callers wait on `pending` exactly as they would for a run.
+    convo.pending = job.then(() => ({ text: "", ok: true, aborted: false, toolCalls: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, model: this.modelRef(convo), ms: 0 }));
+    const failure = await job;
+    convo.busy = false;
+    convo.pending = undefined;
+    convo.stopRequested = false;
+    if (failure) return `Not compacted: ${failure.message}`;
     const after = convo.session.getContextUsage()?.tokens;
     return `Compacted${before ? ` from ~${before} tokens` : ""}${after ? ` to ~${after}` : ""}.`;
   }
@@ -644,10 +670,17 @@ export function listSessionFiles(home: string): { key: string; dir: string; file
   const out: { key: string; dir: string; file: string; mtime: number }[] = [];
   for (const dir of readdirSync(root)) {
     const full = join(root, dir);
-    if (!statSync(full).isDirectory()) continue;
-    const keyFile = join(full, "key");
-    const key = existsSync(keyFile) ? readFileSync(keyFile, "utf8").trim() : dir;
-    for (const f of readdirSync(full)) {
+    let key = dir;
+    let files: string[];
+    try {
+      if (!statSync(full).isDirectory()) continue;
+      const keyFile = join(full, "key");
+      if (existsSync(keyFile)) key = readFileSync(keyFile, "utf8").trim();
+      files = readdirSync(full);
+    } catch {
+      continue; // a dangling link or a directory removed while listing
+    }
+    for (const f of files) {
       if (!f.endsWith(".jsonl")) continue;
       try {
         out.push({ key, dir, file: join(full, f), mtime: statSync(join(full, f)).mtimeMs });

@@ -5,8 +5,9 @@
 // Commands are split into segments at ; && || | & newlines and $( ), and judged by their verb, so "rg shutdown"
 // is a search, not a shutdown. Quoting and backslashes are removed before matching. Anything that hides the
 // real command (eval, sh -c, interpreters with inline code, a variable as the verb, base64 decoding) asks first.
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 
 export type Verdict = { level: "ok" } | { level: "dangerous" | "hardline"; reason: string };
@@ -20,6 +21,10 @@ export interface GuardRules {
   protectedPaths?: string[];
   /** Extra files read must never open. */
   secretPaths?: string[];
+  /** Inside protectedPaths, these stay writable (the agent's working areas). */
+  writablePaths?: string[];
+  /** Base for relative tool paths (the agent's working directory). */
+  cwd?: string;
 }
 
 /** Remove quoting so `"rm" -rf '~'` reads as `rm -rf ~`. */
@@ -27,16 +32,84 @@ export function normalise(command: string): string {
   return command.replace(/\\\n/g, " ").replace(/\\(.)/g, "$1").replace(/["']/g, "").replace(/\$\{?IFS\}?/g, " ");
 }
 
-/** Command segments with their verb (first word after env assignments and transparent wrappers). */
+/**
+ * Split a shell command into simple commands, respecting quotes and skipping heredoc bodies. Separators are
+ * ; && || | & newlines, $( ), backticks, ( ) and { }. Each segment's words come back unquoted.
+ */
+export function splitCommands(command: string): string[][] {
+  const segs: string[][] = [];
+  let words: string[] = [];
+  let word = "";
+  let inWord = false;
+  let quote: "'" | '"' | null = null;
+  const pendingHeredocs: { delim: string; strip: boolean }[] = [];
+  const endWord = () => { if (inWord) words.push(word); word = ""; inWord = false; };
+  const endSeg = () => { endWord(); if (words.length) segs.push(words); words = []; };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (c === "\\" && quote === '"' && i + 1 < command.length) word += command[++i];
+      else word += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; inWord = true; continue; }
+    if (c === "\\") { if (command[i + 1] === "\n") { i++; continue; } word += command[++i] ?? ""; inWord = true; continue; }
+    if (c === "<" && command[i + 1] === "<" && command[i + 2] !== "<") {
+      // Heredoc: remember the delimiter; its body (next lines) is data, not commands.
+      endWord();
+      let j = i + 2;
+      const strip = command[j] === "-";
+      if (strip) j++;
+      while (command[j] === " " || command[j] === "\t") j++;
+      const m = command.slice(j).match(/^(['"]?)([A-Za-z0-9_.-]+)\1/);
+      if (m) { pendingHeredocs.push({ delim: m[2], strip }); i = j + m[0].length - 1; continue; }
+    }
+    if (c === "\n") {
+      endSeg();
+      while (pendingHeredocs.length) {
+        const { delim, strip } = pendingHeredocs.shift()!;
+        let next = command.indexOf("\n", i + 1);
+        for (;;) {
+          const line = command.slice(i + 1, next === -1 ? undefined : next);
+          i = next === -1 ? command.length : next;
+          if ((strip ? line.trim() : line) === delim || next === -1) break;
+          next = command.indexOf("\n", i + 1);
+        }
+      }
+      continue;
+    }
+    if (c === "$" && command[i + 1] === "(") { endSeg(); i++; continue; }
+    if (";&|`(){}".includes(c)) { endSeg(); continue; }
+    if (c === " " || c === "\t") { endWord(); continue; }
+    word += c;
+    inWord = true;
+  }
+  endSeg();
+  return segs;
+}
+
+const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "time", "coproc"]);
+const NOT_COMMANDS = new Set(["for", "case", "select", "function", "done", "fi", "esac", "in"]);
+const WRAPPERS = new Set(["command", "builtin", "nohup", "nice", "ionice", "exec", "env", "caffeinate", "timeout", "gtimeout", "setsid", "stdbuf", "arch", "chrt", "unbuffer", "script", "flock"]);
+
+/** Command segments with their verb (first word after keywords, env assignments and transparent wrappers). */
 export function segments(command: string): { verb: string; args: string; text: string }[] {
-  const parts = normalise(command).split(/\|\||&&|[;|&\n]|\$\(|`|\)/);
   const out: { verb: string; args: string; text: string }[] = [];
-  for (const raw of parts) {
-    let words = raw.trim().split(/\s+/).filter(Boolean);
-    while (words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) words = words.slice(1);
-    while (words.length && ["command", "builtin", "nohup", "time", "nice", "exec", "env", "caffeinate", "timeout", "gtimeout"].includes(words[0])) {
+  for (let words of splitCommands(command)) {
+    for (;;) {
+      while (words.length && (KEYWORDS.has(words[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]))) words = words.slice(1);
+      if (!words.length || NOT_COMMANDS.has(words[0])) { words = []; break; }
+      if (words[0] === "command" && /^-[vV]$/.test(words[1] ?? "")) { words = []; break; } // a lookup, not a run
+      if (!WRAPPERS.has(words[0])) break;
+      const wrapper = words[0];
       words = words.slice(1);
-      while (words.length && (/^-/.test(words[0]) || /^\d+[smh]?$/.test(words[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]))) words = words.slice(1);
+      while (words.length && (/^-/.test(words[0]) || /^\d+(\.\d+)?[smhd]?$/.test(words[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]))) {
+        const flag = words[0];
+        words = words.slice(1);
+        if (wrapper === "flock" && !flag.startsWith("-")) break;
+      }
+      if (wrapper === "script" || wrapper === "flock") words = words.slice(1); // script FILE cmd / flock LOCK cmd
     }
     if (!words.length) continue;
     const verb = words[0].replace(/^.*\//, ""); // /bin/rm -> rm
@@ -93,7 +166,12 @@ function judgeSegment(s: { verb: string; args: string; text: string }): Verdict 
   // Indirection hides the real command: ask.
   if (verb === "eval" || verb === "source" || verb === ".") return { level: "dangerous", reason: `${verb} runs code the guard cannot see` };
   if (/^(ba|z|k|da|fi)?sh$/.test(verb) && /(^|\s)-[a-zA-Z]*c(\s|$)/.test(args)) return { level: "dangerous", reason: `${verb} -c runs code the guard cannot see` };
-  if (/^(python[0-9.]*|node|perl|ruby|php|osascript|deno|bun)$/.test(verb) && /(^|\s)-(c|e|E|-eval)(\s|$)/.test(args)) return { level: "dangerous", reason: `${verb} with inline code` };
+  const inline: Record<string, RegExp> = {
+    python: /(^|\s)-[a-zA-Z]*c/, node: /(^|\s)(-[a-zA-Z]*[ep]|--eval|--print)/, perl: /(^|\s)-[a-zA-Z]*[eE]/, ruby: /(^|\s)-[a-zA-Z]*e/,
+    php: /(^|\s)-[a-zA-Z]*r/, osascript: /(^|\s)-e/, bun: /(^|\s)(-e|--eval|-p|--print)/, deno: /(^|\s)eval\b/,
+  };
+  const interp = verb.replace(/[0-9.]+$/, "");
+  if (inline[interp]?.test(args)) return { level: "dangerous", reason: `${verb} with inline code` };
   if (verb.startsWith("$")) return { level: "dangerous", reason: "a variable used as the command" };
   if (verb === "base64" && /(^|\s)(-d|--decode|-D)(\s|$)/.test(args)) return { level: "dangerous", reason: "decoding hidden content" };
   // Publishing, deploys, production data, billing.
@@ -131,23 +209,39 @@ export function classifyCommand(command: string, extra: GuardRules = {}): Verdic
   return worst;
 }
 
-const expand = (p: string) => (p === "~" ? HOME : p.startsWith("~/") ? resolve(HOME, p.slice(2)) : resolve(p));
+/** Absolute, symlink-resolved path (the deepest existing ancestor is resolved; the rest is appended). */
+function real(p: string, cwd?: string): string {
+  const abs = p === "~" ? HOME : p.startsWith("~/") ? resolve(HOME, p.slice(2)) : resolve(cwd ?? process.cwd(), p);
+  let head = abs;
+  const tail: string[] = [];
+  while (head !== "/" && !existsSync(head)) {
+    tail.unshift(basename(head));
+    head = dirname(head);
+  }
+  try { head = realpathSync(head); } catch {}
+  return tail.length ? join(head, ...tail) : head;
+}
+const expand = (p: string, cwd?: string) => real(p, cwd);
 const under = (p: string, dir: string) => p === dir.replace(/\/+$/, "") || p.startsWith(dir.replace(/\/+$/, "") + "/");
 
 /** Paths that write/edit must ask before changing. */
 export function writeVerdict(path: string, rules: GuardRules = {}): Verdict {
-  const p = expand(path);
-  const dirs = ["~/.ssh", "~/.aws", "~/.gnupg", "~/Library/LaunchAgents", "/Library/LaunchDaemons", "/etc", ...(rules.protectedPaths ?? [])].map(expand);
+  const p = expand(path, rules.cwd);
+  const own = (rules.protectedPaths ?? []).map((d) => expand(d));
+  const free = (rules.writablePaths ?? []).map((d) => expand(d));
+  if (own.some((d) => under(p, d)) && !free.some((d) => under(p, d)) || /\/\.pi(\/|$)/.test(p))
+    return { level: "hardline", reason: `writing ${path} (Carl's own configuration and state)` };
+  const dirs = ["~/.ssh", "~/.aws", "~/.gnupg", "~/Library/LaunchAgents", "/Library/LaunchDaemons", "/etc"].map((d) => expand(d));
   if (dirs.some((d) => under(p, d))) return { level: "dangerous", reason: `writing ${path}` };
   if (/(^|\/)(\.zshrc|\.bashrc|\.zprofile|\.bash_profile|\.profile|\.env|auth\.json)$/.test(p)) return { level: "dangerous", reason: `writing ${path}` };
-  if (/\/\.git\/hooks\//.test(p) || /\/\.pi\//.test(p)) return { level: "dangerous", reason: `writing ${path} (code that runs later)` };
+  if (/\/\.git\/hooks\//.test(p)) return { level: "dangerous", reason: `writing ${path} (code that runs later)` };
   return { level: "ok" };
 }
 
 /** Files read must never open: they hold credentials. */
 export function readVerdict(path: string, rules: GuardRules = {}): Verdict {
-  const p = expand(path);
-  const secret = (rules.secretPaths ?? []).map(expand);
+  const p = expand(path, rules.cwd);
+  const secret = (rules.secretPaths ?? []).map((s) => expand(s));
   if (secret.includes(p) || /(^|\/)(\.env|auth\.json|mcp-auth\.json|id_rsa|id_ed25519|id_ecdsa)$/.test(p) || (/\/\.ssh\/[^/]+$/.test(p) && !p.endsWith(".pub")))
     return { level: "hardline", reason: `reading ${path} (credentials)` };
   return { level: "ok" };
@@ -168,7 +262,8 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
           subject = String(event.input?.command ?? "");
           verdict = classifyCommand(subject, rules);
         } else if (event.toolName === "write" || event.toolName === "edit") {
-          subject = `${event.toolName} ${path}`;
+          const content = String(event.input?.content ?? event.input?.newText ?? event.input?.new_string ?? JSON.stringify(event.input?.edits ?? ""));
+          subject = `${event.toolName} ${path}\n${content.length > 1_500 ? content.slice(0, 1_500) + `\n… (${content.length} characters in all)` : content}`;
           verdict = writeVerdict(path, rules);
         } else if (event.toolName === "read") {
           subject = `read ${path}`;

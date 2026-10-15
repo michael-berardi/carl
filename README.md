@@ -46,11 +46,12 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
 
 ## What you get
 
-- **Telegram:**
+- **Telegram, Slack and Discord:**
   - Replies stream into a draft message as Carl writes them.
   - A message sent while Carl is working joins the current turn instead of waiting in a queue.
   - `/stop`, `/new`, `/status`, `/model`, `/compact` and `/mirror` work at any time.
   - Voice notes go through any speech-to-text command you configure; photos and files go to the model.
+  - Slack connects over Socket Mode (no public URL needed). Discord connects over its Gateway.
   - Replies that fail to send are retried for 24 hours. If Carl restarts mid-reply, it tells you which message was interrupted.
 - **Web app:**
   - Chat with any conversation, including the Telegram one.
@@ -58,6 +59,7 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
   - Read and edit the psyche (below).
   - Status and recent log.
   - No framework and no build step.
+- **Webhooks:** `POST /v1/hooks/<name>` turns an event from GitHub, Stripe, a form or another bot into an agent run, with the result delivered where you choose. Requests need the API key or a valid HMAC signature (GitHub's `X-Hub-Signature-256` format).
 - **API:**
   - An OpenAI-compatible `/v1/chat/completions` that streams and keeps conversation state.
   - The `/carl/*` routes the web app uses.
@@ -100,15 +102,26 @@ Carl is named after Carl Jung, and its self-model borrows his layers. Each layer
 
 Only Self, Persona and Lessons enter the prompt. The ledgers stay on disk and are read only when needed.
 
-## The guard
+## Safety
 
-Carl runs tools with your own permissions. It is not a sandbox; the guard is a tripwire against destructive mistakes:
+Carl runs tools with your own permissions, because it does real work. Two layers keep that safe.
 
-- **Never runs:** `sudo`, recursive deletes of root, home or system directories, disk formatting, raw device writes, and force-pushes to `main` or `master`.
-- **Asks first:** recursive deletes, `git push`, destructive git, killing processes, services, deploys, publishing, production data and billing changes. Also anything that hides the real command: `eval`, `sh -c`, interpreters with inline code, a variable used as the command, and base64-decoded content.
-  - In Telegram, Carl sends you the exact command with **Run once** and **Deny** buttons. No answer within 5 minutes means no.
+**A kernel sandbox for every shell command (macOS).** Each command runs under a Seatbelt profile that:
+
+- denies writes anywhere in `CARL_HOME` except the agent's working areas (`workspace`, `memory`, `media`, `spill`), including any `.pi` extension directory;
+- denies reads of credential files (`.env`, configured env files, Pi's `auth.json`);
+- removes Carl's own secrets (bot tokens, the API key, webhook secrets) from the command's environment.
+
+No way of writing a command gets around this. The agent cannot rewrite Carl's config, schedules or extensions, read its secrets, or call its own API without the key. On Linux and Windows the secrets are still removed from the environment, and the missing kernel boundary is logged at startup.
+
+**A guard that asks before risky actions.** Commands are parsed into simple commands, respecting quotes and heredocs, and judged by what actually runs:
+
+- **Never runs:** `sudo`, recursive deletes of root, home or system directories, disk formatting, raw device writes, force-pushes to `main` or `master`, and file-tool writes into Carl's control plane.
+- **Asks first:** recursive deletes, `git push`, destructive git, killing processes, services, deploys, publishing, production data and billing changes. Also anything that hides the real command: `eval`, `sh -c`, interpreters with inline code, a variable used as the command, and base64-decoded content. File writes to `.ssh`, `.aws`, shell startup files, LaunchAgents and git hooks ask too.
+  - In Telegram, Slack or Discord, Carl shows you the exact command (or file content) with **Run once** and **Deny** buttons. No answer within 5 minutes means no.
   - Runs with nobody to ask (schedules, the API) refuse instead.
-- **File tools:** writes to `.ssh`, `.aws`, shell startup files, LaunchAgents, git hooks and Carl's own config ask first. Reads of `.env`, `auth.json` and private keys are refused.
+
+The guard is a tripwire for mistakes and prompt injection, not a proof. The sandbox is the boundary.
 
 Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 

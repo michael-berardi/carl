@@ -113,8 +113,14 @@ export class Scheduler {
   }
 
   add(spec: { name: string; when: string; prompt?: string; command?: string; builtin?: string; deliver: string; onlyIfOutput?: boolean; model?: string; timeoutMinutes?: number }): Job {
+    if (!spec.name?.trim()) throw Object.assign(new Error("a schedule needs a name"), { status: 400 });
+    if (!spec.prompt && !spec.command && !spec.builtin) throw Object.assign(new Error("a schedule needs a prompt or a command"), { status: 400 });
     const job: Job = { id: `j-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, enabled: true, createdAt: new Date().toISOString(), ...spec };
-    job.nextRunAt = this.next(job, Date.now()); // throws, naming the problem, on bad timing
+    try {
+      job.nextRunAt = this.next(job, Date.now());
+    } catch (e) {
+      throw Object.assign(new Error((e as Error).message), { status: 400 });
+    }
     this.jobs.push(job);
     this.save();
     return job;
@@ -152,7 +158,7 @@ export class Scheduler {
 
   private find(id: string): Job {
     const job = this.jobs.find((j) => j.id === id || j.name === id);
-    if (!job) throw new Error(`no schedule ${id}`);
+    if (!job) throw Object.assign(new Error(`no schedule ${id}`), { status: 404 });
     return job;
   }
 
