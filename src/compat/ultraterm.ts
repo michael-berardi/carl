@@ -255,7 +255,7 @@ export class UltraTermCompat implements GatewayPlugin {
     api.route("GET", /^\/api\/intake\/capabilities$/, (_q, res) =>
       json(res, 200, { contract: INTAKE_CONTRACT, durable: true, idempotent: true, canonicalMessaging: true, modelSelection: { contract: MODEL_CONTRACT, persisted: true, idempotent: true } }));
     api.route("POST", /^\/api\/sessions\/[^/]+\/intake$/, async (req, res, url, body) => {
-      const sessionId = decodeURIComponent(url.pathname.split("/")[3]);
+      const sessionId = segment(url, 3);
       const requestId = String(req.headers["idempotency-key"] ?? "");
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return json(res, 400, { error: { message: "Idempotency-Key header is required ([A-Za-z0-9_-]{1,128})" } });
       const message = typeof body?.message === "string" ? body.message : "";
@@ -287,13 +287,13 @@ export class UltraTermCompat implements GatewayPlugin {
       json(res, 200, { provider: current?.[0] ?? this.currentModel().split("/")[0], model: current?.[1] ?? this.currentModel().split("/").slice(1).join("/"), providers });
     });
     api.route("GET", /^\/api\/sessions\/[^/]+\/model-selection$/, (_q, res, url) => {
-      const sessionId = decodeURIComponent(url.pathname.split("/")[3]);
+      const sessionId = segment(url, 3);
       const current = toPicker(this.currentModel());
       // A Carl model outside the picker's routes: the UI falls back to a read-only label.
       if (!current) return json(res, 404, { error: { code: "model_selection_route_unavailable", message: `${this.currentModel()} is not one of UltraTerm's picker routes` } });
       json(res, 200, { contract: MODEL_CONTRACT, sessionId, provider: current[0], model: current[1], resolvedModel: current[1], persisted: true });
     });
-    api.route("POST", /^\/api\/sessions\/[^/]+\/model-selection$/, async (req, res, url, body) => this.selectModel(req.headers, res, decodeURIComponent(url.pathname.split("/")[3]), body));
+    api.route("POST", /^\/api\/sessions\/[^/]+\/model-selection$/, async (req, res, url, body) => this.selectModel(req.headers, res, segment(url, 3), body));
 
     // Schedules.
     const jobView = (j: ReturnType<typeof gw.scheduler.list>[number]) => ({
@@ -325,7 +325,7 @@ export class UltraTermCompat implements GatewayPlugin {
       json(res, 200, { object: "list", data: rows.map((r) => ({ ...r, last_active: r.last_activity_at, preview: null, pinned: false })) });
     });
     api.route("GET", /^\/api\/sessions\/[^/]+\/messages$/, (_q, res, url) => {
-      const id = decodeURIComponent(url.pathname.split("/")[3]);
+      const id = segment(url, 3);
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 200) || 200, 1), 500);
       const rows = (this.db.prepare("SELECT id, role, content, tool_name, tool_call_id, tool_calls, timestamp FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?").all(id, limit) as any[]).reverse();
       json(res, 200, { object: "list", session_id: id, data: rows.map((r) => ({ ...r, tool_calls: r.tool_calls ? JSON.parse(r.tool_calls) : null })) });
@@ -353,7 +353,8 @@ export class UltraTermCompat implements GatewayPlugin {
       const conversation = this.conversationFor(r.session_id);
       if (r.state === "running" || !conversation) {
         this.intake.prepare("UPDATE intake SET state = 'failed', result = ? WHERE request_id = ?").run("interrupted by a restart", r.request_id);
-        if (p.recipient) void this.gw.send(p.recipient, `Carl restarted while answering your UltraTerm message: "${String(p.message).slice(0, 160)}". Send it again if it still matters.`).catch(() => {});
+        void this.gw.send(p.recipient || "home", `Carl restarted while answering your UltraTerm message: "${String(p.message).slice(0, 160)}". Send it again if it still matters.`)
+          .catch((e) => this.gw.log.warn("cannot report an interrupted composer request", { error: (e as Error).message }));
         continue;
       }
       this.gw.log.info("resuming accepted composer request", { requestId: r.request_id });
@@ -541,4 +542,13 @@ function run(bin: string, args: string[], timeoutMs: number): Promise<{ code: nu
 
 function execText(bin: string, args: string[]): string {
   return execFileSync(bin, args, { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** A decoded path segment; bad percent-encoding is a 400, not a 500. */
+function segment(url: URL, i: number): string {
+  try {
+    return decodeURIComponent(url.pathname.split("/")[i] ?? "");
+  } catch {
+    throw Object.assign(new Error("bad URL encoding in the path"), { status: 400 });
+  }
 }

@@ -58,6 +58,8 @@ export interface CarlConfig {
   /** Pi built-in tools to enable. */
   tools: string[];
   telegram: TelegramConfig;
+  discord: { enabled: boolean; allowFrom: string[]; tokenEnv: string; homeChannel?: string; apiBase: string };
+  slack: { enabled: boolean; allowFrom: string[]; appTokenEnv: string; botTokenEnv: string; homeChannel?: string; apiBase: string };
   api: ApiConfig;
   /** Speech-to-text command for voice notes: "{file}" is the audio path; the transcript is "{output}" when given, else stdout. */
   stt?: string[];
@@ -67,6 +69,8 @@ export interface CarlConfig {
   ultraterm?: { home: string; overseerBin: string };
   /** Claude route through the official Claude Code CLI: binary and login config dirs (first preferred). */
   claude: { enabled: boolean; command?: string; configDirs: string[] };
+  /** Inbound webhooks by name (POST /v1/hooks/<name>). */
+  hooks: Record<string, { prompt: string; deliver: string; secretEnv?: string }>;
   /** Extra shell-guard patterns on top of the built-in ones. */
   guard: { hardline: [string, string][]; dangerous: [string, string][] };
   /** UltraCompress compaction (deterministic brief, no model call, plus recall): "auto" = on when the binary is installed. */
@@ -164,6 +168,21 @@ export function loadConfig(home = carlHome()): CarlConfig {
       stream: tg.stream === undefined ? true : bool(tg.stream, "telegram.stream"),
       apiBase: str(tg.apiBase, "https://api.telegram.org", "telegram.apiBase").replace(/\/+$/, ""),
     },
+    discord: {
+      enabled: raw.discord?.enabled === undefined ? !!raw.discord : bool(raw.discord.enabled, "discord.enabled"),
+      allowFrom: strList(raw.discord?.allowFrom, "discord.allowFrom"),
+      tokenEnv: str(raw.discord?.tokenEnv, "DISCORD_BOT_TOKEN", "discord.tokenEnv"),
+      homeChannel: raw.discord?.homeChannel ? str(raw.discord.homeChannel, "", "discord.homeChannel") : undefined,
+      apiBase: str(raw.discord?.apiBase, "https://discord.com/api/v10", "discord.apiBase").replace(/\/+$/, ""),
+    },
+    slack: {
+      enabled: raw.slack?.enabled === undefined ? !!raw.slack : bool(raw.slack.enabled, "slack.enabled"),
+      allowFrom: strList(raw.slack?.allowFrom, "slack.allowFrom"),
+      appTokenEnv: str(raw.slack?.appTokenEnv, "SLACK_APP_TOKEN", "slack.appTokenEnv"),
+      botTokenEnv: str(raw.slack?.botTokenEnv, "SLACK_BOT_TOKEN", "slack.botTokenEnv"),
+      homeChannel: raw.slack?.homeChannel ? str(raw.slack.homeChannel, "", "slack.homeChannel") : undefined,
+      apiBase: str(raw.slack?.apiBase, "https://slack.com/api", "slack.apiBase").replace(/\/+$/, ""),
+    },
     api: {
       enabled: api.enabled === undefined ? true : bool(api.enabled, "api.enabled"),
       host: str(api.host, "127.0.0.1", "api.host"),
@@ -177,6 +196,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
       : undefined,
     envFiles: strList(raw.envFiles, "envFiles").map((p) => abs(p, home)),
     ultracompress: raw.ultracompress === "off" || raw.ultracompress === false ? "off" : "auto",
+    hooks: hooksOf(raw.hooks),
     guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous") },
     claude: {
       enabled: raw.claude?.enabled === undefined ? true : bool(raw.claude.enabled, "claude.enabled"),
@@ -225,4 +245,16 @@ function pairs(v: unknown, name: string): [string, string][] {
     try { new RegExp(src); } catch (e) { throw new ConfigError(`${name}: bad regex ${JSON.stringify(src)}: ${(e as Error).message}`); }
   }
   return v as [string, string][];
+}
+
+function hooksOf(v: unknown): Record<string, { prompt: string; deliver: string; secretEnv?: string }> {
+  if (v === undefined || v === null) return {};
+  if (typeof v !== "object" || Array.isArray(v)) throw new ConfigError("hooks must be an object of name -> {prompt, deliver, secretEnv}");
+  const out: Record<string, { prompt: string; deliver: string; secretEnv?: string }> = {};
+  for (const [name, h] of Object.entries(v as Record<string, any>)) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) throw new ConfigError(`hooks.${name}: names use letters, digits, _ and - (max 64)`);
+    if (typeof h?.prompt !== "string" || !h.prompt.trim()) throw new ConfigError(`hooks.${name}.prompt is required`);
+    out[name] = { prompt: h.prompt, deliver: typeof h.deliver === "string" ? h.deliver : "home", secretEnv: typeof h.secretEnv === "string" ? h.secretEnv : undefined };
+  }
+  return out;
 }

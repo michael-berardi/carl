@@ -38,7 +38,7 @@ mkdirSync(hermes, { recursive: true });
 const overseer = join(root, "ut-overseer");
 writeFileSync(overseer, `#!/bin/sh\necho "{\\"ok\\":true,\\"accepted\\":true,\\"result\\":\\"Sent choice $5 for $3\\"}"\n`);
 chmodSync(overseer, 0o755);
-writeFileSync(join(home, ".env"), `TELEGRAM_BOT_TOKEN=123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz\nCARL_API_KEY=${KEY}\n`);
+writeFileSync(join(home, ".env"), `TELEGRAM_BOT_TOKEN=123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz\nCARL_API_KEY=${KEY}\nHOOK_SECRET=hook-secret-123\n`);
 const port = 18_000 + Math.floor(Math.random() * 1_000);
 writeFileSync(join(home, "carl.json"), JSON.stringify({
   model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol",
@@ -47,6 +47,7 @@ writeFileSync(join(home, "carl.json"), JSON.stringify({
   telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: true },
   api: { port },
   ultraterm: { home: hermes, overseerBin: overseer },
+  hooks: { deploy: { prompt: "A deploy event arrived: {{payload}} Reply with exactly: hook-<the service name from the event>", deliver: "home", secretEnv: "HOOK_SECRET" } },
 }));
 const workspaceProbe = join(root, "carl", "workspace", "doomed");
 
@@ -253,6 +254,19 @@ await step("schedule: command job delivers its output home", async () => {
   await tg.waitFor(() => tg.texts(OP).some((t) => t.includes("scheduled-output-ok")), 10_000, "scheduled output");
   const jobs = await (await api("/api/jobs?include_disabled=true")).json();
   assert.equal(jobs.jobs.find((j: any) => j.id === job.id).last_status, "ok");
+});
+
+await step("signed webhook runs and delivers home; unsigned is refused", async () => {
+  await idle();
+  const body = JSON.stringify({ service: "atlas", status: "ok" });
+  const unsigned = await fetch(`http://127.0.0.1:${port}/v1/hooks/deploy`, { method: "POST", body });
+  assert.equal(unsigned.status, 401);
+  const { createHmac } = await import("node:crypto");
+  const sig = "sha256=" + createHmac("sha256", "hook-secret-123").update(body).digest("hex");
+  const t = Date.now();
+  const signed = await fetch(`http://127.0.0.1:${port}/v1/hooks/deploy`, { method: "POST", body, headers: { "x-hub-signature-256": sig, "content-type": "application/json" } });
+  assert.equal(signed.status, 202);
+  await tg.waitFor(() => tg.texts(OP, t).some((x) => /hook-atlas/.test(x)), 90_000, "webhook result delivered home");
 });
 
 await step("clean stop marks UltraTerm state stopped", async () => {

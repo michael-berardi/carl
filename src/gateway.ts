@@ -25,6 +25,8 @@ export class Gateway {
   readonly brain: Brain;
   readonly scheduler: Scheduler;
   telegram?: TelegramChannel;
+  slack?: import("./channels/slack.ts").SlackChannel;
+  discord?: import("./channels/discord.ts").DiscordChannel;
   api?: ApiServer;
   readonly startedAt = new Date();
   private statusTimer?: NodeJS.Timeout;
@@ -72,11 +74,33 @@ export class Gateway {
         const m = key.match(/^telegram:(?:dm|group):(-?\d+)/);
         if (!m) return "unattended";
         const chat = Number(m[1]);
-        // Approval cards go only to the operator's own chats, whatever conversation key a client chose.
-        if (!this.cfg.telegram.allowFrom.includes(chat) && chat !== this.cfg.telegram.homeChat) return "unattended";
-        return tg.requestApproval(chat, command, reason);
+        // Approval cards go only to the operator's own chats: a group conversation asks in the home DM.
+        const target = this.cfg.telegram.allowFrom.includes(chat) || chat === this.cfg.telegram.homeChat ? chat : this.cfg.telegram.homeChat;
+        if (!target) return "unattended";
+        return tg.requestApproval(target, target === chat ? command : `${command}\n\n(from the group conversation ${chat})`, reason);
       };
     }
+    if (this.cfg.slack.enabled) {
+      const { SlackChannel } = await import("./channels/slack.ts");
+      const app = secret(this.cfg.home, this.cfg.slack.appTokenEnv, this.cfg.envFiles);
+      const bot = secret(this.cfg.home, this.cfg.slack.botTokenEnv, this.cfg.envFiles);
+      if (!app || !bot) throw new Error(`slack is enabled but ${!app ? this.cfg.slack.appTokenEnv : this.cfg.slack.botTokenEnv} is not set`);
+      this.slack = new SlackChannel(this.cfg.slack, app, bot, this.brain, this.log);
+    }
+    if (this.cfg.discord.enabled) {
+      const { DiscordChannel } = await import("./channels/discord.ts");
+      const token = secret(this.cfg.home, this.cfg.discord.tokenEnv, this.cfg.envFiles);
+      if (!token) throw new Error(`discord is enabled but ${this.cfg.discord.tokenEnv} is not set`);
+      this.discord = new DiscordChannel(this.cfg.discord, token, this.brain, this.log);
+    }
+    const baseApprover = this.brain.approver;
+    this.brain.approver = (key) => async (command, reason) => {
+      const m = key.match(/^slack:(?:dm:)?([A-Z0-9]+)(?::([\d.]+))?$/);
+      if (m && this.slack) return this.slack.requestApproval(m[1], m[2], command, reason);
+      const d = key.match(/^discord:(?:dm:)?(\d+)$/);
+      if (d && this.discord) return this.discord.requestApproval(d[1], command, reason);
+      return baseApprover(key)(command, reason);
+    };
     if (this.cfg.api.enabled) {
       const key = secret(this.cfg.home, this.cfg.api.keyEnv, this.cfg.envFiles);
       if (!key) throw new Error(`api is enabled but ${this.cfg.api.keyEnv} is not set (environment or ${join(this.cfg.home, ".env")})`);
@@ -86,10 +110,16 @@ export class Gateway {
       const { mountPortal, publicAsset } = await import("./portal/api.ts");
       mountPortal(this.api, this);
       this.api.publicAsset = publicAsset;
+      if (Object.keys(this.cfg.hooks).length) {
+        const { mountHooks } = await import("./hooks.ts");
+        mountHooks(this.api, this, this.cfg.hooks);
+      }
     }
     for (const p of this.plugins) await p.start(this);
     if (this.api) await this.api.start();
     if (this.telegram) await this.telegram.start();
+    if (this.slack) await this.slack.start();
+    if (this.discord) await this.discord.start();
     this.scheduler.ensureBuiltin("individuation", "Individuation", "40 5 * * *");
     this.scheduler.start();
     this.writeStatus();
@@ -104,6 +134,8 @@ export class Gateway {
     this.log.info("carl stopping", { reason });
     this.scheduler.stop();
     await this.telegram?.stop();
+    await this.slack?.stop();
+    await this.discord?.stop();
     await this.brain.shutdown();
     await this.api?.stop();
     for (const p of this.plugins) {
@@ -142,6 +174,8 @@ export class Gateway {
       activeRuns: this.brain.busyCount(),
       conversations: this.brain.activeConversations().length,
       telegram: this.telegram?.status ?? { state: "off" },
+      slack: this.slack?.status ?? { state: "off" },
+      discord: this.discord?.status ?? { state: "off" },
       api: this.api ? { ...this.api.status, port: this.cfg.api.port } : { state: "off" },
     };
   }
@@ -167,6 +201,16 @@ export class Gateway {
   /** Deliver Markdown to "home", "none" or a chat id. */
   async send(target: string, text: string): Promise<string> {
     if (target === "none") return "Not delivered (target none).";
+    if (target.startsWith("discord:")) {
+      if (!this.discord) throw new Error("discord is not enabled");
+      const n = await this.discord.deliver(target.slice(8), text);
+      return `Delivered to Discord (${n} message${n === 1 ? "" : "s"}).`;
+    }
+    if (target.startsWith("slack:")) {
+      if (!this.slack) throw new Error("slack is not enabled");
+      const n = await this.slack.send(target.slice(6), text);
+      return `Delivered to Slack (${n} message${n === 1 ? "" : "s"}).`;
+    }
     if (!this.telegram) throw new Error("no messaging channel is enabled");
     const chatId = target === "home" ? this.cfg.telegram.homeChat : Number(target);
     if (!chatId || !Number.isSafeInteger(chatId)) throw new Error(target === "home" ? "telegram.homeChat is not configured" : `bad chat id "${target}"`);

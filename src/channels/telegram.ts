@@ -143,13 +143,20 @@ export class TelegramChannel {
   /** Messages of one chat are prepared (downloads, speech-to-text) and handed to the brain in arrival order. */
   private enqueueMessage(m: TgMessage): void {
     const key = TelegramChannel.conversationKey(m);
+    // Journaled the moment the offset moves past it: a restart at any later point is reported, never silent.
+    const journalId = `${m.chat.id}:${m.message_id}`;
+    if (this.allowed(m.from?.id)) this.markInflight(journalId, { chatId: m.chat.id, threadId: m.message_thread_id, text: (m.text ?? m.caption ?? (m.voice ? "(voice note)" : "(attachment)")).slice(0, 500) });
     let done!: () => void;
     const handed = new Promise<void>((r) => (done = r));
     const prev = this.chains.get(key) ?? Promise.resolve();
     const next = prev.then(async () => {
       const handler = this.onMessage(m, done).catch((e) => this.log.error("message handler failed", { error: (e as Error).stack }));
       this.handlers.add(handler);
-      void handler.finally(() => { this.handlers.delete(handler); done(); });
+      void handler.finally(() => {
+        this.handlers.delete(handler);
+        done();
+        if (!this.abort.signal.aborted) this.markInflight(journalId); // a shutdown keeps it for the restart notice
+      });
       // The next message of this chat waits until this one reached the brain (or 5 s), not until it finished,
       // so a follow-up can still steer the running turn.
       await Promise.race([handed, new Promise((r) => setTimeout(r, 5_000))]);
@@ -235,13 +242,7 @@ export class TelegramChannel {
   private async converse(m: TgMessage, key: string, input: Parameters<Brain["ask"]>[1], handed: () => void = () => {}): Promise<void> {
     const chatId = m.chat.id;
     const threadId = m.message_thread_id;
-    const journalId = `${chatId}:${m.message_id}`;
-    this.markInflight(journalId, { chatId, threadId, text: input.text });
-    try {
-      await this.converseInner(m, key, input, handed);
-    } finally {
-      this.markInflight(journalId);
-    }
+    await this.converseInner(m, key, input, handed);
   }
 
   private async converseInner(m: TgMessage, key: string, input: Parameters<Brain["ask"]>[1], handed: () => void): Promise<void> {
@@ -264,6 +265,7 @@ export class TelegramChannel {
       return;
     }
     clearInterval(typing);
+    if (result.aborted && this.abort.signal.aborted) return; // shutting down: the restart notice covers it
     if (result.steered) {
       await this.api.call("setMessageReaction", { chat_id: chatId, message_id: m.message_id, reaction: [{ type: "emoji", emoji: "👀" }] }, { retries: 0 }).catch(() => {});
       return;
@@ -467,12 +469,14 @@ export class TelegramChannel {
         return choice === "yes" ? "Approved" : "Denied";
       });
     }
-    // Shown exactly, escaped, never truncated: a command too long to read in chat is not approvable in chat.
-    if (command.length > 3_500) {
-      await this.api.sendMessage(chatId, `Refused without asking: a ${reason} command of ${command.length} characters is too long to review here.`).catch(() => {});
+    // Shown exactly, escaped, with invisible and direction-changing characters made visible; never truncated:
+    // a command too long to read in chat is not approvable in chat.
+    const visible = command.replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+    const html = `<b>Approve?</b> ${escapeHtml(reason)}\n<pre>${escapeHtml(visible)}</pre>`;
+    if (html.length > 4_000) {
+      await this.api.sendMessage(chatId, `Refused without asking: a ${reason} request of ${command.length} characters is too long to review here.`).catch(() => {});
       return "denied";
     }
-    const html = `<b>Approve?</b> ${escapeHtml(reason)}\n<pre>${escapeHtml(command)}</pre>`;
     const msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
     const answer = await new Promise<"approved" | "denied" | "timeout">((resolve) => {
       const timer = setTimeout(() => { this.approvals.delete(id); resolve("timeout"); }, 300_000);

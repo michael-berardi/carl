@@ -132,6 +132,7 @@ export function mountPortal(api: ApiServer, gw: Gateway): void {
     const [, , , id, action] = url.pathname.split("/");
     if (action === "remove") return json(res, 200, { removed: scheduler.remove(id) });
     if (action === "run") {
+      scheduler.get(id); // 404 for an unknown id before anything starts
       void scheduler.runNow(id).catch((e) => gw.log.error("schedule run failed", { id, error: (e as Error).message }));
       return json(res, 202, { started: true });
     }

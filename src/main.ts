@@ -1,5 +1,5 @@
 // carl <command>: gateway | init | status | doctor | ask | send | reflect | schedules
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { Brain } from "./brain.ts";
@@ -28,6 +28,7 @@ const HELP = `carl ${VERSION}: the minimal bot gateway
   carl reflect                      run the individuation pass once and print it
   carl schedules                    list schedules
   carl prompt [--full]              the system prompt and tools a new conversation gets, with sizes
+  carl app [--install]              open the web app in its own window; --install adds Carl.app (macOS)
 
 Environment: CARL_HOME (default ~/.carl).`;
 
@@ -62,6 +63,8 @@ async function main(argv: string[]): Promise<number> {
       return schedules();
     case "prompt":
       return prompt(rest);
+    case "app":
+      return app(rest);
   }
   console.error(`carl: unknown command "${cmd}"\n\n${HELP}`);
   return 64;
@@ -337,6 +340,46 @@ async function prompt(args: string[]): Promise<number> {
   console.log(`fixed overhead per call: ~${Math.round((systemPrompt.length + toolChars) / 4).toLocaleString()} tokens`);
   await brain.shutdown();
   return 0;
+}
+
+/** The web app as a desktop window: Chrome's app mode when present, else the default browser. */
+async function app(args: string[]): Promise<number> {
+  const cfg = loadConfig();
+  const host = cfg.api.host === "0.0.0.0" ? "127.0.0.1" : cfg.api.host;
+  const url = `http://${host}:${cfg.api.port}/`;
+  if (args.includes("--install")) {
+    if (process.platform !== "darwin") {
+      console.error("carl app --install creates a macOS app; elsewhere, open the web app and use the browser's Install menu.");
+      return 64;
+    }
+    const self = realpathSync(process.argv[1]).replace(/src\/main\.ts$/, "bin/carl");
+    const dir = join(process.env.HOME ?? "", "Applications", "Carl.app", "Contents");
+    mkdirSync(join(dir, "MacOS"), { recursive: true });
+    writeFileSync(join(dir, "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Carl</string><key>CFBundleIdentifier</key><string>dev.carl.app</string>
+<key>CFBundleExecutable</key><string>Carl</string><key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>${VERSION}</string><key>LSUIElement</key><true/>
+</dict></plist>
+`);
+    const launcher = join(dir, "MacOS", "Carl");
+    writeFileSync(launcher, `#!/bin/zsh\nexport PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n${process.env.CARL_HOME ? `export CARL_HOME=${JSON.stringify(process.env.CARL_HOME)}\n` : ""}exec ${JSON.stringify(self)} app\n`, { mode: 0o755 });
+    console.log(`Installed ${join(process.env.HOME ?? "", "Applications", "Carl.app")}. It opens ${url}; the gateway must be running.`);
+    return 0;
+  }
+  const up = await fetch(url, { signal: AbortSignal.timeout(3_000) }).then((r) => r.ok).catch(() => false);
+  if (!up) {
+    console.error(`Carl is not answering at ${url}. Start it with \`carl gateway\` (or check api.enabled and api.port in carl.json).`);
+    return 69;
+  }
+  const chrome = ["/Applications/Google Chrome.app", join(process.env.HOME ?? "", "Applications", "Google Chrome.app")].find((p) => existsSync(p));
+  const [cmd, cmdArgs] =
+    process.platform === "darwin"
+      ? chrome ? ["open", ["-na", chrome, "--args", `--app=${url}`]] : ["open", [url]]
+      : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
+  const r = spawnSync(cmd as string, cmdArgs as string[], { stdio: "inherit" });
+  return r.status ?? 1;
 }
 
 function schedules(): number {

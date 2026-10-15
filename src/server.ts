@@ -36,6 +36,12 @@ export class ApiServer {
     this.route("POST", /^\/v1\/chat\/completions$/, (q, res, _u, body) => this.chat(q, res, body));
   }
 
+  /** Routes that authenticate themselves (signed webhooks): they get the raw body and whether the key was valid. */
+  private readonly publicRoutes: { method: string; pattern: RegExp; handler: (req: IncomingMessage, res: ServerResponse, url: URL, raw: Buffer, authorized: boolean) => Promise<void> | void }[] = [];
+  publicRoute(method: string, pattern: RegExp, handler: (req: IncomingMessage, res: ServerResponse, url: URL, raw: Buffer, authorized: boolean) => Promise<void> | void): void {
+    this.publicRoutes.push({ method, pattern, handler });
+  }
+
   route(method: string, pattern: RegExp, handler: Handler): void {
     this.routes.push({ method, pattern, handler });
   }
@@ -81,6 +87,8 @@ export class ApiServer {
           return void res.end(asset.body);
         }
       }
+      const open = this.publicRoutes.find((r) => r.method === req.method && r.pattern.test(url.pathname));
+      if (open) return void (await open.handler(req, res, url, await readRaw(req), this.authorized(req)));
       if (!this.authorized(req)) return json(res, 401, { error: { message: "missing or wrong bearer key", type: "unauthorized" } });
       const route = this.routes.find((r) => r.method === req.method && r.pattern.test(url.pathname));
       if (!route) return json(res, 404, { error: { message: `no route ${req.method} ${url.pathname}`, type: "not_found" } });
@@ -115,11 +123,13 @@ export class ApiServer {
       const chunk = (delta: Record<string, unknown>, finish: string | null = null) =>
         res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: this.cfg.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
       chunk({ role: "assistant" });
-      // A client that hangs up stops the run instead of leaving tools running for nobody.
-      res.on("close", () => { if (!res.writableEnded) void this.brain.stop(key); });
+      // A client that hangs up stops its own run (never another caller's) instead of leaving tools running for nobody.
+      let myRun: number | undefined;
+      res.on("close", () => { if (!res.writableEnded && myRun !== undefined) void this.brain.stop(key, myRun); });
       let messages = 0;
       try {
         const result = await this.brain.ask(key, { text, source: "api" }, {
+          onRunStart: (id) => { myRun = id; },
           onMessageStart: () => {
             if (messages++ > 0 && sent > 0) chunk({ content: "\n\n" });
             sent = 0;
@@ -138,7 +148,9 @@ export class ApiServer {
       res.end();
       return;
     }
-    const result = await this.brain.ask(key, { text, source: "api" });
+    let myRun: number | undefined;
+    res.on("close", () => { if (!res.writableEnded && myRun !== undefined) void this.brain.stop(key, myRun); });
+    const result = await this.brain.ask(key, { text, source: "api" }, { onRunStart: (id) => { myRun = id; } });
     json(res, result.ok ? 200 : 502, {
       id,
       object: "chat.completion",
@@ -160,6 +172,24 @@ export function json(res: ServerResponse, status: number, body: unknown): void {
   const data = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(data) });
   res.end(data);
+}
+
+function readRaw(req: IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const parts: Buffer[] = [];
+    req.on("data", (b: Buffer) => {
+      size += b.length;
+      if (size > MAX_BODY) {
+        reject(Object.assign(new Error("request body too large"), { status: 413 }));
+        req.destroy();
+        return;
+      }
+      parts.push(b);
+    });
+    req.on("end", () => resolve(Buffer.concat(parts)));
+    req.on("error", reject);
+  });
 }
 
 function readBody(req: IncomingMessage): Promise<any> {
