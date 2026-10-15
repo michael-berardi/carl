@@ -52,7 +52,7 @@ export class Gateway {
         await this.send(job.deliver, `**${job.name}**\n\n${text}`);
       },
       // Command jobs run under the shell sandbox too: the scripts and tools they call are ones the agent can change.
-      commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg) }),
+      commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg), cwd: cfg.workspace }),
     });
     this.brain = new Brain(cfg, this.psyche, this.log, () => carlTools(this.psyche, this.scheduler, outbox), { shared: true });
   }

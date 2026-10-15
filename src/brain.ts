@@ -243,6 +243,8 @@ export class Brain extends EventEmitter {
     const uc = findUltraCompress(opEnv);
     if (uc) process.env.ULTRACOMPRESS_BIN = uc; // the UltraCompress adapter's first candidate: no second lookup
     process.env.ULTRACOMPRESS_STATE_ROOT = join(this.cfg.home, "state", "ultracompress");
+    process.env.ULTRACOMPRESS_SESSION_ROOT = join(this.cfg.home, "sessions");
+    mkdirSync(process.env.ULTRACOMPRESS_SESSION_ROOT, { recursive: true, mode: 0o700 });
     const ut = this.cfg.ultraterm?.overseerBin;
     this.trusted = adoptTrustedPath(join(this.stateDir, "bin"),
       { node: process.execPath, claude: this.claudeBin, ultracompress: uc, tmux: undefined, git: undefined }, ut ? [dirname(ut)] : []);
@@ -374,7 +376,7 @@ export class Brain extends EventEmitter {
         .map((t: any) => ({ name: t.name, chars: JSON.stringify({ n: t.name, d: t.description, p: t.parameters }).length }));
       return { systemPrompt: convo.session.systemPrompt, tools };
     } finally {
-      convo.session.dispose();
+      await this.closeSession(convo.session);
     }
   }
 
@@ -650,7 +652,7 @@ export class Brain extends EventEmitter {
     const convo = this.conversations.get(key);
     if (convo) {
       if (convo.busy) await convo.session.abort().catch(() => {});
-      convo.session.dispose();
+      await this.closeSession(convo.session);
       this.conversations.delete(key);
     }
     const pending = this.createConversation(key, convo?.source ?? "cli", true).finally(() => this.creating.delete(key));
@@ -722,7 +724,7 @@ export class Brain extends EventEmitter {
   private disposeIdle(): void {
     for (const [key, convo] of this.conversations) {
       if (!convo.busy && Date.now() - convo.lastActivity > Math.max(IDLE_DISPOSE_MS, this.cfg.idleResetMinutes * 60_000 + 60_000)) {
-        convo.session.dispose();
+        void this.closeSession(convo.session);
         this.conversations.delete(key);
         this.log.info("conversation closed (idle)", { key });
       }
@@ -730,6 +732,20 @@ export class Brain extends EventEmitter {
   }
 
   /** Wait for running turns (bounded), then dispose everything. */
+  /**
+   * Dispose a session the way Pi's own runtime does: extensions get session_shutdown first, so MCP servers and
+   * other extension resources are closed instead of outliving the conversation.
+   */
+  private async closeSession(session: AgentSession): Promise<void> {
+    try {
+      const runner = (session as any).extensionRunner;
+      if (runner?.hasHandlers?.("session_shutdown")) await runner.emit({ type: "session_shutdown", reason: "quit" });
+    } catch (e) {
+      this.log.warn("extension shutdown failed", { error: (e as Error).message });
+    }
+    session.dispose();
+  }
+
   async shutdown(timeoutMs = 5_000): Promise<void> {
     if (this.sweeper) clearInterval(this.sweeper);
     const running = [...this.conversations.values()].filter((c) => c.pending).map((c) => c.pending!);
@@ -739,7 +755,7 @@ export class Brain extends EventEmitter {
     }
     for (const convo of this.conversations.values()) {
       if (convo.busy) await convo.session.abort().catch(() => {});
-      convo.session.dispose();
+      await this.closeSession(convo.session);
     }
     this.conversations.clear();
     if (!this.opts.shared) rmSync(this.stateDir, { recursive: true, force: true });
@@ -777,7 +793,7 @@ export class Brain extends EventEmitter {
       if (last?.stopReason === "error") throw new Error(last.errorMessage ?? "model error");
       return last ? assistantText(last) : "";
     } finally {
-      session.dispose();
+      await this.closeSession(session);
     }
   }
 }

@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 export const recallProperties = {
@@ -33,6 +34,14 @@ export function recallArgs(params: Record<string, unknown>, session: RecallSessi
   const selectedFile = params.sessionFile === undefined ? currentFile : params.sessionFile;
   if (typeof selectedFile !== "string" || !selectedFile.trim()) throw new Error("No session file available; supply an explicit sessionFile");
   if (selectedFile.length > 4096) throw new Error("sessionFile is too long");
+  // Carl: the engine runs outside the sandbox, so it only ever reads Carl's own session transcripts.
+  const root = process.env.ULTRACOMPRESS_SESSION_ROOT;
+  if (root) {
+    let real: string;
+    try { real = realpathSync(selectedFile); } catch { throw new Error(`sessionFile not found: ${selectedFile}`); }
+    const base = realpathSync(root);
+    if (!real.startsWith(base + "/") || !real.endsWith(".jsonl")) throw new Error(`sessionFile must be a session transcript under ${root}`);
+  }
   const args = ["recall", "--session", selectedFile, "--query", params.query, "--scope", scope];
   // A resumed/tree-navigated session may have a different tip from the last
   // record on disk. Null is an empty branch, NOT permission to use another tip.

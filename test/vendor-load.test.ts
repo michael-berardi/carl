@@ -13,3 +13,20 @@ test("the vendored UltraCompress sources parse (a syntax error silently disables
     assert.deepEqual(errors, [], f);
   }
 });
+
+test("UltraCompress recall reads only Carl's own session transcripts (the engine runs outside the sandbox)", async (t) => {
+  const { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { recallArgs } = await import("../vendor/ultracompress/src/recall.ts");
+  const root = mkdtempSync(join(tmpdir(), "carl-recall-"));
+  t.after(() => { rmSync(root, { recursive: true, force: true }); delete process.env.ULTRACOMPRESS_SESSION_ROOT; });
+  mkdirSync(join(root, "sessions", "k"), { recursive: true });
+  writeFileSync(join(root, "sessions", "k", "s.jsonl"), "{}\n");
+  writeFileSync(join(root, ".env"), "TOKEN=secret\n");
+  symlinkSync(join(root, ".env"), join(root, "sessions", "k", "evil.jsonl"));
+  process.env.ULTRACOMPRESS_SESSION_ROOT = join(root, "sessions");
+  const session = { getSessionFile: () => join(root, "sessions", "k", "s.jsonl"), getLeafId: () => null };
+  assert.ok(recallArgs({ query: "x" }, session).includes(join(root, "sessions", "k", "s.jsonl")));
+  assert.throws(() => recallArgs({ query: "x", sessionFile: join(root, ".env") }, session), /session transcript under/);
+  assert.throws(() => recallArgs({ query: "x", sessionFile: join(root, "sessions", "k", "evil.jsonl") }, session), /session transcript under/, "a link out of the folder is refused");
+});
