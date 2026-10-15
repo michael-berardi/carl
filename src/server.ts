@@ -88,7 +88,11 @@ export class ApiServer {
         }
       }
       const open = this.publicRoutes.find((r) => r.method === req.method && r.pattern.test(url.pathname));
-      if (open) return void (await open.handler(req, res, url, await readRaw(req), this.authorized(req)));
+      if (open) {
+        const declared = Number(req.headers["content-length"] ?? 0);
+        if (declared > 64_000) return json(res, 413, { error: { message: "payload over 64000 bytes" } });
+        return void (await open.handler(req, res, url, await readRaw(req, 64_000), this.authorized(req)));
+      }
       if (!this.authorized(req)) return json(res, 401, { error: { message: "missing or wrong bearer key", type: "unauthorized" } });
       const route = this.routes.find((r) => r.method === req.method && r.pattern.test(url.pathname));
       if (!route) return json(res, 404, { error: { message: `no route ${req.method} ${url.pathname}`, type: "not_found" } });
@@ -108,8 +112,10 @@ export class ApiServer {
    * Conversation: header X-Carl-Conversation, else body.user, else "api:default".
    */
   private async chat(req: IncomingMessage, res: ServerResponse, body: any): Promise<void> {
-    const messages = Array.isArray(body?.messages) ? body.messages : [];
+    const messages = Array.isArray(body?.messages) ? body.messages.filter((m: any) => m && typeof m === "object") : [];
     const lastUser = [...messages].reverse().find((m: any) => m.role === "user");
+    if (lastUser && typeof lastUser.content !== "string" && !Array.isArray(lastUser.content))
+      throw Object.assign(new Error("message content must be a string or an array of parts"), { status: 400 });
     if (!lastUser) throw Object.assign(new Error("messages must contain a user message"), { status: 400 });
     const text = typeof lastUser.content === "string" ? lastUser.content : (lastUser.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
     const conversation = String(req.headers["x-carl-conversation"] ?? body.user ?? "default");
@@ -174,13 +180,13 @@ export function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(data);
 }
 
-function readRaw(req: IncomingMessage): Promise<Buffer> {
+function readRaw(req: IncomingMessage, max = MAX_BODY): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     let size = 0;
     const parts: Buffer[] = [];
     req.on("data", (b: Buffer) => {
       size += b.length;
-      if (size > MAX_BODY) {
+      if (size > max) {
         reject(Object.assign(new Error("request body too large"), { status: 413 }));
         req.destroy();
         return;

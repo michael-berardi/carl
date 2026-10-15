@@ -364,7 +364,8 @@ async function app(args: string[]): Promise<number> {
 </dict></plist>
 `);
     const launcher = join(dir, "MacOS", "Carl");
-    writeFileSync(launcher, `#!/bin/zsh\nexport PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n${process.env.CARL_HOME ? `export CARL_HOME=${JSON.stringify(process.env.CARL_HOME)}\n` : ""}exec ${JSON.stringify(self)} app\n`, { mode: 0o755 });
+    const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+    writeFileSync(launcher, `#!/bin/zsh\nexport PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n${process.env.CARL_HOME ? `export CARL_HOME=${sq(process.env.CARL_HOME)}\n` : ""}exec ${sq(self)} app\n`, { mode: 0o755 });
     console.log(`Installed ${join(process.env.HOME ?? "", "Applications", "Carl.app")}. It opens ${url}; the gateway must be running.`);
     return 0;
   }

@@ -82,6 +82,7 @@ export class TelegramChannel {
     this.abort.abort();
     // Give handlers a moment to deliver replies already produced; the in-flight journal covers the rest.
     if (this.handlers.size) await Promise.race([Promise.allSettled([...this.handlers]), new Promise((r) => setTimeout(r, 2_500))]);
+    this.graceOver = true; // handlers that finish from here on were cut short by the shutdown
     if (this.outboxTimer) clearTimeout(this.outboxTimer);
     await this.loop?.catch(() => {});
     this.setStatus("stopped");
@@ -139,6 +140,7 @@ export class TelegramChannel {
 
   private readonly chains = new Map<string, Promise<void>>();
   private readonly handlers = new Set<Promise<void>>();
+  private graceOver = false;
 
   /** Messages of one chat are prepared (downloads, speech-to-text) and handed to the brain in arrival order. */
   private enqueueMessage(m: TgMessage): void {
@@ -155,7 +157,7 @@ export class TelegramChannel {
       void handler.finally(() => {
         this.handlers.delete(handler);
         done();
-        if (!this.abort.signal.aborted) this.markInflight(journalId); // a shutdown keeps it for the restart notice
+        if (!this.graceOver) this.markInflight(journalId); // cut short by a shutdown: kept for the restart notice
       });
       // The next message of this chat waits until this one reached the brain (or 5 s), not until it finished,
       // so a follow-up can still steer the running turn.

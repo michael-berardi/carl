@@ -38,22 +38,50 @@ export function writablePaths(cfg: CarlConfig): string[] {
 }
 
 export function secretFiles(cfg: CarlConfig): string[] {
-  return [join(cfg.home, ".env"), join(cfg.piAgentDir, "auth.json"), join(cfg.home, "pi", "mcp-auth.json"), ...cfg.envFiles];
+  return [
+    join(cfg.home, ".env"), join(cfg.piAgentDir, "auth.json"), join(cfg.home, "pi", "mcp-auth.json"), ...cfg.envFiles,
+    ...(cfg.ultraterm ? [join(cfg.ultraterm.home, ".env"), join(cfg.ultraterm.home, "auth.json")] : []),
+  ];
+}
+
+/** Ancestors of a path up to (not including) the home directory: renaming any of them would expose the file. */
+function ancestors(p: string): string[] {
+  const home = canonical(homedir());
+  const out: string[] = [];
+  for (let d = dirname(canonical(p)); d !== home && d !== "/" && d.startsWith(home + "/"); d = dirname(d)) out.push(d);
+  return out;
+}
+
+/** Programs that hand work to processes outside the sandbox (apps, launchd, cron). */
+export const NO_EXEC = ["/usr/bin/osascript", "/usr/bin/open", "/bin/launchctl", "/usr/bin/crontab", "/usr/bin/at", "/usr/bin/batch",
+  "/usr/bin/automator", "/usr/bin/shortcuts", "/usr/bin/sudo", "/usr/bin/su", "/usr/bin/login"];
+
+export interface ProfileInput {
+  /** Files and directories Carl executes or loads (written only by the operator). */
+  controlPlane: string[];
+  /** Loopback ports of Carl's own API. */
+  apiPorts: number[];
 }
 
 /** Seatbelt profile text. Later rules win, so the working areas are re-allowed after CARL_HOME is denied. */
-export function buildProfile(cfg: CarlConfig, extraProtected: string[] = []): string {
+export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPlane: [], apiPorts: [] }): string {
+  const secrets = secretFiles(cfg);
+  const startup = [".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".profile"].map((f) => join(homedir(), f));
   const lines = [
     "(version 1)",
     "(allow default)",
     `(deny file-write* (subpath ${sbString(cfg.home)}))`,
-    ...extraProtected.map((p) => `(deny file-write* (subpath ${sbString(p)}))`),
     `(allow file-write* ${writablePaths(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
-    // The workspace may hold code, but not code that Carl itself would load as an extension.
-    `(deny file-write* (subpath ${sbString(join(cfg.workspace, ".pi"))}))`,
-    `(deny file-read* ${secretFiles(cfg).map((p) => `(literal ${sbString(p)})`).join(" ")})`,
-    // Nothing persists to run later outside the sandbox.
+    // Code Carl itself runs or loads, wherever it lives; the workspace never holds Pi extensions.
+    `(deny file-write* (subpath ${sbString(join(cfg.workspace, ".pi"))}) ${input.controlPlane.map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
+    `(deny file-write* ${startup.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
     `(deny file-write* (subpath ${sbString(join(homedir(), "Library", "LaunchAgents"))}) (subpath "/Library/LaunchAgents") (subpath "/Library/LaunchDaemons"))`,
+    // Secrets: unreadable, and neither they nor any folder above them can be moved somewhere readable.
+    `(deny file-read* ${secrets.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
+    `(deny file-write* ${[...secrets, ...secrets.flatMap(ancestors)].map((p) => `(literal ${sbString(p)})`).join(" ")})`,
+    `(deny process-exec ${NO_EXEC.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
+    "(deny appleevent-send)",
+    ...(input.apiPorts.length ? [`(deny network-outbound ${input.apiPorts.map((p) => `(remote ip "*:${p}")`).join(" ")})`] : []),
   ];
   return lines.join("\n") + "\n";
 }
@@ -81,9 +109,17 @@ export function sandboxSpawnHook(cfg: CarlConfig, profilePath: string | undefine
 }
 
 /** Write the profile into CARL_HOME/state (itself write-protected from the agent) and return its path. */
-export function installProfile(cfg: CarlConfig, extraProtected: string[] = []): string | undefined {
+export function installProfile(cfg: CarlConfig, input: ProfileInput): string | undefined {
   if (!sandboxAvailable()) return undefined;
   const path = join(cfg.home, "state", "sandbox.sb");
-  writeFileSync(path, buildProfile(cfg, extraProtected), { mode: 0o600 });
+  writeFileSync(path, buildProfile(cfg, input), { mode: 0o600 });
   return path;
+}
+
+/** Wrap an MCP stdio server so it runs under the same profile with Carl's secrets blanked out. */
+export function sandboxMcpServer(cfg: CarlConfig, profile: string | undefined, server: { command: string; args?: string[]; env?: Record<string, string> }) {
+  const env = { ...(server.env ?? {}) };
+  for (const n of secretEnvNames(cfg)) env[n] = "";
+  if (!profile) return { ...server, env };
+  return { ...server, command: SANDBOX_EXEC, args: ["-f", profile, server.command, ...(server.args ?? [])], env };
 }
