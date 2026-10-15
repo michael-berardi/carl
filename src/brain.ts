@@ -26,7 +26,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { CarlConfig } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
-import { executableChain, installProfile, NO_EXEC, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
+import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPathDirs, readSandboxed, SECRET_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { claudeCodeProviderConfig, PROVIDER as CLAUDE_PROVIDER } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
@@ -143,23 +143,41 @@ export class Brain extends EventEmitter {
     const uc = findUltraCompress();
     if (uc) add(realOf(uc));
     for (const p of this.cfg.extensions) if (!p.includes(":")) add(p);
+    for (const p of this.cfg.skills) add(p); // skills reach the prompt
     if (this.cfg.ultraterm) {
       // UltraTerm's helpers (ut-overseer, ut-provider-accounts) run outside the sandbox: their whole folder is protected.
       add(dirname(this.cfg.ultraterm.overseerBin));
       add(dirname(realOf(this.cfg.ultraterm.overseerBin)));
+      // ...and the Python runtime they run on.
+      const runtime = join(dirname(dirname(this.cfg.ultraterm.overseerBin)), "runtime");
+      add(runtime);
+      add(realOf(runtime));
       for (const f of ["gateway_state.json", "state.db", "state.db-wal", "state.db-shm"]) add(join(this.cfg.ultraterm.home, f));
     }
     add(join(homedir(), "Applications", "Carl.app"));
     // Context files are protected too, except the agent's own notes inside its working areas.
     const free = writablePaths(this.cfg).map((w) => w.replace(/\/+$/, "") + "/");
     for (const p of this.cfg.contextFiles) if (!free.some((w) => (p + "/").startsWith(w))) add(p);
-    return [...out];
+    // A protected folder that holds a working area would lock the agent out of it (denies come after the allows):
+    // such folders are left out, and the programs in them are still pinned one by one (pinnedPaths).
+    return [...out].filter((p) => {
+      const inside = free.some((w) => w.startsWith(p.replace(/\/+$/, "") + "/"));
+      if (inside) this.log.warn("not protecting a folder that contains a working area; its programs are pinned individually", { path: p });
+      return !inside;
+    });
   }
 
-  /** Program paths Carl starts outside the sandbox: they and every folder above them cannot be replaced. */
+  /**
+   * Program paths Carl starts outside the sandbox: they, every link on the way and every folder above them cannot be
+   * replaced. Also `node` in each folder of the operator's PATH, which Carl's launcher resolves at the next start.
+   */
   private pinnedPaths(): string[] {
-    const bins = [this.claudeBin, findUltraCompress(), this.cfg.ultraterm?.overseerBin, process.execPath];
-    return [...new Set(bins.filter((b): b is string => !!b).flatMap(executableChain))];
+    const ut = this.cfg.ultraterm?.overseerBin;
+    const bins = [...Object.values(this.trusted), ut, ut && join(dirname(ut), "ut-provider-accounts"), process.argv[1]];
+    return [...new Set([
+      ...bins.filter((b): b is string => !!b).flatMap(executableChain),
+      ...operatorPathDirs().map((d) => join(d, "node")),
+    ])];
   }
 
   /** Path rules for the file tools: Carl's control plane (CARL_HOME minus working areas, plus what it loads) and secrets. */
@@ -179,7 +197,8 @@ export class Brain extends EventEmitter {
     const cwd = this.cfg.workspace;
     const make: Record<string, () => ToolDefinition> = {
       read: () => createReadToolDefinition(cwd, { operations: guardedReadOps(this.guardRules()) }) as ToolDefinition,
-      bash: () => createBashToolDefinition(cwd, { spawnHook: sandboxSpawnHook(this.cfg, this.sandboxProfile) }) as ToolDefinition,
+      // A fixed outer shell: a login shell like zsh would source startup files outside the sandbox first.
+      bash: () => createBashToolDefinition(cwd, { shellPath: "/bin/bash", spawnHook: sandboxSpawnHook(this.cfg, this.sandboxProfile) }) as ToolDefinition,
       edit: () => createEditToolDefinition(cwd, { operations: guardedFileOps(this.guardRules()) }) as ToolDefinition,
       write: () => createWriteToolDefinition(cwd, { operations: guardedFileOps(this.guardRules()) }) as ToolDefinition,
     };
@@ -190,6 +209,7 @@ export class Brain extends EventEmitter {
   /** Seatbelt profile for shell commands (macOS); undefined where the kernel sandbox is unavailable. */
   private sandboxProfile?: string;
   private claudeBin?: string;
+  private trusted: Record<string, string> = {};
   /** The shell sandbox profile, for helpers that run agent-influenced programs (undefined without Seatbelt). */
   get shellSandbox(): string | undefined { return this.sandboxProfile; }
 
@@ -205,10 +225,17 @@ export class Brain extends EventEmitter {
     // MCP servers) then stay inside it instead of wherever Carl was launched.
     mkdirSync(this.cfg.workspace, { recursive: true, mode: 0o700 });
     process.chdir(this.cfg.workspace);
-    // The Claude CLI is looked up once: later PATH changes (or a planted `claude`) are never picked up.
+    // Programs Carl (or its unsandboxed helpers) start by name are resolved once, now, from the operator's PATH;
+    // from here on those children see only a private bin folder of links to them plus system folders, so a program
+    // the agent plants later in a user-writable folder (~/.local/bin, Homebrew) is never picked up.
     this.claudeBin = this.cfg.claude.enabled ? resolveClaude(this.cfg.claude.command, process.env) : undefined;
-    for (const n of secretEnvNames(this.cfg)) if (process.env[n])
-      this.log.warn("a secret is in Carl's process environment, where any program of this user can read it; move it to CARL_HOME/.env", { name: n });
+    const uc = findUltraCompress();
+    if (uc) process.env.ULTRACOMPRESS_BIN = uc; // the UltraCompress adapter's first candidate: no second lookup
+    const ut = this.cfg.ultraterm?.overseerBin;
+    this.trusted = adoptTrustedPath(join(this.cfg.home, "state", "bin"),
+      { node: process.execPath, claude: this.claudeBin, ultracompress: uc, tmux: undefined, git: undefined }, ut ? [dirname(ut)] : []);
+    const leaked = Object.keys(process.env).filter((n) => secretEnvNames(this.cfg).includes(n) || SECRET_NAME.test(n));
+    if (leaked.length) this.log.warn("credentials are in Carl's process environment; on macOS any program of this user can read another's startup environment, so keep them in files (CARL_HOME/.env) instead", { names: leaked.join(",") });
     this.sandboxProfile = installProfile(this.cfg, { controlPlane: this.controlPlane(), pinned: this.pinnedPaths(), apiPorts: this.cfg.api.enabled ? [this.cfg.api.port] : [] });
     if (this.sandboxProfile) this.log.info("shell sandbox: Seatbelt", { profile: this.sandboxProfile });
     else this.log.warn("shell sandbox unavailable on this platform: the pattern guard and secret scrubbing still apply, but Carl's own files are not kernel-protected");
@@ -313,7 +340,14 @@ export class Brain extends EventEmitter {
         this.log.warn("context file missing", { path });
         continue;
       }
-      out.push({ path, content: readFileSync(path, "utf8") });
+      // Notes in the agent's own areas are read the way the agent would read them (inside the sandbox), so a
+      // link planted there cannot pull a secret into the system prompt.
+      const free = writablePaths(this.cfg).some((w) => (path + "/").startsWith(w.replace(/\/+$/, "") + "/"));
+      try {
+        out.push({ path, content: free && this.sandboxProfile ? readSandboxed(this.sandboxProfile, path) : readFileSync(path, "utf8") });
+      } catch (e) {
+        this.log.warn("context file not loaded", { path, error: (e as Error).message });
+      }
     }
     return out;
   }

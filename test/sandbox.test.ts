@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "../src/config.ts";
-import { executableChain, installProfile, sandboxAvailable, sandboxSpawnHook } from "../src/sandbox.ts";
+import { executableChain, installProfile, readSandboxed, sandboxAvailable, sandboxSpawnHook } from "../src/sandbox.ts";
 import { guardedFileOps, guardedReadOps } from "../src/guard.ts";
 
 const base = join(tmpdir(), "carl-test-sandbox");
@@ -46,6 +46,8 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   process.env.TELEGRAM_BOT_TOKEN = "1:secret-from-env";
   process.env.STRIPE_TEST_KEY = "sk_must_not_leak";
   process.env.CARL_TEST_PASS = "passed-through";
+  process.env.HOMEBREW_GITHUB_API_TOKEN = "ghp_must_not_leak";
+  process.env.HTTPS_PROXY = "http://proxy.test:3128";
   const bash = createBashToolDefinition(cfg.workspace, { spawnHook: sandboxSpawnHook(cfg, profile), exposeSessionEnvironment: false });
   const run = async (command: string) => {
     const r: any = await bash.execute("t", { command } as any, undefined, undefined, {} as any).catch((e: Error) => ({ content: [{ type: "text", text: e.message }] }));
@@ -63,11 +65,13 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
     `ln ${join(home, "carl.json")} ${join(ws, "config-link")}`,
     `mv ${join(root, "secrets")} ${join(ws, "secrets-moved")}`,
     `cat ${join(root, "secrets", "extra.env")}`,
+    `ln ${join(root, "secrets", "extra.env")} ${join(ws, "extra-link")}`,
+    `cp -c ${join(root, "secrets", "extra.env")} ${join(ws, "extra-clone")}; cat ${join(ws, "extra-clone")}`,
     `echo pwned >> ${join(outside, "ext.ts")}`,
     `osascript -e 'return 1'`,
     `curl -s -m 3 http://127.0.0.1:18765/ ; echo curl=$?`,
     `echo fine > ${join(ws, "ok.txt")} && echo wrote-workspace`,
-    `echo "KEY=[$STRIPE_TEST_KEY] PASS=[$CARL_TEST_PASS]"`,
+    `echo "KEY=[$STRIPE_TEST_KEY] PASS=[$CARL_TEST_PASS] BREW=[$HOMEBREW_GITHUB_API_TOKEN] PROXY=[$HTTPS_PROXY]"`,
     `mv ${ws} ${join(root, "ws-moved")}`,
     `mv ${join(root, "bin")} ${join(root, "bin-moved")}`,
     `ln -sf /bin/sh ${join(root, "bin", "tool")}`,
@@ -76,7 +80,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
     `/usr/bin/python3 ${join(root, "probe.py")}`,
   ].join(" ; "));
   api.close();
-  for (const k of ["TELEGRAM_BOT_TOKEN", "STRIPE_TEST_KEY", "CARL_TEST_PASS"]) delete process.env[k];
+  for (const k of ["TELEGRAM_BOT_TOKEN", "STRIPE_TEST_KEY", "CARL_TEST_PASS", "HOMEBREW_GITHUB_API_TOKEN", "HTTPS_PROXY"]) delete process.env[k];
   assert.equal(readFileSync(join(home, "carl.json"), "utf8").includes("hacked"), false, "carl.json must be unchanged");
   assert.doesNotMatch(out, /1:secret|2:secret/, "neither the .env files nor the env var may leak");
   assert.ok(!existsSync(join(ws, "config-link")), "control files cannot be hardlinked into the workspace");
@@ -89,7 +93,8 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   assert.doesNotMatch(out, /\bapi\b/, "Carl's own API port is unreachable from the shell");
   assert.match(out, /curl=7|curl=28/);
   assert.match(out, /wrote-workspace/);
-  assert.match(out, /KEY=\[\] PASS=\[passed-through\]/, "only allowlisted and shellEnv names reach the shell");
+  assert.match(out, /KEY=\[\] PASS=\[passed-through\] BREW=\[\] PROXY=\[http:\/\/proxy.test:3128\]/, "only allowlisted and shellEnv names reach the shell");
+  assert.ok(!existsSync(join(ws, "extra-link")), "a secret outside CARL_HOME cannot be hardlinked");
   assert.ok(existsSync(ws) && !existsSync(join(root, "ws-moved")), "a working area cannot be moved or replaced");
   assert.ok(lstatSync(join(root, "bin", "tool")).isSymbolicLink() && !existsSync(join(root, "bin-moved")), "a pinned program link and its folder stay put");
   assert.match(out, /wrote-beside-pinned/);
@@ -129,4 +134,11 @@ test("file tools: reads and writes run in the sandbox, so a swapped symlink gain
   await assert.rejects(ops.writeFile(join(ws, "env"), "x"), /not permitted/i);
   assert.equal(readFileSync(join(root, "vault.txt"), "utf8"), "VAULT=3:secret\n");
   assert.equal(typeof read.detectImageMimeType, "function", "images are still recognised");
+  // Carl's own reads of notes in the agent's areas (context files) go through the sandbox as well.
+  assert.throws(() => readSandboxed(profile, join(ws, "env")), /not permitted/i);
+  writeFileSync(join(ws, "MEMORY.md"), "notes\n");
+  assert.equal(readSandboxed(profile, join(ws, "MEMORY.md")), "notes\n");
+  // A device that never ends is cut off instead of filling Carl's memory.
+  await assert.rejects(read.readFile("/dev/zero"), /larger than/);
+  assert.equal(await read.detectImageMimeType!("/dev/zero"), null);
 });

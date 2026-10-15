@@ -109,10 +109,12 @@ Carl runs tools with your own permissions, because it does real work. Two layers
 **A kernel sandbox for everything the agent can influence (macOS).** Shell commands, MCP servers, the read, edit and write tools, speech-to-text and command schedules all run under one Seatbelt profile that:
 
 - denies writes anywhere in `CARL_HOME` except the agent's working areas (`workspace`, `memory`, `media`, `spill`), and to a `.pi` extension directory in the workspace; the working areas themselves cannot be moved or swapped for a link;
-- denies writes to everything Carl runs or loads outside the sandbox: its own code, the Node and Claude Code installs (and the links Carl starts them through), Pi's agent directory, extensions, context files, UltraTerm's helper folder, `Carl.app`, shell startup files and LaunchAgents;
+- denies writes to everything Carl runs or loads outside the sandbox: its own code, the Node and Claude Code installs (and the links Carl starts them through), Pi's agent directory, extensions, skills, context files, UltraTerm's helpers and their Python runtime, `Carl.app`, shell startup files and LaunchAgents;
 - denies reads of credential files (`.env`, configured env files, Pi's `auth.json`), and moving, renaming or hardlinking them or any folder above them;
 - blocks the routes that start work outside the sandbox: `osascript`, `open`, `launchctl`, `crontab`, `at`, `shortcuts` and `sudo`, Apple Events, LaunchServices, and connections to Carl's own API port;
 - passes only an allowlist of environment variables (`PATH`, `HOME`, locale, terminal and similar). Carl's secrets and any keys exported in your shell are dropped; add names the agent should see to `shellEnv`.
+
+Programs Carl itself starts outside the sandbox (Claude Code, UltraTerm's helpers, UltraCompress) are resolved once at startup and run with a `PATH` of folders the agent cannot write, so a program planted later in `~/.local/bin` or Homebrew is never picked up; notes in the agent's own areas that Carl loads into the prompt are read inside the sandbox.
 
 The profile starts from "allow" and denies these routes, so it is a boundary for Carl's own files and secrets, not a general jail: the agent can still read and change your other files, use the network, and talk to other running programs such as tmux. On macOS any program you run can read the startup environment of your other programs, so keep keys in files rather than exported shell variables; Carl warns at startup if one of its own secrets is in its environment. On Linux and Windows the environment allowlist still applies, and the missing kernel boundary is logged at startup.
 

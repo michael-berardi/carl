@@ -233,8 +233,9 @@ export class Scheduler {
 
 export function runCommand(command: string, timeoutMs: number, groups?: Set<number>, sandbox?: { wrap: (argv: string[]) => string[]; env: Record<string, string> }): Promise<string> {
   return new Promise((resolve, reject) => {
-    const argv = sandbox ? sandbox.wrap(["/bin/bash", "-lc", command]) : ["/bin/bash", "-lc", command];
-    const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], detached: true, ...(sandbox ? { env: sandbox.env } : {}) });
+    if (!sandbox) return reject(new Error("command schedules run only in the gateway, where they run inside the shell sandbox"));
+    const argv = sandbox.wrap(["/bin/bash", "-lc", command]);
+    const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], detached: true, env: sandbox.env });
     if (child.pid) groups?.add(child.pid);
     child.on("exit", () => child.pid && groups?.delete(child.pid));
     let out = "";
