@@ -239,6 +239,7 @@ export class Brain extends EventEmitter {
     this.claudeBin = this.cfg.claude.enabled ? resolveClaude(this.cfg.claude.command, opEnv) : undefined;
     const uc = findUltraCompress(opEnv);
     if (uc) process.env.ULTRACOMPRESS_BIN = uc; // the UltraCompress adapter's first candidate: no second lookup
+    process.env.ULTRACOMPRESS_STATE_ROOT = join(this.cfg.home, "state", "ultracompress");
     const ut = this.cfg.ultraterm?.overseerBin;
     this.trusted = adoptTrustedPath(join(this.stateDir, "bin"),
       { node: process.execPath, claude: this.claudeBin, ultracompress: uc, tmux: undefined, git: undefined }, ut ? [dirname(ut)] : []);

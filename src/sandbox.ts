@@ -42,12 +42,20 @@ export function writablePaths(cfg: CarlConfig): string[] {
   return [cfg.workspace, join(cfg.home, "memory"), join(cfg.home, "media"), join(cfg.home, "spill")];
 }
 
-/** Scratch space every tool expects: the per-user temp and cache folders, /tmp, devices and the npm cache. */
+/**
+ * Scratch space: devices and the agent's own temp and cache folders under spill/. The shared temp folders and
+ * caches (/tmp, the user temp dir, ~/.npm) stay closed: other programs read and run what is there.
+ */
 export function scratchPaths(): string[] {
-  const t = canonical(tmpdir());
-  const out = [t, "/private/tmp", "/private/var/tmp", "/dev", join(homedir(), ".npm")];
-  if (basename(t) === "T") out.push(join(dirname(t), "C")); // macOS: <user dir>/T is temp, <user dir>/C the cache
-  return out;
+  return ["/dev"];
+}
+
+/** The agent's own temp and cache folders (inside spill, so already writable), handed to tools through the env. */
+export function agentScratchEnv(cfg: CarlConfig): Record<string, string> {
+  const base = join(cfg.home, "spill");
+  const dirs = { TMPDIR: join(base, "tmp"), XDG_CACHE_HOME: join(base, "cache"), npm_config_cache: join(base, "cache", "npm"), PIP_CACHE_DIR: join(base, "cache", "pip") };
+  for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true, mode: 0o700 });
+  return dirs;
 }
 
 export function secretFiles(cfg: CarlConfig): string[] {
@@ -152,7 +160,7 @@ export function cleanEnv(cfg: CarlConfig, env: NodeJS.ProcessEnv = process.env, 
   // Names the operator chose to hand the agent may live in the env files rather than Carl's environment.
   for (const k of extra) if (out[k] === undefined && !secret.has(k)) { const v = secret_(cfg.home, k, cfg.envFiles); if (v !== undefined) out[k] = v; }
   out.PATH = operatorPath();
-  return { ...out, ...keep };
+  return { ...out, ...agentScratchEnv(cfg), ...keep };
 }
 
 /** Read a file Carl did not create safely: refuses a symlink at the last step and anything but a plain file. */
@@ -226,6 +234,8 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     "(deny signal)",
     "(allow signal (target same-sandbox))",
     `(deny network-outbound ${controlSockets(cfg).map((p) => `(remote unix-socket (subpath ${sbString(p)}))`).join(" ")})`,
+    // ...and their socket folders cannot be changed (a socket swapped for the agent's own would answer real clients).
+    `(deny file-write* ${controlSockets(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
     // LaunchServices starts apps (and their helpers) outside the sandbox.
     `(deny mach-lookup ${LAUNCH_SERVICES.map((n) => `(global-name "${n}")`).join(" ")})`,
     ...(input.apiPorts.length ? [`(deny network-outbound ${input.apiPorts.map((p) => `(remote ip "*:${p}")`).join(" ")})`] : []),

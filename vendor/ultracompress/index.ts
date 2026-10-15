@@ -14,6 +14,9 @@ import {
   type TransformResponse,
 } from "./src/transforms";
 import {
+
+// Carl: snapshots live where the agent cannot write (a planted link there would redirect Carl's own writes).
+const snapRoot = () => process.env.ULTRACOMPRESS_STATE_ROOT ?? process.cwd();
   buildCompactStdin,
   formatStatsLine,
   parseUltraCompressArgs,
@@ -220,7 +223,7 @@ export default function ultraCompressExtension(pi: ExtensionAPI): void {
     if (settings.snapshot.enabled) {
       try {
         const entries = ctx.sessionManager.getEntries() ?? [];
-        writeSnapEntries(process.cwd(), entries, ev.reason ?? "unknown", Date.now());
+        writeSnapEntries(snapRoot(), entries, ev.reason ?? "unknown", Date.now());
       } catch (error) {
         console.error("[ultracompress] snapshot failed:", error);
       }
@@ -310,7 +313,7 @@ export default function ultraCompressExtension(pi: ExtensionAPI): void {
         `policy: ${settings.policy} · override: ${settings.overrideDefaultCompaction} · smart-keep: ${settings.smartKeepTail}`,
         `snap: ${settings.snap.enabled ? "on" : "off"} (placement: ${settings.snap.placement})`,
         `transforms cached: ${transformCache.size}`,
-        `snapshots: ${listSnaps(process.cwd()).length} in .steak-pi/snaps`,
+        `snapshots: ${listSnaps(snapRoot()).length} in .steak-pi/snaps`,
       ];
       await ctx.ui.notify(lines.join("\n"), "info");
     },
@@ -319,7 +322,7 @@ export default function ultraCompressExtension(pi: ExtensionAPI): void {
   pi.registerCommand("snaps", {
     description: "List pre-compaction snapshots",
     handler: async (_args, ctx) => {
-      const snaps = listSnaps(process.cwd());
+      const snaps = listSnaps(snapRoot());
       const text = snaps.length
         ? snaps.map((s) => `${new Date(s.createdAt).toISOString()} · ${s.reason} · ${s.entries} entries · ${s.compactor}`).join("\n")
         : "No snapshots yet.";
