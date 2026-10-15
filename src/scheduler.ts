@@ -21,6 +21,8 @@ export interface Job {
   enabled: boolean;
   onlyIfOutput?: boolean;
   model?: string;
+  /** Command jobs: minutes before the run is killed (default 10, at most 240). */
+  timeoutMinutes?: number;
   createdAt: string;
   lastRunAt?: number;
   lastStatus?: "ok" | "error" | "running";
@@ -110,7 +112,7 @@ export class Scheduler {
     this.add({ name, when, builtin, deliver });
   }
 
-  add(spec: { name: string; when: string; prompt?: string; command?: string; builtin?: string; deliver: string; onlyIfOutput?: boolean; model?: string }): Job {
+  add(spec: { name: string; when: string; prompt?: string; command?: string; builtin?: string; deliver: string; onlyIfOutput?: boolean; model?: string; timeoutMinutes?: number }): Job {
     const job: Job = { id: `j-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, enabled: true, createdAt: new Date().toISOString(), ...spec };
     job.nextRunAt = this.next(job, Date.now()); // throws, naming the problem, on bad timing
     this.jobs.push(job);
@@ -182,7 +184,7 @@ export class Scheduler {
         if (!run) throw new Error(`unknown built-in job "${job.builtin}"`);
         output = await timed(run(job));
       } else if (job.command) {
-        output = await runCommand(job.command, 10 * 60_000, this.children);
+        output = await runCommand(job.command, Math.min(Math.max(job.timeoutMinutes ?? 10, 1), 240) * 60_000, this.children);
       } else if (job.prompt) {
         output = await timed(this.runners.prompt(job));
       } else {
