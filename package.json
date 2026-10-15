@@ -1,0 +1,43 @@
+{
+  "name": "carl-bot",
+  "version": "0.1.0",
+  "description": "Carl: the minimal bot gateway. One process, one Pi agent per conversation, Telegram + an OpenAI-compatible API, schedules, and a self-reflecting psyche.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "carl": "bin/carl"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "bin",
+    "src",
+    "templates",
+    "README.md",
+    "LICENSE",
+    "docs"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm test",
+    "test:e2e": "node --experimental-strip-types --no-warnings test/e2e.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.21",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@earendil-works/pi-ai": "1.0.4",
+    "@earendil-works/pi-agent-core": "1.0.4",
+    "@earendil-works/pi-mcp": "1.0.4",
+    "@earendil-works/pi-codemode": "1.0.4",
+    "@earendil-works/pi-tui": "1.0.4",
+    "@earendil-works/chord": "1.0.4",
+    "@earendil-works/pi-telemetry": "1.0.4"
+  }
+}

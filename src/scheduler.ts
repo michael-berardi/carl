@@ -1,0 +1,212 @@
+// Schedules: one JSON file, a 20-second tick, one catch-up run after downtime (never a burst).
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { nextRun, parseSchedule } from "./cron.ts";
+import type { Log } from "./log.ts";
+
+export interface Job {
+  id: string;
+  name: string;
+  /** "every 30m" | cron | "@daily" | "once <ISO time>" */
+  when: string;
+  /** Instruction for a fresh agent run. */
+  prompt?: string;
+  /** Shell command; its output is delivered without a model call. */
+  command?: string;
+  /** Built-in handler name (e.g. "individuation"). */
+  builtin?: string;
+  /** "home" | "none" | chat id */
+  deliver: string;
+  enabled: boolean;
+  onlyIfOutput?: boolean;
+  model?: string;
+  createdAt: string;
+  lastRunAt?: number;
+  lastStatus?: "ok" | "error" | "running";
+  lastError?: string;
+  nextRunAt?: number;
+}
+
+export type JobRunner = (job: Job) => Promise<string>;
+
+export class Scheduler {
+  private jobs: Job[] = [];
+  private timer?: NodeJS.Timeout;
+  private readonly running = new Set<string>();
+  private readonly file: string;
+
+  private readonly log: Log;
+  private readonly runners: { prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string) => Promise<void> };
+  constructor(home: string, log: Log, runners: { prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string) => Promise<void> }) {
+    this.log = log;
+    this.runners = runners;
+    this.file = join(home, "schedules.json");
+    this.load();
+  }
+
+  private load(): void {
+    if (!existsSync(this.file)) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.file, "utf8"));
+      this.jobs = Array.isArray(raw.jobs) ? raw.jobs : [];
+    } catch (e) {
+      throw new Error(`${this.file} is not valid JSON: ${(e as Error).message}`);
+    }
+    for (const job of this.jobs) {
+      if (job.lastStatus === "running") job.lastStatus = "error", job.lastError = "interrupted by a restart";
+      try {
+        if (job.nextRunAt === undefined) job.nextRunAt = this.next(job, Date.now());
+      } catch (e) {
+        job.enabled = false;
+        job.lastError = (e as Error).message;
+        this.log.error("schedule disabled: bad timing", { id: job.id, error: job.lastError });
+      }
+    }
+  }
+
+  private save(): void {
+    const tmp = `${this.file}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ jobs: this.jobs }, null, 2) + "\n", { mode: 0o600 });
+    renameSync(tmp, this.file);
+  }
+
+  private next(job: Job, after: number): number | undefined {
+    const once = job.when.match(/^once\s+(.+)$/i);
+    if (once) {
+      const at = Date.parse(once[1]);
+      if (Number.isNaN(at)) throw new Error(`schedule "${job.when}": bad time`);
+      return job.lastRunAt ? undefined : at;
+    }
+    return nextRun(parseSchedule(job.when), after, job.lastRunAt);
+  }
+
+  start(): void {
+    this.timer = setInterval(() => void this.tick(), 20_000);
+    this.timer.unref();
+    void this.tick();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+  }
+
+  /** Make sure a built-in job exists; the operator may edit its timing or pause it afterwards. */
+  ensureBuiltin(builtin: string, name: string, when: string, deliver = "home"): void {
+    if (this.jobs.some((j) => j.builtin === builtin)) return;
+    this.add({ name, when, builtin, deliver });
+  }
+
+  add(spec: { name: string; when: string; prompt?: string; command?: string; builtin?: string; deliver: string; onlyIfOutput?: boolean; model?: string }): Job {
+    const job: Job = { id: `j-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, enabled: true, createdAt: new Date().toISOString(), ...spec };
+    job.nextRunAt = this.next(job, Date.now()); // throws, naming the problem, on bad timing
+    this.jobs.push(job);
+    this.save();
+    return job;
+  }
+
+  remove(id: string): boolean {
+    const before = this.jobs.length;
+    this.jobs = this.jobs.filter((j) => j.id !== id);
+    this.save();
+    return this.jobs.length < before;
+  }
+
+  setEnabled(id: string, enabled: boolean): void {
+    const job = this.find(id);
+    job.enabled = enabled;
+    if (enabled) job.nextRunAt = this.next(job, Date.now());
+    this.save();
+  }
+
+  list(): Job[] {
+    return this.jobs.map((j) => ({ ...j }));
+  }
+
+  describe(): string {
+    if (!this.jobs.length) return "No schedules.";
+    return this.jobs
+      .map((j) => `${j.id} ${j.enabled ? "on " : "off"} ${j.name} [${j.when}] ${j.prompt ? "agent" : j.command ? "command" : j.builtin ?? ""}` +
+        ` next=${j.nextRunAt ? new Date(j.nextRunAt).toISOString().slice(0, 16) : "-"} last=${j.lastStatus ?? "-"}${j.lastError ? ` (${j.lastError.slice(0, 80)})` : ""}`)
+      .join("\n");
+  }
+
+  private find(id: string): Job {
+    const job = this.jobs.find((j) => j.id === id || j.name === id);
+    if (!job) throw new Error(`no schedule ${id}`);
+    return job;
+  }
+
+  async runNow(id: string): Promise<void> {
+    await this.execute(this.find(id));
+  }
+
+  private async tick(): Promise<void> {
+    const now = Date.now();
+    for (const job of this.jobs) {
+      if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now || this.running.has(job.id)) continue;
+      void this.execute(job);
+    }
+  }
+
+  private async execute(job: Job): Promise<void> {
+    if (this.running.has(job.id)) return;
+    this.running.add(job.id);
+    job.lastStatus = "running";
+    job.lastRunAt = Date.now();
+    this.save();
+    this.log.info("schedule started", { id: job.id, name: job.name });
+    let output = "";
+    try {
+      if (job.builtin) {
+        const run = this.runners.builtin[job.builtin];
+        if (!run) throw new Error(`unknown built-in job "${job.builtin}"`);
+        output = await run(job);
+      } else if (job.command) {
+        output = await runCommand(job.command, 10 * 60_000);
+      } else if (job.prompt) {
+        output = await this.runners.prompt(job);
+      } else {
+        throw new Error("job has neither prompt, command nor builtin");
+      }
+      job.lastStatus = "ok";
+      job.lastError = undefined;
+    } catch (e) {
+      job.lastStatus = "error";
+      job.lastError = (e as Error).message.slice(0, 500);
+      output = `Schedule "${job.name}" failed: ${job.lastError}`;
+      this.log.error("schedule failed", { id: job.id, error: job.lastError });
+    } finally {
+      this.running.delete(job.id);
+      try {
+        job.nextRunAt = this.next(job, Date.now());
+      } catch {
+        job.nextRunAt = undefined;
+      }
+      if (job.when.startsWith("once")) job.enabled = false;
+      this.save();
+    }
+    const skip = job.deliver === "none" || (job.onlyIfOutput && job.lastStatus === "ok" && !output.trim());
+    if (!skip && output.trim()) await this.runners.deliver(job, output).catch((e) => this.log.error("schedule delivery failed", { id: job.id, error: (e as Error).message }));
+  }
+}
+
+export function runCommand(command: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("/bin/bash", ["-lc", command], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+    let out = "";
+    const cap = (b: Buffer) => { if (out.length < 200_000) out += b.toString(); };
+    child.stdout.on("data", cap);
+    child.stderr.on("data", cap);
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid!, "SIGTERM"); } catch {}
+      reject(new Error(`command timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(out.trim());
+      else reject(new Error(`exit ${code}: ${out.trim().slice(-400)}`));
+    });
+  });
+}
