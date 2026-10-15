@@ -130,3 +130,8 @@ function openFenceLang(text: string): string | null {
 export function htmlToPlain(html: string): string {
   return html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
 }
+
+/** Make invisible and direction-changing characters visible (approval cards must show exactly what runs). */
+export function visibleControls(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+}

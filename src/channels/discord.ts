@@ -1,6 +1,7 @@
 // Discord channel over the Gateway (WebSocket) and REST API. Needs a bot token with the MESSAGE CONTENT intent
 // enabled in the developer portal. Only users in discord.allowFrom are answered.
 import type { Brain } from "../brain.ts";
+import { visibleControls } from "./format.ts";
 import type { Log } from "../log.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
 
@@ -24,6 +25,10 @@ export class DiscordChannel {
   private heartbeat?: NodeJS.Timeout;
   private stopping = false;
   private botId = "";
+  /** Channels an allowed user has talked in, and which of them are DMs. */
+  readonly known = new Set<string>();
+  readonly dms = new Set<string>();
+  private ready = false;
   private readonly approvals = new Map<string, (a: "approved" | "denied") => void>();
   private readonly cfg: DiscordConfig;
   private readonly token: string;
@@ -73,14 +78,19 @@ export class DiscordChannel {
           ws.onmessage = (m) => void this.onFrame(JSON.parse(String(m.data))).catch((e) => this.log.error("discord frame failed", { error: (e as Error).message }));
           ws.onclose = (e) => {
             if (this.heartbeat) clearInterval(this.heartbeat);
-            if (e.code === 4004) this.setStatus("fatal", "Discord rejected the bot token (4004)");
-            else if (e.code === 4014) this.setStatus("fatal", "the MESSAGE CONTENT intent is not enabled for this bot (4014)");
+            const fatal: Record<number, string> = {
+              4004: "Discord rejected the bot token (4004)", 4010: "invalid shard (4010)", 4011: "sharding required (4011)",
+              4012: "invalid gateway version (4012)", 4013: "invalid intents (4013)", 4014: "the MESSAGE CONTENT intent is not enabled for this bot (4014)",
+            };
+            if (fatal[e.code]) this.setStatus("fatal", fatal[e.code]);
             resolve();
           };
           ws.onerror = () => {};
         });
         if (this.status.state === "fatal") return void this.log.error("discord stopped", { error: this.status.error });
-        failures = 0;
+        // Only a session that reached READY counts as healthy; otherwise back off (Discord limits session starts).
+        if (this.ready) failures = 0; else failures++;
+        this.ready = false;
       } catch (e) {
         failures++;
         this.setStatus("retrying", (e as Error).message);
@@ -110,6 +120,7 @@ export class DiscordChannel {
       this.ws?.close(); // reconnect with a fresh identify
     } else if (f.op === 0 && f.t === "READY") {
       this.botId = f.d.user?.id ?? "";
+      this.ready = true;
       this.setStatus("connected");
       this.log.info("discord connected", { bot: f.d.user?.username });
     } else if (f.op === 0 && f.t === "MESSAGE_CREATE") {
@@ -133,6 +144,8 @@ export class DiscordChannel {
     let text = String(d.content ?? "").replace(new RegExp(`<@!?${this.botId}>`, "g"), "").trim();
     if (!text) return;
     const key = `discord:${isDm ? "dm:" : ""}${d.channel_id}`;
+    this.known.add(d.channel_id);
+    if (isDm) this.dms.add(d.channel_id);
     if (/^stop$/i.test(text)) return void (await this.post(d.channel_id, (await this.brain.stop(key)) ? "Stopping." : "Nothing is running."));
     if (/^new$/i.test(text)) { await this.brain.reset(key); return void (await this.post(d.channel_id, "Fresh conversation.")); }
     let preface: string | undefined;
@@ -149,8 +162,8 @@ export class DiscordChannel {
       if (!body.trim() || body === shown) return;
       shown = body;
       last = Date.now();
-      if (!draft) draft = (await this.rest<{ id: string }>("POST", `/channels/${d.channel_id}/messages`, { content: body, message_reference: { message_id: d.id, fail_if_not_exists: false } })).id;
-      else await this.rest("PATCH", `/channels/${d.channel_id}/messages/${draft}`, { content: body }).catch(() => {});
+      if (!draft) draft = (await this.rest<{ id: string }>("POST", `/channels/${d.channel_id}/messages`, { content: body, message_reference: { message_id: d.id, fail_if_not_exists: false }, allowed_mentions: { parse: [] } })).id;
+      else await this.rest("PATCH", `/channels/${d.channel_id}/messages/${draft}`, { content: body, allowed_mentions: { parse: [] } }).catch(() => {});
     };
     const result = await this.brain.ask(key, { text, preface, source: "api" }, {
       onText: (t) => {
@@ -164,7 +177,7 @@ export class DiscordChannel {
     const final = result.aborted ? `${result.text ? result.text + "\n\n" : ""}*(stopped)*` : !result.ok ? `${result.text ? result.text + "\n\n" : ""}Run failed: ${result.error}` : result.text || "Done.";
     const chunks = splitDiscord(final);
     if (draft) {
-      await this.rest("PATCH", `/channels/${d.channel_id}/messages/${draft}`, { content: chunks[0] });
+      await this.rest("PATCH", `/channels/${d.channel_id}/messages/${draft}`, { content: chunks[0], allowed_mentions: { parse: [] } });
       for (const c of chunks.slice(1)) await this.post(d.channel_id, c);
     } else {
       for (const c of chunks) await this.post(d.channel_id, c);
@@ -178,19 +191,24 @@ export class DiscordChannel {
   async deliver(target: string, markdown: string): Promise<number> {
     const channel = target === "home" ? this.cfg.homeChannel : target;
     if (!channel) throw new Error("discord.homeChannel is not configured");
+    if (channel !== this.cfg.homeChannel && !this.known.has(channel)) throw new Error(`Discord channel ${channel} is not the home channel or a conversation an allowed user started`);
     const chunks = splitDiscord(markdown);
     for (const c of chunks) await this.post(channel, c);
     return chunks.length;
   }
 
   async requestApproval(channel: string, command: string, reason: string): Promise<"approved" | "denied" | "timeout"> {
+    if (!this.dms.has(channel) && this.cfg.homeChannel && channel !== this.cfg.homeChannel) {
+      command = `${command}\n\n(from the conversation in ${channel})`;
+      channel = this.cfg.homeChannel;
+    }
     if (command.length > 1_700) {
       await this.post(channel, `Refused without asking: a ${reason} command of ${command.length} characters is too long to review here.`).catch(() => {});
       return "denied";
     }
     const id = Math.random().toString(36).slice(2, 10);
-    const fenced = "```\n" + command.replace(/```/g, "`​``") + "\n```";
-    const msg = await this.post(channel, `**Approve?** ${reason}\n${fenced}`, [{ type: 1, components: [
+    const fenced = "```\n" + visibleControls(command).replace(/```/g, "`\u200b``") + "\n```";
+    const msg = await this.post(channel, `**Approve?** ${reason.replace(/[`*_~|<>@]/g, "")}\n${fenced}`, [{ type: 1, components: [
       { type: 2, style: 3, label: "Run once", custom_id: `ca:${id}:yes` },
       { type: 2, style: 4, label: "Deny", custom_id: `ca:${id}:no` },
     ] }]);

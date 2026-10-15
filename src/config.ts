@@ -204,6 +204,8 @@ export function loadConfig(home = carlHome()): CarlConfig {
       configDirs: strList(raw.claude?.configDirs, "claude.configDirs").map((p) => abs(p, home)),
     },
   };
+  if ((cfg.home + "/").startsWith(cfg.workspace.replace(/\/+$/, "") + "/"))
+    throw new ConfigError(`workspace (${cfg.workspace}) must not contain CARL_HOME (${cfg.home}): the agent would be able to rewrite Carl's own configuration`);
   if (!THINKING.has(cfg.thinking)) throw new ConfigError(`thinking must be one of ${[...THINKING].join(", ")}`);
   if (!cfg.model.includes("/")) throw new ConfigError(`model "${cfg.model}" must be "provider/model"`);
   if (cfg.keepRecentTokens >= cfg.contextBudget) throw new ConfigError("keepRecentTokens must be below contextBudget");

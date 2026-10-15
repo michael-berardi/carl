@@ -2,6 +2,7 @@
 // Needs an app-level token (xapp-, connections:write) and a bot token (xoxb-, chat:write, reactions:write,
 // plus the history scopes for the conversations it should hear). Only users in slack.allowFrom are answered.
 import type { Brain } from "../brain.ts";
+import { visibleControls } from "./format.ts";
 import type { Log } from "../log.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
 
@@ -48,6 +49,8 @@ export class SlackChannel {
   private readonly brain: Brain;
   private readonly log: Log;
   private botUser = "";
+  /** Channels an allowed user has talked in: the only places Carl may deliver to besides home. */
+  readonly known = new Set<string>();
 
   constructor(cfg: SlackConfig, appToken: string, botToken: string, brain: Brain, log: Log) {
     this.cfg = cfg;
@@ -128,7 +131,9 @@ export class SlackChannel {
     if (frame.type === "disconnect") return void this.ws?.close();
     if (frame.type === "events_api") {
       const ev: SlackEvent = frame.payload?.event ?? {};
-      if ((ev.type === "message" || ev.type === "app_mention") && !ev.bot_id && !ev.subtype && ev.user !== this.botUser) await this.onMessage(ev);
+      // One post, one run: DMs arrive as "message", channel mentions as "app_mention" (Slack sends both for a mention).
+      const wanted = ev.type === "message" ? ev.channel_type === "im" : ev.type === "app_mention";
+      if (wanted && !ev.bot_id && !ev.subtype && ev.user !== this.botUser) await this.onMessage(ev);
     } else if (frame.type === "interactive") {
       const p = frame.payload;
       const action = p?.actions?.[0];
@@ -151,6 +156,7 @@ export class SlackChannel {
     let text = (ev.text ?? "").replace(new RegExp(`<@${this.botUser}>`, "g"), "").trim();
     if (!text) return;
     const key = SlackChannel.conversationKey(ev);
+    this.known.add(ev.channel!);
     const thread = ev.channel_type === "im" ? undefined : ev.thread_ts ?? ev.ts;
     if (/^stop$/i.test(text)) return void (await this.post(ev.channel!, (await this.brain.stop(key)) ? "Stopping." : "Nothing is running.", thread));
     if (/^new$/i.test(text)) { await this.brain.reset(key); return void (await this.post(ev.channel!, "Fresh conversation.", thread)); }
@@ -166,8 +172,8 @@ export class SlackChannel {
       if (!body.trim() || body === shown) return;
       shown = body;
       last = Date.now();
-      if (!draftTs) draftTs = (await this.api<{ ts: string }>("chat.postMessage", { channel: ev.channel, text: body, thread_ts: thread })).ts;
-      else await this.api("chat.update", { channel: ev.channel, ts: draftTs, text: body }).catch(() => {});
+      if (!draftTs) draftTs = (await this.api<{ ts: string }>("chat.postMessage", { channel: ev.channel, text: toMrkdwn(body), thread_ts: thread })).ts;
+      else await this.api("chat.update", { channel: ev.channel, ts: draftTs, text: toMrkdwn(body) }).catch(() => {});
     };
     let latest = "";
     const result = await this.brain.ask(key, { text, preface, source: "api" }, {
@@ -197,6 +203,7 @@ export class SlackChannel {
   async send(target: string, markdown: string): Promise<number> {
     const channel = target === "home" ? this.cfg.homeChannel : target;
     if (!channel) throw new Error("slack.homeChannel is not configured");
+    if (channel !== this.cfg.homeChannel && !this.known.has(channel)) throw new Error(`Slack channel ${channel} is not the home channel or a conversation an allowed user started`);
     const chunks = splitChunks(toMrkdwn(markdown));
     for (const c of chunks) await this.post(channel, c, undefined, true);
     return chunks.length;
@@ -204,12 +211,19 @@ export class SlackChannel {
 
   /** Ask in the conversation's channel with Block Kit buttons; fails closed after 5 minutes. */
   async requestApproval(channel: string, thread: string | undefined, command: string, reason: string): Promise<"approved" | "denied" | "timeout"> {
+    // Shared channels never see commands or file contents: the card goes to the operator's home channel.
+    if (!channel.startsWith("D") && this.cfg.homeChannel) {
+      command = `${command}\n\n(from the conversation in ${channel})`;
+      channel = this.cfg.homeChannel;
+      thread = undefined;
+    }
     if (command.length > 2_900) {
       await this.post(channel, `Refused without asking: a ${reason} command of ${command.length} characters is too long to review here.`, thread).catch(() => {});
       return "denied";
     }
     const id = Math.random().toString(36).slice(2, 10);
-    const code = command.replace(/```/g, "`​``").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const code = visibleControls(command).replace(/```/g, "`\u200b``").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    reason = reason.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const { ts } = await this.api<{ ts: string }>("chat.postMessage", {
       channel,
       thread_ts: thread,

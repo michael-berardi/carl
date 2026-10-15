@@ -25,6 +25,8 @@ export interface GuardRules {
   writablePaths?: string[];
   /** Base for relative tool paths (the agent's working directory). */
   cwd?: string;
+  /** Programs the kernel sandbox refuses to run: refused up front instead of asking for an approval that cannot help. */
+  noExec?: string[];
 }
 
 /** Remove quoting so `"rm" -rf '~'` reads as `rm -rf ~`. */
@@ -80,6 +82,11 @@ export function splitCommands(command: string): string[][] {
       continue;
     }
     if (c === "$" && command[i + 1] === "(") { endSeg(); i++; continue; }
+    if (c === "$" && command[i + 1] === "{") {
+      // ${VAR} and ${VAR:-x} stay one word (a brace here is not a command group).
+      const close = command.indexOf("}", i + 2);
+      if (close !== -1) { word += command.slice(i, close + 1); inWord = true; i = close; continue; }
+    }
     if (";&|`(){}".includes(c)) { endSeg(); continue; }
     if (c === " " || c === "\t") { endWord(); continue; }
     word += c;
@@ -119,7 +126,7 @@ export function segments(command: string): { verb: string; args: string; text: s
 }
 
 const HOME = homedir();
-const ROOTS = new Set(["/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/", "$HOME/*", "/Users", "/Users/", "/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/etc", "/var", "/opt", "/private", HOME, HOME + "/", HOME + "/*"]);
+const ROOTS = new Set(["/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/", "$HOME/*", "${HOME}", "${HOME}/", "${HOME}/*", "${HOME}", "${HOME}/", "${HOME}/*", "/Users", "/Users/", "/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/etc", "/var", "/opt", "/private", HOME, HOME + "/", HOME + "/*"]);
 const isRoot = (t: string) => ROOTS.has(t) || ROOTS.has(t.replace(/\/+$/, "")) || /^\/Users\/[^/]+\/?\*?$/.test(t);
 
 function gitSub(args: string): { sub: string; rest: string } {
@@ -171,6 +178,12 @@ function judgeSegment(s: { verb: string; args: string; text: string }): Verdict 
   // Indirection hides the real command: ask.
   if (verb === "eval" || verb === "source" || verb === ".") return { level: "dangerous", reason: `${verb} runs code the guard cannot see` };
   if (/^(ba|z|k|da|fi)?sh$/.test(verb) && /(^|\s)-[a-zA-Z]*c(\s|$)/.test(args)) return { level: "dangerous", reason: `${verb} -c runs code the guard cannot see` };
+  // A shell or interpreter with no script file reads its code from stdin (a pipe or heredoc): unseen code.
+  if (/^((ba|z|k|da|fi)?sh|python[0-9.]*|node|perl|ruby|php|osascript|deno|bun)$/.test(verb)) {
+    const words = args.split(/\s+/).filter(Boolean);
+    const script = words.find((w) => !w.startsWith("-") || w === "-");
+    if (!script || script === "-" || /^\/dev\/stdin$/.test(script)) return { level: "dangerous", reason: `${verb} reading code from stdin` };
+  }
   const inline: Record<string, RegExp> = {
     python: /(^|\s)-[a-zA-Z]*c/, node: /(^|\s)(-[a-zA-Z]*[ep]|--eval|--print)/, perl: /(^|\s)-[a-zA-Z]*[eE]/, ruby: /(^|\s)-[a-zA-Z]*e/,
     php: /(^|\s)-[a-zA-Z]*r/, osascript: /(^|\s)-e/, bun: /(^|\s)(-e|--eval|-p|--print)/, deno: /(^|\s)eval\b/,
@@ -203,7 +216,9 @@ export function classifyCommand(command: string, extra: GuardRules = {}): Verdic
   const own = (list?: [string, string][]) => (list ?? []).map(([src, why]) => [new RegExp(src, "i"), why] as [RegExp, string]);
   for (const [re, reason] of own(extra.hardline)) if (re.test(normalised)) return { level: "hardline", reason };
   let worst: Verdict = { level: "ok" };
+  const blocked = new Set((extra.noExec ?? []).flatMap((p) => [p, basename(p)]));
   for (const seg of segments(command)) {
+    if (blocked.has(seg.verb)) return { level: "hardline", reason: `${seg.verb} is blocked by the shell sandbox (it hands work to processes outside it)` };
     const v = judgeSegment(seg);
     if (v.level === "hardline") return v;
     if (v.level === "dangerous" && worst.level === "ok") worst = v;
@@ -295,4 +310,52 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
       });
     },
   } as InlineExtension;
+}
+
+/**
+ * File operations for Pi's write and edit tools that repeat the path check at the moment of writing (after the
+ * approval, after any symlink swap) and refuse to follow a symlink at the final component.
+ */
+export function guardedFileOps(rules: GuardRules) {
+  const check = (abs: string) => {
+    const v = writeVerdict(abs, rules);
+    if (v.level === "hardline") throw new Error(`refused: ${v.reason}`);
+  };
+  const writeFile = async (abs: string, content: string) => {
+    check(abs);
+    const { open } = await import("node:fs/promises");
+    const { constants } = await import("node:fs");
+    const fh = await open(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o644);
+    try {
+      await fh.writeFile(content, "utf8");
+    } finally {
+      await fh.close();
+    }
+  };
+  return {
+    writeFile,
+    mkdir: async (dir: string) => {
+      check(dir);
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(dir, { recursive: true });
+    },
+    readFile: async (abs: string) => (await import("node:fs/promises")).readFile(abs),
+    access: async (abs: string) => {
+      check(abs);
+      const { access, constants } = await import("node:fs/promises").then(async (m) => ({ access: m.access, constants: (await import("node:fs")).constants }));
+      await access(abs, constants.R_OK | constants.W_OK);
+    },
+  };
+}
+
+/** File operations for Pi's read tool that repeat the secret check at the moment of reading. */
+export function guardedReadOps(rules: GuardRules) {
+  const check = (abs: string) => {
+    const v = readVerdict(abs, rules);
+    if (v.level === "hardline") throw new Error(`refused: ${v.reason}`);
+  };
+  return {
+    readFile: async (abs: string) => { check(abs); return (await import("node:fs/promises")).readFile(abs); },
+    access: async (abs: string) => { check(abs); const m = await import("node:fs/promises"); await m.access(abs, (await import("node:fs")).constants.R_OK); },
+  };
 }

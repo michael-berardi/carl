@@ -1,6 +1,6 @@
 // The brain: one Pi AgentSession per conversation, created lazily, persisted as Pi JSONL, disposed when idle.
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -26,10 +26,11 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { CarlConfig } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
-import { installProfile, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
+import { installProfile, NO_EXEC, sandboxMcpServer, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
+import { resolveClaude } from "./providers/claude-code.ts";
 import { claudeCodeProviderConfig, PROVIDER as CLAUDE_PROVIDER } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
-import { type Approver, shellGuard } from "./guard.ts";
+import { type Approver, guardedFileOps, guardedReadOps, shellGuard } from "./guard.ts";
 import { looksLikeCorrection, type Psyche } from "./psyche.ts";
 
 export interface Inbound {
@@ -86,6 +87,8 @@ interface Conversation {
   key: string;
   session: AgentSession;
   busy: boolean;
+  /** A compaction is running: there is no turn to steer into, so every caller waits. */
+  compacting?: boolean;
   lastActivity: number;
   source: Inbound["source"];
   pending?: Promise<RunResult>;
@@ -128,13 +131,49 @@ export class Brain extends EventEmitter {
     this.piDir = join(cfg.home, "pi");
   }
 
+  /** Everything Carl executes or loads, outside the agent's working areas: the agent must not be able to change it. */
+  private controlPlane(): string[] {
+    const out = new Set<string>();
+    const add = (p: string | undefined) => { if (p) out.add(p); };
+    const realOf = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+    add(fileURLToPath(new URL("..", import.meta.url))); // Carl's own code and node_modules
+    add(this.cfg.piAgentDir);
+    add(dirname(dirname(realOf(process.execPath)))); // the Node install running Carl
+    const claude = resolveClaude(this.cfg.claude.command, process.env);
+    if (claude) add(dirname(dirname(realOf(claude))));
+    const uc = findUltraCompress();
+    if (uc) add(realOf(uc));
+    for (const p of [...this.cfg.extensions, ...this.cfg.contextFiles]) if (!p.includes(":")) add(p);
+    if (this.cfg.stt?.[0]) add(this.cfg.stt[0]);
+    if (this.cfg.ultraterm) {
+      add(this.cfg.ultraterm.overseerBin);
+      for (const f of ["gateway_state.json", "state.db", "state.db-wal", "state.db-shm"]) add(join(this.cfg.ultraterm.home, f));
+    }
+    add(join(homedir(), "Applications", "Carl.app"));
+    // The agent's own notes stay editable even when they are also context files.
+    const free = writablePaths(this.cfg).map((w) => w.replace(/\/+$/, "") + "/");
+    return [...out].filter((p) => !free.some((w) => (p + "/").startsWith(w)));
+  }
+
+  /** Path rules for the file tools: Carl's control plane (CARL_HOME minus working areas, plus what it loads) and secrets. */
+  private guardRules() {
+    return {
+      ...this.cfg.guard,
+      protectedPaths: [this.cfg.home, ...this.controlPlane()],
+      writablePaths: writablePaths(this.cfg),
+      secretPaths: secretFiles(this.cfg),
+      cwd: this.cfg.workspace,
+      noExec: this.sandboxProfile ? NO_EXEC : [],
+    };
+  }
+
   private fileTools(): ToolDefinition[] {
     const cwd = this.cfg.workspace;
     const make: Record<string, () => ToolDefinition> = {
-      read: () => createReadToolDefinition(cwd) as ToolDefinition,
+      read: () => createReadToolDefinition(cwd, { operations: guardedReadOps(this.guardRules()) }) as ToolDefinition,
       bash: () => createBashToolDefinition(cwd, { spawnHook: sandboxSpawnHook(this.cfg, this.sandboxProfile) }) as ToolDefinition,
-      edit: () => createEditToolDefinition(cwd) as ToolDefinition,
-      write: () => createWriteToolDefinition(cwd) as ToolDefinition,
+      edit: () => createEditToolDefinition(cwd, { operations: guardedFileOps(this.guardRules()) }) as ToolDefinition,
+      write: () => createWriteToolDefinition(cwd, { operations: guardedFileOps(this.guardRules()) }) as ToolDefinition,
     };
     for (const t of this.cfg.tools) if (!make[t]) throw new Error(`tools: "${t}" is not one of read, bash, edit, write`);
     return this.cfg.tools.map((t) => make[t]());
@@ -155,8 +194,7 @@ export class Brain extends EventEmitter {
     // MCP servers) then stay inside it instead of wherever Carl was launched.
     mkdirSync(this.cfg.workspace, { recursive: true, mode: 0o700 });
     process.chdir(this.cfg.workspace);
-    const extraProtected = this.cfg.ultraterm ? [join(this.cfg.ultraterm.home, "gateway_state.json"), join(this.cfg.ultraterm.home, "state.db"), join(this.cfg.ultraterm.home, "state.db-wal"), join(this.cfg.ultraterm.home, ".env")] : [];
-    this.sandboxProfile = installProfile(this.cfg, extraProtected);
+    this.sandboxProfile = installProfile(this.cfg, { controlPlane: this.controlPlane(), apiPorts: this.cfg.api.enabled ? [this.cfg.api.port] : [] });
     if (this.sandboxProfile) this.log.info("shell sandbox: Seatbelt", { profile: this.sandboxProfile });
     else this.log.warn("shell sandbox unavailable on this platform: the pattern guard and secret scrubbing still apply, but Carl's own files are not kernel-protected");
     if (this.cfg.ultracompress !== "off") {
@@ -297,14 +335,7 @@ export class Brain extends EventEmitter {
     const extensionFactories: InlineExtension[] = [
       shellGuard(this.approver(key), (command, why) =>
         this.psyche.recordShadow({ kind: "tool_error", conversation: key, summary: `blocked: ${why}`, evidence: command.slice(0, 500) }),
-        {
-          ...this.cfg.guard,
-          // Carl's own control plane (everything in CARL_HOME but the working areas) and its secrets.
-          protectedPaths: [this.cfg.home],
-          writablePaths: writablePaths(this.cfg),
-          secretPaths: secretFiles(this.cfg),
-          cwd: this.cfg.workspace,
-        }),
+        this.guardRules()),
       resultBudget(join(this.cfg.home, "spill"), this.cfg.toolResultMaxChars),
     ];
     if (this.cfg.mcp && existsSync(join(this.piDir, "mcp.json")) && this.mcpLoader) {
@@ -316,7 +347,12 @@ export class Brain extends EventEmitter {
         createMcpExtension({
           logPath: join(this.cfg.home, "logs", "mcp.log"),
           // Pi's default loader reads the global ~/.pi/agent/mcp.json; Carl's servers live in CARL_HOME/pi.
-          loadConfig: (ctx: any) => this.mcpLoader!({ agentDir: this.piDir, cwd: ctx.cwd, projectTrusted: false }),
+          loadConfig: (ctx: any) => {
+            const loaded = this.mcpLoader!({ agentDir: this.piDir, cwd: ctx.cwd, projectTrusted: false });
+            // Stdio servers run under the shell sandbox too, with Carl's secrets blanked in their environment.
+            for (const s of loaded.servers ?? []) if (s.config?.command) s.config = sandboxMcpServer(this.cfg, this.sandboxProfile, s.config);
+            return loaded;
+          },
         }) as InlineExtension,
       );
     }
@@ -399,7 +435,7 @@ export class Brain extends EventEmitter {
       this.psyche.recordShadow({ kind: "correction", conversation: key, summary: input.text.replace(/\s+/g, " ").slice(0, 300), evidence: prev.slice(-1_000) });
     }
     // API clients expect an answer to each request: wait for the running turn, then run. Chat steers.
-    while (convo.busy && input.source !== "telegram" && convo.pending) await convo.pending.catch(() => {});
+    while (convo.busy && convo.pending && (input.source !== "telegram" || convo.compacting)) await convo.pending.catch(() => {});
     this.emitTranscript(convo, { role: "user", text: input.text, source: input.source });
     if (convo.busy) {
       await convo.session.steer(text, input.images);
@@ -559,10 +595,12 @@ export class Brain extends EventEmitter {
     if (convo.busy) return "Busy; try again when the current run finishes.";
     const before = convo.session.getContextUsage()?.tokens;
     convo.busy = true;
+    convo.compacting = true;
     const job = convo.session.compact().then(() => undefined, (e: Error) => e);
     // Other callers wait on `pending` exactly as they would for a run.
     convo.pending = job.then(() => ({ text: "", ok: true, aborted: false, toolCalls: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, model: this.modelRef(convo), ms: 0 }));
     const failure = await job;
+    convo.compacting = false;
     convo.busy = false;
     convo.pending = undefined;
     convo.stopRequested = false;
