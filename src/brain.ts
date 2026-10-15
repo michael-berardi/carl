@@ -26,7 +26,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { CarlConfig } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
-import { installProfile, NO_EXEC, sandboxMcpServer, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
+import { executableChain, installProfile, NO_EXEC, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { claudeCodeProviderConfig, PROVIDER as CLAUDE_PROVIDER } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
@@ -139,20 +139,27 @@ export class Brain extends EventEmitter {
     add(fileURLToPath(new URL("..", import.meta.url))); // Carl's own code and node_modules
     add(this.cfg.piAgentDir);
     add(dirname(dirname(realOf(process.execPath)))); // the Node install running Carl
-    const claude = resolveClaude(this.cfg.claude.command, process.env);
-    if (claude) add(dirname(dirname(realOf(claude))));
+    if (this.claudeBin) add(dirname(dirname(realOf(this.claudeBin))));
     const uc = findUltraCompress();
     if (uc) add(realOf(uc));
-    for (const p of [...this.cfg.extensions, ...this.cfg.contextFiles]) if (!p.includes(":")) add(p);
-    if (this.cfg.stt?.[0]) add(this.cfg.stt[0]);
+    for (const p of this.cfg.extensions) if (!p.includes(":")) add(p);
     if (this.cfg.ultraterm) {
-      add(this.cfg.ultraterm.overseerBin);
+      // UltraTerm's helpers (ut-overseer, ut-provider-accounts) run outside the sandbox: their whole folder is protected.
+      add(dirname(this.cfg.ultraterm.overseerBin));
+      add(dirname(realOf(this.cfg.ultraterm.overseerBin)));
       for (const f of ["gateway_state.json", "state.db", "state.db-wal", "state.db-shm"]) add(join(this.cfg.ultraterm.home, f));
     }
     add(join(homedir(), "Applications", "Carl.app"));
-    // The agent's own notes stay editable even when they are also context files.
+    // Context files are protected too, except the agent's own notes inside its working areas.
     const free = writablePaths(this.cfg).map((w) => w.replace(/\/+$/, "") + "/");
-    return [...out].filter((p) => !free.some((w) => (p + "/").startsWith(w)));
+    for (const p of this.cfg.contextFiles) if (!free.some((w) => (p + "/").startsWith(w))) add(p);
+    return [...out];
+  }
+
+  /** Program paths Carl starts outside the sandbox: they and every folder above them cannot be replaced. */
+  private pinnedPaths(): string[] {
+    const bins = [this.claudeBin, findUltraCompress(), this.cfg.ultraterm?.overseerBin, process.execPath];
+    return [...new Set(bins.filter((b): b is string => !!b).flatMap(executableChain))];
   }
 
   /** Path rules for the file tools: Carl's control plane (CARL_HOME minus working areas, plus what it loads) and secrets. */
@@ -164,6 +171,7 @@ export class Brain extends EventEmitter {
       secretPaths: secretFiles(this.cfg),
       cwd: this.cfg.workspace,
       noExec: this.sandboxProfile ? NO_EXEC : [],
+      sandboxProfile: this.sandboxProfile,
     };
   }
 
@@ -181,6 +189,9 @@ export class Brain extends EventEmitter {
 
   /** Seatbelt profile for shell commands (macOS); undefined where the kernel sandbox is unavailable. */
   private sandboxProfile?: string;
+  private claudeBin?: string;
+  /** The shell sandbox profile, for helpers that run agent-influenced programs (undefined without Seatbelt). */
+  get shellSandbox(): string | undefined { return this.sandboxProfile; }
 
   /** The vendored UltraCompress adapter, when its engine binary is installed (resolved once at init). */
   private ultracompressExt?: string;
@@ -194,7 +205,11 @@ export class Brain extends EventEmitter {
     // MCP servers) then stay inside it instead of wherever Carl was launched.
     mkdirSync(this.cfg.workspace, { recursive: true, mode: 0o700 });
     process.chdir(this.cfg.workspace);
-    this.sandboxProfile = installProfile(this.cfg, { controlPlane: this.controlPlane(), apiPorts: this.cfg.api.enabled ? [this.cfg.api.port] : [] });
+    // The Claude CLI is looked up once: later PATH changes (or a planted `claude`) are never picked up.
+    this.claudeBin = this.cfg.claude.enabled ? resolveClaude(this.cfg.claude.command, process.env) : undefined;
+    for (const n of secretEnvNames(this.cfg)) if (process.env[n])
+      this.log.warn("a secret is in Carl's process environment, where any program of this user can read it; move it to CARL_HOME/.env", { name: n });
+    this.sandboxProfile = installProfile(this.cfg, { controlPlane: this.controlPlane(), pinned: this.pinnedPaths(), apiPorts: this.cfg.api.enabled ? [this.cfg.api.port] : [] });
     if (this.sandboxProfile) this.log.info("shell sandbox: Seatbelt", { profile: this.sandboxProfile });
     else this.log.warn("shell sandbox unavailable on this platform: the pattern guard and secret scrubbing still apply, but Carl's own files are not kernel-protected");
     if (this.cfg.ultracompress !== "off") {
@@ -223,7 +238,10 @@ export class Brain extends EventEmitter {
     });
     if (this.cfg.claude.enabled) {
       this.runtime.registerProvider(CLAUDE_PROVIDER, claudeCodeProviderConfig({
-        command: this.cfg.claude.command,
+        command: this.claudeBin ?? this.cfg.claude.command,
+        // Carl-only folders: the sandboxed agent cannot plant a CLAUDE.md or swap the per-call settings file.
+        workdir: join(this.cfg.home, "state", "claude-cwd"),
+        tmpRoot: join(this.cfg.home, "state", "claude-tmp"),
         configDirs: () => this.claudeAccounts(),
         log: (level, msg, data) => this.log[level](msg, data),
       }) as any);

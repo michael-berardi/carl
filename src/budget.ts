@@ -1,5 +1,6 @@
 // Context budget guard: oversized tool results are cut to head + tail before they reach the model.
 // The full text is spilled to a file the model can read in ranges, so nothing is lost, only deferred.
+import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
@@ -22,9 +23,10 @@ export function resultBudget(spillDir: string, maxChars: number): InlineExtensio
         const total = texts.reduce((n: number, c: any) => n + c.text.length, 0);
         if (total <= maxChars) return undefined;
         mkdirSync(spillDir, { recursive: true, mode: 0o700 });
-        const file = join(spillDir, `${Date.now().toString(36)}-${String(event.toolCallId).replace(/[^\w-]/g, "_").slice(0, 40)}.txt`);
+        const file = join(spillDir, `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}-${String(event.toolCallId).replace(/[^\w-]/g, "_").slice(0, 40)}.txt`);
         const full = texts.map((c: any) => c.text).join("\n");
-        writeFileSync(file, full, { mode: 0o600 });
+        // The spill folder is agent-writable: create the file exclusively so a planted link is never followed.
+        writeFileSync(file, full, { mode: 0o600, flag: "wx" });
         const images = (event.content ?? []).filter((c: any) => c.type !== "text");
         return { content: [{ type: "text", text: capText(full, maxChars, file) }, ...images], isError: event.isError };
       });

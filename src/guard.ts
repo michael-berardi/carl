@@ -5,10 +5,11 @@
 // Commands are split into segments at ; && || | & newlines and $( ), and judged by their verb, so "rg shutdown"
 // is a search, not a shutdown. Quoting and backslashes are removed before matching. Anything that hides the
 // real command (eval, sh -c, interpreters with inline code, a variable as the verb, base64 decoding) asks first.
-import { existsSync, realpathSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { constants as fsc, existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { detectSupportedImageMimeTypeFromFile, type ExtensionAPI, type InlineExtension } from "@earendil-works/pi-coding-agent";
 
 export type Verdict = { level: "ok" } | { level: "dangerous" | "hardline"; reason: string };
 
@@ -283,7 +284,8 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
           verdict = classifyCommand(subject, rules);
         } else if (event.toolName === "write" || event.toolName === "edit") {
           const content = String(event.input?.content ?? event.input?.newText ?? event.input?.new_string ?? JSON.stringify(event.input?.edits ?? ""));
-          subject = `${event.toolName} ${path}\n${content.length > 1_500 ? content.slice(0, 1_500) + `\n… (${content.length} characters in all)` : content}`;
+          // Never shortened: the operator approves exactly what is written (a card too long for the channel is refused).
+          subject = `${event.toolName} ${path}\n${content}`;
           verdict = writeVerdict(path, rules);
         } else if (event.toolName === "read") {
           subject = `read ${path}`;
@@ -312,50 +314,82 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
   } as InlineExtension;
 }
 
+/** Run a small file utility inside the shell sandbox; the kernel then judges the real path, whatever links it went through. */
+function sandboxed(profile: string, argv: string[], input?: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("/usr/bin/sandbox-exec", ["-f", profile, ...argv], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: "/usr/bin:/bin", HOME } });
+    const out: Buffer[] = [];
+    let err = "";
+    child.stdout.on("data", (b: Buffer) => out.push(b));
+    child.stderr.on("data", (b: Buffer) => { if (err.length < 2_000) err += b; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) return resolve(Buffer.concat(out));
+      const path = argv[argv.length - 1];
+      if (code === 3) return reject(Object.assign(new Error(`ENOENT: no such file or directory, '${path}'`), { code: "ENOENT" }));
+      if (code === 4) return reject(Object.assign(new Error(`EACCES: permission denied, '${path}'`), { code: "EACCES" }));
+      reject(new Error(err.trim() || `${basename(argv[0])} exited with ${code}`));
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(input ?? "");
+  });
+}
+
+const ACCESS = 'test -e "$1" || exit 3; test -r "$1" || exit 4; [ -z "$2" ] || test -w "$1" || exit 4';
+
 /**
- * File operations for Pi's write and edit tools that repeat the path check at the moment of writing (after the
- * approval, after any symlink swap) and refuse to follow a symlink at the final component.
+ * File operations for Pi's write and edit tools. The guard's verdict is repeated at the moment of the operation
+ * (after any approval), and where Seatbelt exists the operation itself runs inside the shell sandbox, so swapping a
+ * file or folder for a symlink in between gains nothing. Without Seatbelt the last path step is never followed.
  */
-export function guardedFileOps(rules: GuardRules) {
+export function guardedFileOps(rules: GuardRules & { sandboxProfile?: string }) {
   const check = (abs: string) => {
-    const v = writeVerdict(abs, rules);
-    if (v.level === "hardline") throw new Error(`refused: ${v.reason}`);
+    for (const v of [writeVerdict(abs, rules), readVerdict(abs, rules)]) if (v.level === "hardline") throw new Error(`refused: ${v.reason}`);
   };
-  const writeFile = async (abs: string, content: string) => {
-    check(abs);
-    const { open } = await import("node:fs/promises");
-    const { constants } = await import("node:fs");
-    const fh = await open(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o644);
-    try {
-      await fh.writeFile(content, "utf8");
-    } finally {
-      await fh.close();
-    }
-  };
+  const profile = rules.sandboxProfile;
   return {
-    writeFile,
+    writeFile: async (abs: string, content: string) => {
+      check(abs);
+      if (profile) return void (await sandboxed(profile, ["/bin/sh", "-c", 'cat > "$1"', "sh", abs], content));
+      const { open } = await import("node:fs/promises");
+      const fh = await open(abs, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_TRUNC | fsc.O_NOFOLLOW, 0o644);
+      try { await fh.writeFile(content, "utf8"); } finally { await fh.close(); }
+    },
     mkdir: async (dir: string) => {
       check(dir);
-      const { mkdir } = await import("node:fs/promises");
-      await mkdir(dir, { recursive: true });
+      if (profile) return void (await sandboxed(profile, ["/bin/mkdir", "-p", dir]));
+      await (await import("node:fs/promises")).mkdir(dir, { recursive: true });
     },
-    readFile: async (abs: string) => (await import("node:fs/promises")).readFile(abs),
+    readFile: async (abs: string) => {
+      check(abs);
+      return profile ? sandboxed(profile, ["/bin/cat", abs]) : (await import("node:fs/promises")).readFile(abs);
+    },
     access: async (abs: string) => {
       check(abs);
-      const { access, constants } = await import("node:fs/promises").then(async (m) => ({ access: m.access, constants: (await import("node:fs")).constants }));
-      await access(abs, constants.R_OK | constants.W_OK);
+      if (profile) return void (await sandboxed(profile, ["/bin/sh", "-c", ACCESS, "sh", abs, "w"]));
+      await (await import("node:fs/promises")).access(abs, fsc.R_OK | fsc.W_OK);
     },
   };
 }
 
-/** File operations for Pi's read tool that repeat the secret check at the moment of reading. */
-export function guardedReadOps(rules: GuardRules) {
+/** File operations for Pi's read tool: the secret check repeated at the moment of reading, the read itself sandboxed. */
+export function guardedReadOps(rules: GuardRules & { sandboxProfile?: string }) {
   const check = (abs: string) => {
     const v = readVerdict(abs, rules);
     if (v.level === "hardline") throw new Error(`refused: ${v.reason}`);
   };
+  const profile = rules.sandboxProfile;
   return {
-    readFile: async (abs: string) => { check(abs); return (await import("node:fs/promises")).readFile(abs); },
-    access: async (abs: string) => { check(abs); const m = await import("node:fs/promises"); await m.access(abs, (await import("node:fs")).constants.R_OK); },
+    readFile: async (abs: string) => {
+      check(abs);
+      return profile ? sandboxed(profile, ["/bin/cat", abs]) : (await import("node:fs/promises")).readFile(abs);
+    },
+    access: async (abs: string) => {
+      check(abs);
+      if (profile) return void (await sandboxed(profile, ["/bin/sh", "-c", ACCESS, "sh", abs, ""]));
+      await (await import("node:fs/promises")).access(abs, fsc.R_OK);
+    },
+    // Only the type is learned (no content), after the same check; the content itself is read in the sandbox.
+    detectImageMimeType: async (abs: string) => { check(abs); return detectSupportedImageMimeTypeFromFile(abs); },
   };
 }

@@ -8,10 +8,10 @@ Report vulnerabilities privately through GitHub's security advisory form for thi
 
 - **Who can talk to it:** only the user ids in each channel's `allowFrom`. Messages and button presses from anyone else are ignored and logged.
 - **The API:** every route except the static web-app shell needs the bearer key, compared in constant time. The listener binds to loopback unless you change `api.host`. Webhooks need the key or a valid HMAC signature.
-- **Carl's own files and secrets:** on macOS every shell command runs in a Seatbelt sandbox that denies writes to `CARL_HOME` (except the agent's working areas) and reads of credential files. Carl's tokens and keys are removed from every command's environment.
+- **Carl's own files and secrets:** on macOS shell commands, MCP servers, the file tools, speech-to-text and command schedules run in a Seatbelt sandbox. It denies writes to `CARL_HOME` (except the agent's working areas) and to everything else Carl runs or loads, reads and moves of credential files, app launching (Apple Events, LaunchServices, `open`, `osascript`, `launchctl`) and connections to Carl's API. Those programs get an allowlisted environment, so Carl's tokens and keys exported in your shell never reach them. The README's Safety section has the full list.
 - **Risky actions:** the guard asks the operator before destructive, publishing, deploying or app-automating commands, and refuses outright where nobody can be asked.
 - **Billing:** the Claude route only forwards requests that authenticate with the subscription login (an OAuth token). It refuses API-key authentication rather than bill an API account.
 
 ## What it does not protect
 
-Carl acts with the authority you give it. Tools that start workers, call MCP servers or drive other programs can do whatever those can do. The guard is a tripwire, not a sandbox for those routes. On Linux and Windows there is no kernel sandbox yet; Carl logs that at startup.
+Carl acts with the authority you give it. The sandbox is a boundary for Carl's own files and secrets, not a general jail: the agent can read and change your other files, use the network, and talk to other running programs (tmux, for one). The guard asks first for those routes, but it is a tripwire, not a proof. On macOS any program can read the startup environment of the user's other programs, so keep keys in files rather than exported shell variables. On Linux and Windows there is no kernel sandbox yet; Carl logs that at startup.

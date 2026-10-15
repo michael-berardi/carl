@@ -2,11 +2,13 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { cleanEnv, readNoFollow, sandboxArgv } from "../sandbox.ts";
 import type { Brain, RunResult } from "../brain.ts";
 import type { CarlConfig } from "../config.ts";
 import type { Log } from "../log.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
-import { chunkMarkdown, escapeHtml, htmlToPlain, markdownToTelegramHtml } from "./format.ts";
+import { chunkMarkdown, escapeHtml, htmlToPlain, markdownToTelegramHtml, visibleControls } from "./format.ts";
 import { type InlineButton, TelegramApi, TelegramError, type TgCallbackQuery, type TgMessage } from "./telegram-api.ts";
 
 interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string }
@@ -215,21 +217,23 @@ export class TelegramChannel {
     try {
       if (m.photo?.length) {
         const best = [...m.photo].sort((a, b) => b.width * b.height - a.width * a.height)[0];
-        const path = await this.api.download(best.file_id, join(this.cfg.home, "media", `${m.chat.id}-${m.message_id}.jpg`));
-        images.push({ type: "image", data: readFileSync(path).toString("base64"), mimeType: "image/jpeg" });
+        const data = await this.api.download(best.file_id, this.mediaPath(m, ".jpg"));
+        images.push({ type: "image", data: data.toString("base64"), mimeType: "image/jpeg" });
       }
       const audio = m.voice ?? m.audio;
       if (audio) {
         const ext = m.voice ? "ogg" : (m.audio?.file_name?.split(".").pop() ?? "mp3");
-        const path = await this.api.download(audio.file_id, join(this.cfg.home, "media", `${m.chat.id}-${m.message_id}.${ext}`));
+        const path = this.mediaPath(m, `.${ext.replace(/[^\w]+/g, "")}`);
+        await this.api.download(audio.file_id, path);
         const transcript = await this.transcribe(path);
         const missing = this.cfg.stt?.length ? `[voice note at ${path} could not be transcribed; see carl.log]` : `[voice note saved at ${path}; no speech-to-text is configured]`;
         text = [transcript ? `[voice note] ${transcript}` : missing, text].filter(Boolean).join("\n\n");
       }
       if (m.document) {
         const name = (m.document.file_name ?? "file").replace(/[^\w.-]+/g, "_");
-        const path = await this.api.download(m.document.file_id, join(this.cfg.home, "media", `${m.chat.id}-${m.message_id}-${name}`));
-        if (m.document.mime_type?.startsWith("image/")) images.push({ type: "image", data: readFileSync(path).toString("base64"), mimeType: m.document.mime_type });
+        const path = this.mediaPath(m, `-${name}`);
+        const data = await this.api.download(m.document.file_id, path);
+        if (m.document.mime_type?.startsWith("image/")) images.push({ type: "image", data: data.toString("base64"), mimeType: m.document.mime_type });
         else notes.push(`[file received: ${path}]`);
       }
     } catch (e) {
@@ -429,16 +433,23 @@ export class TelegramChannel {
     await this.api.answerCallbackQuery(q.id, typeof note === "string" ? note.slice(0, 190) : undefined).catch(() => {});
   }
 
+  /** A fresh, unguessable name in the media folder (the agent can write there, so names are never reused). */
+  private mediaPath(m: TgMessage, suffix: string): string {
+    return join(this.cfg.home, "media", `${m.chat.id}-${m.message_id}-${randomBytes(4).toString("hex")}${suffix}`);
+  }
+
   private transcribe(path: string): Promise<string> {
     const cmd = this.cfg.stt;
     if (!cmd?.length) return Promise.resolve("");
     // "{file}" is the audio; "{output}" (optional) is a file the command writes the transcript to, else stdout.
     const outFile = `${path}.txt`;
-    const argv = cmd.map((a) => a.replace("{file}", path).replace("{output}", outFile));
-    if (!cmd.some((a) => a.includes("{file}"))) argv.push(path);
+    const args = cmd.map((a) => a.replace("{file}", path).replace("{output}", outFile));
+    if (!cmd.some((a) => a.includes("{file}"))) args.push(path);
     const usesOutput = cmd.some((a) => a.includes("{output}"));
+    // Speech-to-text runs inside the shell sandbox: the agent can change its scripts or models, so it gets no more power.
+    const argv = sandboxArgv(this.brain.shellSandbox, args);
     return new Promise((resolve) => {
-      const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], env: cleanEnv(this.cfg) });
       let out = "";
       let err = "";
       child.stdout.on("data", (b) => (out += b));
@@ -450,7 +461,7 @@ export class TelegramChannel {
         if (code !== 0) this.log.error("speech-to-text failed", { code, stderr: err.slice(-300) });
         if (code !== 0) return resolve("");
         if (usesOutput) {
-          try { return resolve(readFileSync(outFile, "utf8").trim()); } catch (e) { this.log.error("speech-to-text wrote no transcript", { error: (e as Error).message }); return resolve(""); }
+          try { return resolve(readNoFollow(outFile).trim()); } catch (e) { this.log.error("speech-to-text wrote no transcript", { error: (e as Error).message }); return resolve(""); }
         }
         resolve(out.trim());
       });
@@ -473,7 +484,7 @@ export class TelegramChannel {
     }
     // Shown exactly, escaped, with invisible and direction-changing characters made visible; never truncated:
     // a command too long to read in chat is not approvable in chat.
-    const visible = command.replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+    const visible = visibleControls(command);
     const html = `<b>Approve?</b> ${escapeHtml(reason)}\n<pre>${escapeHtml(visible)}</pre>`;
     if (html.length > 4_000) {
       await this.api.sendMessage(chatId, `Refused without asking: a ${reason} request of ${command.length} characters is too long to review here.`).catch(() => {});

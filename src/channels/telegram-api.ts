@@ -157,13 +157,17 @@ export class TelegramApi {
     return json.result!;
   }
 
-  /** Download a file by id to `dest`. Bot API downloads are capped at 20 MB by Telegram. */
-  async download(fileId: string, dest: string): Promise<string> {
+  /**
+   * Download a file by id to `dest` and return its bytes. Bot API downloads are capped at 20 MB by Telegram.
+   * The file is created exclusively: a name planted in advance (a symlink, say) fails instead of being followed.
+   */
+  async download(fileId: string, dest: string): Promise<Buffer> {
     const file = await this.call<TgFile>("getFile", { file_id: fileId });
     if (!file.file_path) throw new Error("Telegram returned no file_path (file too large for the Bot API?)");
     const res = await fetch(`${this.fileBase}/${file.file_path}`, { signal: AbortSignal.timeout(120_000) });
     if (!res.ok) throw new Error(`file download failed: HTTP ${res.status}`);
-    writeFileSync(dest, new Uint8Array(await res.arrayBuffer()), { mode: 0o600 });
-    return dest;
+    const data = Buffer.from(await res.arrayBuffer());
+    writeFileSync(dest, data, { mode: 0o600, flag: "wx" });
+    return data;
   }
 }

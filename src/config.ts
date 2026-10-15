@@ -77,6 +77,8 @@ export interface CarlConfig {
   ultracompress: "auto" | "off";
   /** Extra KEY=VALUE files read for secrets after the environment and CARL_HOME/.env (values are never copied). */
   envFiles: string[];
+  /** Extra environment names passed to shell commands, MCP servers and command schedules (all others are dropped). */
+  shellEnv: string[];
 }
 
 export class ConfigError extends Error {
@@ -195,6 +197,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
       ? { home: abs(str(raw.ultraterm.home, "~/.hermes", "ultraterm.home"), home), overseerBin: abs(str(raw.ultraterm.overseerBin, "~/.ultraterm/bin/ut-overseer", "ultraterm.overseerBin"), home) }
       : undefined,
     envFiles: strList(raw.envFiles, "envFiles").map((p) => abs(p, home)),
+    shellEnv: strList(raw.shellEnv, "shellEnv"),
     ultracompress: raw.ultracompress === "off" || raw.ultracompress === false ? "off" : "auto",
     hooks: hooksOf(raw.hooks),
     guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous") },

@@ -133,5 +133,5 @@ export function htmlToPlain(html: string): string {
 
 /** Make invisible and direction-changing characters visible (approval cards must show exactly what runs). */
 export function visibleControls(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
 }

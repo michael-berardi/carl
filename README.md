@@ -106,15 +106,15 @@ Only Self, Persona and Lessons enter the prompt. The ledgers stay on disk and ar
 
 Carl runs tools with your own permissions, because it does real work. Two layers keep that safe.
 
-**A kernel sandbox for every shell command and MCP server (macOS).** Each runs under a Seatbelt profile that:
+**A kernel sandbox for everything the agent can influence (macOS).** Shell commands, MCP servers, the read, edit and write tools, speech-to-text and command schedules all run under one Seatbelt profile that:
 
-- denies writes anywhere in `CARL_HOME` except the agent's working areas (`workspace`, `memory`, `media`, `spill`), and to a `.pi` extension directory in the workspace;
-- denies writes to everything else Carl runs or loads: its own code, the Node and Claude Code installs, Pi's agent directory, extensions, context files, `Carl.app`, shell startup files and LaunchAgents;
+- denies writes anywhere in `CARL_HOME` except the agent's working areas (`workspace`, `memory`, `media`, `spill`), and to a `.pi` extension directory in the workspace; the working areas themselves cannot be moved or swapped for a link;
+- denies writes to everything Carl runs or loads outside the sandbox: its own code, the Node and Claude Code installs (and the links Carl starts them through), Pi's agent directory, extensions, context files, UltraTerm's helper folder, `Carl.app`, shell startup files and LaunchAgents;
 - denies reads of credential files (`.env`, configured env files, Pi's `auth.json`), and moving, renaming or hardlinking them or any folder above them;
-- blocks the programs that hand work to processes outside the sandbox (`osascript`, `open`, `launchctl`, `crontab`, `at`, `shortcuts`, `sudo`), Apple Events, and connections to Carl's own API port;
-- removes Carl's own secrets (bot tokens, the API key, webhook secrets) from the environment.
+- blocks the routes that start work outside the sandbox: `osascript`, `open`, `launchctl`, `crontab`, `at`, `shortcuts` and `sudo`, Apple Events, LaunchServices, and connections to Carl's own API port;
+- passes only an allowlist of environment variables (`PATH`, `HOME`, locale, terminal and similar). Carl's secrets and any keys exported in your shell are dropped; add names the agent should see to `shellEnv`.
 
-The read, edit and write tools apply the same rules, re-checked at the moment of writing, and never follow a symlink at the target. The profile starts from "allow" and denies these routes, so it is a boundary for Carl's own files and secrets, not a general jail: the agent can still read and change your other files, use the network, and talk to other running programs. Shell-command schedules run outside the sandbox with your full environment, so only the operator can create them, in the web portal. On Linux and Windows the secrets are still removed from the environment, and the missing kernel boundary is logged at startup.
+The profile starts from "allow" and denies these routes, so it is a boundary for Carl's own files and secrets, not a general jail: the agent can still read and change your other files, use the network, and talk to other running programs such as tmux. On macOS any program you run can read the startup environment of your other programs, so keep keys in files rather than exported shell variables; Carl warns at startup if one of its own secrets is in its environment. On Linux and Windows the environment allowlist still applies, and the missing kernel boundary is logged at startup.
 
 **A guard that asks before risky actions.** Commands are parsed into simple commands, respecting quotes and heredocs, and judged by what actually runs:
 
@@ -123,7 +123,7 @@ The read, edit and write tools apply the same rules, re-checked at the moment of
   - In Telegram, Slack or Discord, Carl shows you the exact command (or file content) with **Run once** and **Deny** buttons. No answer within 5 minutes means no.
   - Runs with nobody to ask (schedules, the API) refuse instead.
 
-The guard is a tripwire for mistakes and prompt injection, not a proof. The sandbox is the boundary for Carl's own files and secrets. Carl also holds whatever authority you give it through tools: if it can start workers or drive other apps, it can ask them to act. Routes the sandbox leaves open, such as `tmux send-keys`, always ask first.
+The guard is a tripwire for mistakes and prompt injection, not a proof. The sandbox is the boundary for Carl's own files and secrets. Carl also holds whatever authority you give it through tools: if it can start workers or drive other apps, it can ask them to act. Routes the sandbox leaves open, such as `tmux send-keys`, always ask first; the programs the sandbox blocks are refused up front.
 
 Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 
@@ -147,7 +147,8 @@ Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
   "stt": ["/path/to/transcribe", "{file}", "{output}"],
   "claude": { "configDirs": ["~/.claude", "~/.claude-work"] },
   "guard": { "hardline": [["\\bterraform\\s+destroy\\b", "terraform destroy"]] },
-  "envFiles": ["~/.config/bot/.env"]
+  "envFiles": ["~/.config/bot/.env"],
+  "shellEnv": ["GITHUB_TOKEN"]
 }
 ```
 
