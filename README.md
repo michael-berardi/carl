@@ -173,7 +173,7 @@ carl schedules          list schedules
 
 ## Modules
 
-- **UltraTerm:** `"ultraterm": {"home": "~/.hermes"}` makes Carl a drop-in for UltraTerm's UltraBot slot. It writes the status, transcript and usage files UltraTerm reads and serves the routes its panels use.
+- **UltraTerm:** `"ultraterm": {"home": "~/.hermes"}` makes Carl a drop-in for UltraTerm's UltraBot slot. It writes the status, transcript and usage files UltraTerm reads and serves the routes its panels use. To run it in that slot, install `scripts/ultrabot-gateway.sh` as `~/.hermes/ultrabot-gateway.sh`: UltraTerm then starts Carl from a clean environment as its own child and restarts it if it exits. List the OverSeer and memory servers in `trustedMcp` so they run outside the sandbox (their acting tools still ask first).
 - **Your own extensions:** any Pi extension loads through `extensions`. That covers custom tools, providers, MCP bridges and delegation.
 
 ## Development
