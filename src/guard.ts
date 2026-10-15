@@ -163,6 +163,11 @@ function judgeSegment(s: { verb: string; args: string; text: string }): Verdict 
   if (verb === "find" && /(^|\s)(-delete|-exec(dir)?\s+rm\b)/.test(args)) return { level: "dangerous", reason: "find that deletes" };
   if (verb === "rsync" && /--delete/.test(args)) return { level: "dangerous", reason: "rsync --delete" };
   if (verb === "xargs" && /(^|\s)(rm|kill|mv|sh|bash)(\s|$)/.test(args)) return { level: "dangerous", reason: "xargs running a destructive command" };
+  // Driving other programs runs code outside Carl's sandbox: ask.
+  if (verb === "osascript" || verb === "automator" || (verb === "shortcuts" && /^run\b/.test(args))) return { level: "dangerous", reason: `${verb} drives other apps outside the sandbox` };
+  if (verb === "open") return { level: "dangerous", reason: "open hands a file, app or URL to another program" };
+  if (verb === "tmux" && /\b(send-keys|send|new-window|neww|split-window|splitw|new-session|new|run-shell|run|respawn-pane|respawn-window|pipe-pane)\b/.test(args)) return { level: "dangerous", reason: "tmux driving another terminal" };
+  if (verb === "screen" && /(^|\s)-X\b/.test(args)) return { level: "dangerous", reason: "screen driving another terminal" };
   // Indirection hides the real command: ask.
   if (verb === "eval" || verb === "source" || verb === ".") return { level: "dangerous", reason: `${verb} runs code the guard cannot see` };
   if (/^(ba|z|k|da|fi)?sh$/.test(verb) && /(^|\s)-[a-zA-Z]*c(\s|$)/.test(args)) return { level: "dangerous", reason: `${verb} -c runs code the guard cannot see` };

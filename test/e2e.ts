@@ -1,6 +1,7 @@
 // End-to-end: real model (Pi credentials), fake Telegram, temp homes. Run: npm run test:e2e
 // Exercises the gateway the way UltraTerm and an operator use it, and checks every side effect.
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +13,7 @@ import { FakeTelegram } from "./fake-telegram.ts";
 
 const OP = 4242; // allowed operator
 const STRANGER = 777;
-const KEY = "test-key-0123456789abcdef";
+const KEY = randomBytes(18).toString("base64url"); // generated per run: no key-shaped literals in the repo
 
 const results: { name: string; ok: boolean; ms: number; error?: string }[] = [];
 async function step(name: string, fn: () => Promise<void>) {

@@ -121,7 +121,7 @@ No way of writing a command gets around this. The agent cannot rewrite Carl's co
   - In Telegram, Slack or Discord, Carl shows you the exact command (or file content) with **Run once** and **Deny** buttons. No answer within 5 minutes means no.
   - Runs with nobody to ask (schedules, the API) refuse instead.
 
-The guard is a tripwire for mistakes and prompt injection, not a proof. The sandbox is the boundary.
+The guard is a tripwire for mistakes and prompt injection, not a proof. The sandbox is the boundary for Carl's own files and secrets. Carl also holds whatever authority you give it through tools: if it can start workers or drive other apps, it can ask them to act. Those routes (`osascript`, `open`, `tmux send-keys` and the like) always ask first.
 
 Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 
