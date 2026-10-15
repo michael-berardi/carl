@@ -1,5 +1,5 @@
 {
-  "name": "carl-bot",
+  "name": "carl-gateway",
   "version": "0.1.0",
   "description": "Carl: the minimal bot gateway. One process, one Pi agent per conversation, Telegram + an OpenAI-compatible API, schedules, and a self-reflecting psyche.",
   "license": "MIT",
@@ -39,5 +39,19 @@
     "@earendil-works/pi-tui": "1.0.4",
     "@earendil-works/chord": "1.0.4",
     "@earendil-works/pi-telemetry": "1.0.4"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/michael-berardi/carl.git"
+  },
+  "homepage": "https://github.com/michael-berardi/carl#readme",
+  "keywords": [
+    "pi-package",
+    "agent",
+    "telegram",
+    "bot",
+    "claude",
+    "codex",
+    "gateway"
+  ]
 }
