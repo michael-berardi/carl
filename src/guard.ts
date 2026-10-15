@@ -285,7 +285,10 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
         } else if (event.toolName === "write" || event.toolName === "edit") {
           const content = String(event.input?.content ?? event.input?.newText ?? event.input?.new_string ?? JSON.stringify(event.input?.edits ?? ""));
           // Never shortened: the operator approves exactly what is written (a card too long for the channel is refused).
-          subject = `${event.toolName} ${path}\n${content}`;
+          // The card names the real target when the path itself is a link (the write lands there).
+          const target = path ? real(path, rules.cwd) : "";
+          const lexical = path ? join(real(dirname(path), rules.cwd), basename(path)) : "";
+          subject = `${event.toolName} ${path}${target && target !== lexical ? ` (a link to ${target})` : ""}\n${content}`;
           verdict = writeVerdict(path, rules);
         } else if (event.toolName === "read") {
           subject = `read ${path}`;
@@ -315,12 +318,22 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
 }
 
 /** Run a small file utility inside the shell sandbox; the kernel then judges the real path, whatever links it went through. */
+const MAX_FILE_BYTES = 256 * 1024 * 1024;
 function sandboxed(profile: string, argv: string[], input?: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = spawn("/usr/bin/sandbox-exec", ["-f", profile, ...argv], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: "/usr/bin:/bin", HOME } });
     const out: Buffer[] = [];
+    let size = 0;
     let err = "";
-    child.stdout.on("data", (b: Buffer) => out.push(b));
+    // A device or endless file (/dev/zero) must not exhaust Carl's memory: bounded in size and time.
+    const fail = (why: string) => { child.kill("SIGKILL"); reject(new Error(why)); };
+    const timer = setTimeout(() => fail(`${basename(argv[0])} on ${argv[argv.length - 1]} took over 60 s`), 60_000);
+    child.on("close", () => clearTimeout(timer));
+    child.stdout.on("data", (b: Buffer) => {
+      size += b.length;
+      if (size > MAX_FILE_BYTES) return fail(`${argv[argv.length - 1]} is larger than ${MAX_FILE_BYTES / 1024 / 1024} MiB`);
+      out.push(b);
+    });
     child.stderr.on("data", (b: Buffer) => { if (err.length < 2_000) err += b; });
     child.on("error", reject);
     child.on("close", (code) => {
@@ -390,6 +403,11 @@ export function guardedReadOps(rules: GuardRules & { sandboxProfile?: string }) 
       await (await import("node:fs/promises")).access(abs, fsc.R_OK);
     },
     // Only the type is learned (no content), after the same check; the content itself is read in the sandbox.
-    detectImageMimeType: async (abs: string) => { check(abs); return detectSupportedImageMimeTypeFromFile(abs); },
+    detectImageMimeType: async (abs: string) => {
+      check(abs);
+      // Only plain files are sniffed in Carl's own process (a FIFO would block it).
+      const st = await (await import("node:fs/promises")).stat(abs).catch(() => undefined);
+      return st?.isFile() ? detectSupportedImageMimeTypeFromFile(abs) : null;
+    },
   };
 }

@@ -8,9 +8,10 @@
 //
 // Everything else keeps the operator's normal permissions: Carl is an agent that does real work, not a toy box.
 // Where Seatbelt is unavailable (Linux, Windows) the environment scrubbing still applies, and the gap is logged.
-import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import type { BashSpawnContext } from "@earendil-works/pi-coding-agent";
 import type { CarlConfig } from "./config.ts";
 
@@ -48,11 +49,15 @@ export function secretFiles(cfg: CarlConfig): string[] {
   ];
 }
 
-/** Every folder above a path (not "/"): renaming any of them would move the path somewhere unprotected. */
+/**
+ * Every folder above a path (not "/"), both as written and as resolved: renaming any of them, or swapping a
+ * symlinked folder on the way, would move the path somewhere unprotected.
+ */
 function ancestors(p: string): string[] {
-  const out: string[] = [];
-  for (let d = canonical(dirname(p)); d !== "/"; d = dirname(d)) out.push(d);
-  return out;
+  const out = new Set<string>();
+  for (let d = dirname(resolve(p)); d !== "/"; d = dirname(d)) out.add(d);
+  for (let d = canonical(dirname(p)); d !== "/"; d = dirname(d)) out.add(d);
+  return [...out];
 }
 
 /**
@@ -77,6 +82,39 @@ export function executableChain(p: string): string[] {
 const ENV_ALLOW = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERM_PROGRAM", "COLORTERM", "LANG", "TZ", "TMPDIR",
   "PWD", "EDITOR", "VISUAL", "PAGER", "SSH_AUTH_SOCK", "TMUX", "TMUX_PANE", "CARL_HOME", "NO_COLOR", "FORCE_COLOR"]);
 const ENV_ALLOW_PREFIX = ["LC_", "XDG_", "HOMEBREW_", "ULTRATERM_"];
+const ENV_ALLOW_NETWORK = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"];
+for (const n of ENV_ALLOW_NETWORK) ENV_ALLOW.add(n);
+/** Names that look like credentials never pass on a prefix match (HOMEBREW_GITHUB_API_TOKEN, say); only shellEnv admits them. */
+export const SECRET_NAME = /(KEY|TOKEN|SECRET|PASSW|AUTH|CRED|COOKIE|SESSION)/i;
+
+/** The PATH the operator's shell had: the agent's commands keep it, while Carl's own children use a trusted one. */
+let agentPath: string | undefined;
+
+/**
+ * Give Carl's unsandboxed children (Claude Code, UltraTerm helpers, UltraCompress) a PATH made only of folders the
+ * agent cannot write: a private bin folder of links to programs resolved once now, UltraTerm's helper folder and the
+ * system folders. Returns the resolved programs so their link chains can be pinned.
+ */
+export function adoptTrustedPath(binDir: string, programs: Record<string, string | undefined>, extraDirs: string[] = []): Record<string, string> {
+  agentPath ??= process.env.PATH ?? "";
+  rmSync(binDir, { recursive: true, force: true });
+  mkdirSync(binDir, { recursive: true, mode: 0o700 });
+  const found: Record<string, string> = {};
+  for (const [name, given] of Object.entries(programs)) {
+    const path = given ?? agentPath.split(delimiter).filter(Boolean).map((d) => join(d, name)).find((c) => existsSync(c));
+    if (!path) continue;
+    found[name] = path;
+    symlinkSync(path, join(binDir, name));
+  }
+  process.env.PATH = [binDir, ...extraDirs, "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(delimiter);
+  return found;
+}
+
+/** Folders of the operator's PATH (where a planted `node` would win at Carl's next start). */
+export function operatorPathDirs(): string[] {
+  return (agentPath ?? process.env.PATH ?? "").split(delimiter).filter((d) => d.startsWith("/"));
+}
 
 /** The environment for anything the agent can influence: allowlisted names only, so no key reaches it by accident. */
 export function cleanEnv(cfg: CarlConfig, env: NodeJS.ProcessEnv = process.env, keep: Record<string, string> = {}): Record<string, string> {
@@ -85,8 +123,9 @@ export function cleanEnv(cfg: CarlConfig, env: NodeJS.ProcessEnv = process.env, 
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined || secret.has(k)) continue;
-    if (ENV_ALLOW.has(k) || extra.has(k) || ENV_ALLOW_PREFIX.some((p) => k.startsWith(p))) out[k] = v;
+    if (extra.has(k) || ENV_ALLOW.has(k) || (ENV_ALLOW_PREFIX.some((p) => k.startsWith(p)) && !SECRET_NAME.test(k))) out[k] = v;
   }
+  if (agentPath !== undefined) out.PATH = agentPath;
   return { ...out, ...keep };
 }
 
@@ -99,6 +138,14 @@ export function readNoFollow(path: string): string {
   } finally {
     closeSync(fd);
   }
+}
+
+/** Read a file inside the sandbox (for files in the agent's areas that Carl itself loads): links resolve as the agent's would. */
+export function readSandboxed(profile: string, path: string, maxBytes = 1 << 20): string {
+  const r = spawnSync(SANDBOX_EXEC, ["-f", profile, "/bin/cat", path], { maxBuffer: maxBytes, timeout: 10_000, env: { PATH: "/usr/bin:/bin" } });
+  if (r.error) throw new Error(`cannot read ${path}: ${r.error.message}`);
+  if (r.status !== 0) throw new Error(`cannot read ${path}: ${String(r.stderr).trim() || `exit ${r.status}`}`);
+  return String(r.stdout);
 }
 
 /** argv that runs a program under the profile (or as-is where Seatbelt is unavailable). */
