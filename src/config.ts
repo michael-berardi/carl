@@ -59,7 +59,7 @@ export interface CarlConfig {
   tools: string[];
   telegram: TelegramConfig;
   api: ApiConfig;
-  /** Speech-to-text command for voice notes; "{file}" is replaced with the audio path; stdout is the transcript. */
+  /** Speech-to-text command for voice notes: "{file}" is the audio path; the transcript is "{output}" when given, else stdout. */
   stt?: string[];
   /** Idle minutes after which a chat starts a fresh session on its next message (0 = never). */
   idleResetMinutes: number;
@@ -67,6 +67,8 @@ export interface CarlConfig {
   ultraterm?: { home: string; overseerBin: string };
   /** Claude route through the official Claude Code CLI: binary and login config dirs (first preferred). */
   claude: { enabled: boolean; command?: string; configDirs: string[] };
+  /** Extra shell-guard patterns on top of the built-in ones. */
+  guard: { hardline: [string, string][]; dangerous: [string, string][] };
   /** Extra KEY=VALUE files read for secrets after the environment and CARL_HOME/.env (values are never copied). */
   envFiles: string[];
 }
@@ -172,6 +174,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
       ? { home: abs(str(raw.ultraterm.home, "~/.hermes", "ultraterm.home"), home), overseerBin: abs(str(raw.ultraterm.overseerBin, "~/.ultraterm/bin/ut-overseer", "ultraterm.overseerBin"), home) }
       : undefined,
     envFiles: strList(raw.envFiles, "envFiles").map((p) => abs(p, home)),
+    guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous") },
     claude: {
       enabled: raw.claude?.enabled === undefined ? true : bool(raw.claude.enabled, "claude.enabled"),
       command: raw.claude?.command ? abs(str(raw.claude.command, "claude", "claude.command"), home) : undefined,
@@ -209,4 +212,14 @@ function strList(v: unknown, name: string): string[] {
   if (v === undefined || v === null) return [];
   if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new ConfigError(`${name} must be a list of strings`);
   return v as string[];
+}
+
+function pairs(v: unknown, name: string): [string, string][] {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v) || v.some((p) => !Array.isArray(p) || p.length !== 2 || p.some((x) => typeof x !== "string")))
+    throw new ConfigError(`${name} must be a list of [regex, reason] pairs`);
+  for (const [src] of v as [string, string][]) {
+    try { new RegExp(src); } catch (e) { throw new ConfigError(`${name}: bad regex ${JSON.stringify(src)}: ${(e as Error).message}`); }
+  }
+  return v as [string, string][];
 }

@@ -160,7 +160,8 @@ export class TelegramChannel {
         const ext = m.voice ? "ogg" : (m.audio?.file_name?.split(".").pop() ?? "mp3");
         const path = await this.api.download(audio.file_id, join(this.cfg.home, "media", `${m.chat.id}-${m.message_id}.${ext}`));
         const transcript = await this.transcribe(path);
-        text = [transcript ? `[voice note] ${transcript}` : `[voice note saved at ${path}; no speech-to-text configured]`, text].filter(Boolean).join("\n\n");
+        const missing = this.cfg.stt?.length ? `[voice note at ${path} could not be transcribed; see carl.log]` : `[voice note saved at ${path}; no speech-to-text is configured]`;
+        text = [transcript ? `[voice note] ${transcript}` : missing, text].filter(Boolean).join("\n\n");
       }
       if (m.document) {
         const name = (m.document.file_name ?? "file").replace(/[^\w.-]+/g, "_");
@@ -331,8 +332,11 @@ export class TelegramChannel {
   private transcribe(path: string): Promise<string> {
     const cmd = this.cfg.stt;
     if (!cmd?.length) return Promise.resolve("");
-    const argv = cmd.map((a) => a.replace("{file}", path));
+    // "{file}" is the audio; "{output}" (optional) is a file the command writes the transcript to, else stdout.
+    const outFile = `${path}.txt`;
+    const argv = cmd.map((a) => a.replace("{file}", path).replace("{output}", outFile));
     if (!cmd.some((a) => a.includes("{file}"))) argv.push(path);
+    const usesOutput = cmd.some((a) => a.includes("{output}"));
     return new Promise((resolve) => {
       const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
       let out = "";
@@ -344,7 +348,11 @@ export class TelegramChannel {
       child.on("close", (code) => {
         clearTimeout(timer);
         if (code !== 0) this.log.error("speech-to-text failed", { code, stderr: err.slice(-300) });
-        resolve(code === 0 ? out.trim() : "");
+        if (code !== 0) return resolve("");
+        if (usesOutput) {
+          try { return resolve(readFileSync(outFile, "utf8").trim()); } catch (e) { this.log.error("speech-to-text wrote no transcript", { error: (e as Error).message }); return resolve(""); }
+        }
+        resolve(out.trim());
       });
     });
   }

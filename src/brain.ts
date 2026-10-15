@@ -89,6 +89,8 @@ export class Brain extends EventEmitter {
   private sweeper?: NodeJS.Timeout;
   readonly startedAt = Date.now();
   readonly piDir: string;
+  /** Claude login order. A host plugin (UltraTerm) may replace this to balance accounts by live usage. */
+  claudeAccounts: () => string[] = () => this.cfg.claude.configDirs;
   /** Models currently cooling down after a quota refusal (ref -> until epoch ms). */
   routerState = new Map<string, number>();
   /** The model sessions select: the router when fallbacks are configured, else the primary. */
@@ -111,8 +113,21 @@ export class Brain extends EventEmitter {
     this.piDir = join(cfg.home, "pi");
   }
 
+  /** Pi's own validated mcp.json reader (not a public export; pinned SDK version). */
+  private mcpLoader?: (o: { agentDir: string; cwd: string; projectTrusted: boolean }) => any;
+
   async init(): Promise<void> {
     mkdirSync(this.piDir, { recursive: true, mode: 0o700 });
+    if (this.cfg.mcp && existsSync(join(this.piDir, "mcp.json"))) {
+      try {
+        const url = new URL("./extensions/mcp/config.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
+        this.mcpLoader = (await import(url.href)).loadMcpConfig;
+        if (typeof this.mcpLoader !== "function") throw new Error("loadMcpConfig is not exported by this Pi SDK version");
+      } catch (e) {
+        this.mcpLoader = undefined;
+        this.log.error("MCP disabled: cannot load Pi's MCP config reader", { error: (e as Error).message });
+      }
+    }
     this.runtime = await ModelRuntime.create({
       authPath: join(this.cfg.piAgentDir, "auth.json"),
       modelsPath: join(this.cfg.piAgentDir, "models.json"),
@@ -120,7 +135,7 @@ export class Brain extends EventEmitter {
     if (this.cfg.claude.enabled) {
       this.runtime.registerProvider(CLAUDE_PROVIDER, claudeCodeProviderConfig({
         command: this.cfg.claude.command,
-        configDirs: this.cfg.claude.configDirs,
+        configDirs: () => this.claudeAccounts(),
         workdir: join(this.cfg.home, "state", "claude-cwd"),
         log: (level, msg, data) => this.log[level](msg, data),
       }) as any);
@@ -228,16 +243,20 @@ export class Brain extends EventEmitter {
     } as any);
     const extensionFactories: InlineExtension[] = [
       shellGuard(this.approver(key), (command, why) =>
-        this.psyche.recordShadow({ kind: "tool_error", conversation: key, summary: `shell command blocked: ${why}`, evidence: command.slice(0, 500) })),
+        this.psyche.recordShadow({ kind: "tool_error", conversation: key, summary: `shell command blocked: ${why}`, evidence: command.slice(0, 500) }), this.cfg.guard),
       resultBudget(join(this.cfg.home, "spill"), this.cfg.toolResultMaxChars),
     ];
-    if (this.cfg.mcp && existsSync(join(this.piDir, "mcp.json"))) {
+    if (this.cfg.mcp && existsSync(join(this.piDir, "mcp.json")) && this.mcpLoader) {
       // MCP servers reach the model through codemode: one tool, scripts call servers in parallel and
       // filter large results before they enter the context.
       extensionFactories.push(
         createCodemodeExtension({ mode: "on" }) as InlineExtension,
         createToolSearchExtension() as InlineExtension,
-        createMcpExtension({ logPath: join(this.cfg.home, "logs", "mcp.log") }) as InlineExtension,
+        createMcpExtension({
+          logPath: join(this.cfg.home, "logs", "mcp.log"),
+          // Pi's default loader reads the global ~/.pi/agent/mcp.json; Carl's servers live in CARL_HOME/pi.
+          loadConfig: (ctx: any) => this.mcpLoader!({ agentDir: this.piDir, cwd: ctx.cwd, projectTrusted: false }),
+        }) as InlineExtension,
       );
     }
     const loader = new DefaultResourceLoader({
