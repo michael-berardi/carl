@@ -10,6 +10,9 @@ import {
   createAgentSession,
   createBashToolDefinition,
   createCodemodeExtension,
+  createEditToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
   createMcpExtension,
   createToolSearchExtension,
   DefaultResourceLoader,
@@ -125,6 +128,18 @@ export class Brain extends EventEmitter {
     this.piDir = join(cfg.home, "pi");
   }
 
+  private fileTools(): ToolDefinition[] {
+    const cwd = this.cfg.workspace;
+    const make: Record<string, () => ToolDefinition> = {
+      read: () => createReadToolDefinition(cwd) as ToolDefinition,
+      bash: () => createBashToolDefinition(cwd, { spawnHook: sandboxSpawnHook(this.cfg, this.sandboxProfile) }) as ToolDefinition,
+      edit: () => createEditToolDefinition(cwd) as ToolDefinition,
+      write: () => createWriteToolDefinition(cwd) as ToolDefinition,
+    };
+    for (const t of this.cfg.tools) if (!make[t]) throw new Error(`tools: "${t}" is not one of read, bash, edit, write`);
+    return this.cfg.tools.map((t) => make[t]());
+  }
+
   /** Seatbelt profile for shell commands (macOS); undefined where the kernel sandbox is unavailable. */
   private sandboxProfile?: string;
 
@@ -136,6 +151,10 @@ export class Brain extends EventEmitter {
 
   async init(): Promise<void> {
     mkdirSync(this.piDir, { recursive: true, mode: 0o700 });
+    // Run from the workspace: tools and extensions that write relative to the process (UltraCompress snapshots,
+    // MCP servers) then stay inside it instead of wherever Carl was launched.
+    mkdirSync(this.cfg.workspace, { recursive: true, mode: 0o700 });
+    process.chdir(this.cfg.workspace);
     const extraProtected = this.cfg.ultraterm ? [join(this.cfg.ultraterm.home, "gateway_state.json"), join(this.cfg.ultraterm.home, "state.db"), join(this.cfg.ultraterm.home, "state.db-wal"), join(this.cfg.ultraterm.home, ".env")] : [];
     this.sandboxProfile = installProfile(this.cfg, extraProtected);
     if (this.sandboxProfile) this.log.info("shell sandbox: Seatbelt", { profile: this.sandboxProfile });
@@ -337,12 +356,10 @@ export class Brain extends EventEmitter {
       settingsManager,
       // Pi's default built-ins are read, bash, edit, write; switch off the ones the config leaves out.
       // (An allowlist would also switch off extension tools, so Carl excludes instead.)
-      // Pi's bash is replaced by the same tool with the sandbox spawn hook.
-      excludeTools: ["read", "bash", "edit", "write"].filter((t) => t === "bash" || !this.cfg.tools.includes(t)),
-      customTools: [
-        ...(this.cfg.tools.includes("bash") ? [createBashToolDefinition(this.cfg.workspace, { spawnHook: sandboxSpawnHook(this.cfg, this.sandboxProfile) })] : []),
-        ...this.tools(),
-      ] as ToolDefinition[],
+      // Pi's built-ins are switched off and Carl supplies its own definitions of the configured ones: the same
+      // tools, with bash wrapped in the sandbox. (Excluding a built-in by name would also exclude a replacement.)
+      noTools: "builtin",
+      customTools: [...this.fileTools(), ...this.tools()] as ToolDefinition[],
     });
     for (const err of extensionsResult.errors ?? []) this.log.error("extension failed to load", { error: String((err as any).error ?? err), path: (err as any).path });
     await session.bindExtensions({});

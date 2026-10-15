@@ -8,6 +8,7 @@
 // Everything else keeps the operator's normal permissions: Carl is an agent that does real work, not a toy box.
 // Where Seatbelt is unavailable (Linux, Windows) the environment scrubbing still applies, and the gap is logged.
 import { existsSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { BashSpawnContext } from "@earendil-works/pi-coding-agent";
 import type { CarlConfig } from "./config.ts";
@@ -51,6 +52,8 @@ export function buildProfile(cfg: CarlConfig, extraProtected: string[] = []): st
     // The workspace may hold code, but not code that Carl itself would load as an extension.
     `(deny file-write* (subpath ${sbString(join(cfg.workspace, ".pi"))}))`,
     `(deny file-read* ${secretFiles(cfg).map((p) => `(literal ${sbString(p)})`).join(" ")})`,
+    // Nothing persists to run later outside the sandbox.
+    `(deny file-write* (subpath ${sbString(join(homedir(), "Library", "LaunchAgents"))}) (subpath "/Library/LaunchAgents") (subpath "/Library/LaunchDaemons"))`,
   ];
   return lines.join("\n") + "\n";
 }
