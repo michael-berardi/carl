@@ -64,20 +64,31 @@ export function nextRun(schedule: Schedule, after: number, anchor?: number): num
     return base + schedule.ms > after ? base + schedule.ms : after + schedule.ms;
   }
   const f = schedule.fields;
-  const d = new Date(after);
-  d.setSeconds(0, 0);
-  d.setMinutes(d.getMinutes() + 1);
+  // Walk forward in absolute time (epoch ms), testing each local wall-clock minute. Stepping the epoch rather
+  // than the wall clock keeps DST honest: the repeated autumn hour is visited twice in order, never re-entered
+  // from the past, and the result is always strictly after `after`.
+  let t = Math.floor(after / 60_000) * 60_000 + 60_000;
   const limit = after + 366 * 86_400_000 * 5;
-  while (d.getTime() <= limit) {
-    if (!f.month.has(d.getMonth() + 1)) { d.setMonth(d.getMonth() + 1, 1); d.setHours(0, 0, 0, 0); continue; }
+  while (t <= limit) {
+    const d = new Date(t);
+    if (!f.month.has(d.getMonth() + 1)) {
+      const next = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+      t = Math.max(next.getTime(), t + 60_000);
+      continue;
+    }
     const domOk = f.dom.has(d.getDate());
     const dowOk = f.dow.has(d.getDay());
     // Classic cron: when both day fields are restricted, either one matching is enough.
     const dayOk = f.domStar && f.dowStar ? true : f.domStar ? dowOk : f.dowStar ? domOk : domOk || dowOk;
-    if (!dayOk) { d.setDate(d.getDate() + 1); d.setHours(0, 0, 0, 0); continue; }
-    if (!f.hour.has(d.getHours())) { d.setHours(d.getHours() + 1, 0, 0, 0); continue; }
-    if (!f.minute.has(d.getMinutes())) { d.setMinutes(d.getMinutes() + 1, 0, 0); continue; }
-    return d.getTime();
+    if (!dayOk) {
+      const next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+      t = Math.max(next.getTime(), t + 60_000);
+      continue;
+    }
+    if (!f.hour.has(d.getHours())) { t += (60 - d.getMinutes()) * 60_000; continue; }
+    if (!f.minute.has(d.getMinutes())) { t += 60_000; continue; }
+    if (t > after) return t;
+    t += 60_000;
   }
   throw new Error(`schedule "${schedule.source}" never fires`);
 }

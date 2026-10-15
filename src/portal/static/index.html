@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
+<title>Carl</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <form id="login-form">
+    <h1>Carl</h1>
+    <label for="key">API key</label>
+    <input id="key" type="password" autocomplete="current-password" required minlength="16">
+    <button type="submit">Open</button>
+    <p id="login-error" class="error" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" class="app" hidden>
+  <nav class="rail" aria-label="Sections">
+    <span class="brand">Carl</span>
+    <button data-view="chat" aria-current="page">Chat</button>
+    <button data-view="schedules">Schedules</button>
+    <button data-view="psyche">Psyche</button>
+    <button data-view="status">Status</button>
+    <span class="rail-status" id="rail-status"></span>
+  </nav>
+
+  <main>
+    <section id="view-chat" class="view chat">
+      <aside class="conversations" aria-label="Conversations">
+        <button id="new-conversation" class="quiet">New conversation</button>
+        <ul id="conversation-list"></ul>
+      </aside>
+      <div class="thread">
+        <header class="thread-head">
+          <h2 id="thread-title">web:main</h2>
+          <button id="thread-reset" class="quiet" title="Start a fresh session for this conversation">Fresh session</button>
+        </header>
+        <ol id="messages" class="messages" aria-live="polite"></ol>
+        <form id="composer" class="composer">
+          <textarea id="input" rows="2" placeholder="Message Carl" aria-label="Message"></textarea>
+          <button id="send" type="submit">Send</button>
+          <button id="stop" type="button" class="quiet" hidden>Stop</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="view-schedules" class="view" hidden>
+      <h2>Schedules</h2>
+      <table class="table">
+        <thead><tr><th>Name</th><th>When</th><th>Kind</th><th>Next</th><th>Last</th><th></th></tr></thead>
+        <tbody id="schedule-rows"></tbody>
+      </table>
+      <form id="schedule-form" class="stack">
+        <h3>Add</h3>
+        <div class="row">
+          <label>Name <input name="name" required></label>
+          <label>When <input name="when" required placeholder="every 30m"></label>
+          <label>Deliver <input name="deliver" value="home"></label>
+        </div>
+        <label>Prompt <textarea name="prompt" rows="2"></textarea></label>
+        <label>Command <input name="command"></label>
+        <button type="submit">Add schedule</button>
+        <p class="error" id="schedule-error" role="alert"></p>
+      </form>
+    </section>
+
+    <section id="view-psyche" class="view psyche" hidden>
+      <h2>Psyche</h2>
+      <div class="columns">
+        <div>
+          <h3>Self</h3>
+          <textarea id="self" rows="12"></textarea>
+          <button data-save="self">Save Self</button>
+          <h3>Persona</h3>
+          <textarea id="persona" rows="16"></textarea>
+          <button data-save="persona">Save Persona</button>
+          <p class="note" id="psyche-note"></p>
+        </div>
+        <div>
+          <h3>Lessons <small id="lessons-when"></small></h3>
+          <pre id="lessons" class="pre"></pre>
+          <button id="reflect" class="quiet">Reflect now</button>
+          <pre id="reflect-report" class="pre" hidden></pre>
+          <h3>Shadow</h3>
+          <ol id="shadow" class="ledger"></ol>
+          <h3>Decisions</h3>
+          <ol id="decisions" class="ledger"></ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-status" class="view" hidden>
+      <h2>Status</h2>
+      <dl id="status-list" class="facts"></dl>
+      <h3>Recent log</h3>
+      <ol id="log" class="log"></ol>
+    </section>
+  </main>
+</div>
+<script src="/app.js" type="module"></script>
+</body>
+</html>

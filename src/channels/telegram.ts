@@ -6,8 +6,10 @@ import type { Brain, RunResult } from "../brain.ts";
 import type { CarlConfig } from "../config.ts";
 import type { Log } from "../log.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
-import { chunkMarkdown, htmlToPlain, markdownToTelegramHtml } from "./format.ts";
+import { chunkMarkdown, escapeHtml, htmlToPlain, markdownToTelegramHtml } from "./format.ts";
 import { type InlineButton, TelegramApi, TelegramError, type TgCallbackQuery, type TgMessage } from "./telegram-api.ts";
+
+interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string }
 
 export type CommandHandler = (args: string, chatId: number, key: string) => Promise<string>;
 
@@ -73,10 +75,13 @@ export class TelegramChannel {
     this.setStatus("connected");
     this.loop = this.poll();
     void this.flushOutbox();
+    void this.reportInterrupted();
   }
 
   async stop(): Promise<void> {
     this.abort.abort();
+    // Give handlers a moment to deliver replies already produced; the in-flight journal covers the rest.
+    if (this.handlers.size) await Promise.race([Promise.allSettled([...this.handlers]), new Promise((r) => setTimeout(r, 2_500))]);
     if (this.outboxTimer) clearTimeout(this.outboxTimer);
     await this.loop?.catch(() => {});
     this.setStatus("stopped");
@@ -99,7 +104,7 @@ export class TelegramChannel {
           this.offset = u.update_id + 1;
           this.saveOffset(); // before handling: a crash mid-message never replays it
           this.status.lastUpdateAt = new Date().toISOString();
-          if (u.message) void this.onMessage(u.message).catch((e) => this.log.error("message handler failed", { error: (e as Error).stack }));
+          if (u.message) this.enqueueMessage(u.message);
           else if (u.callback_query) void this.onCallback(u.callback_query).catch((e) => this.log.error("callback failed", { error: (e as Error).message }));
         }
       } catch (e) {
@@ -132,10 +137,58 @@ export class TelegramChannel {
     return `telegram:group:${m.chat.id}${m.message_thread_id ? `:${m.message_thread_id}` : ""}`;
   }
 
-  private async onMessage(m: TgMessage): Promise<void> {
+  private readonly chains = new Map<string, Promise<void>>();
+  private readonly handlers = new Set<Promise<void>>();
+
+  /** Messages of one chat are prepared (downloads, speech-to-text) and handed to the brain in arrival order. */
+  private enqueueMessage(m: TgMessage): void {
+    const key = TelegramChannel.conversationKey(m);
+    let done!: () => void;
+    const handed = new Promise<void>((r) => (done = r));
+    const prev = this.chains.get(key) ?? Promise.resolve();
+    const next = prev.then(async () => {
+      const handler = this.onMessage(m, done).catch((e) => this.log.error("message handler failed", { error: (e as Error).stack }));
+      this.handlers.add(handler);
+      void handler.finally(() => { this.handlers.delete(handler); done(); });
+      // The next message of this chat waits until this one reached the brain (or 5 s), not until it finished,
+      // so a follow-up can still steer the running turn.
+      await Promise.race([handed, new Promise((r) => setTimeout(r, 5_000))]);
+    });
+    this.chains.set(key, next);
+    void next.finally(() => { if (this.chains.get(key) === next) this.chains.delete(key); });
+  }
+
+  // ---- In-flight journal: a restart mid-turn is reported to the operator instead of silently dropped. ----
+
+  private readonly inflightFile = () => join(this.cfg.home, "state", "inflight.json");
+  private readInflight(): Record<string, { chatId: number; threadId?: number; text: string; at: string }> {
+    try { return JSON.parse(readFileSync(this.inflightFile(), "utf8")); } catch { return {}; }
+  }
+  private markInflight(id: string, entry?: { chatId: number; threadId?: number; text: string }): void {
+    const all = this.readInflight();
+    if (entry) all[id] = { ...entry, at: new Date().toISOString() };
+    else delete all[id];
+    try {
+      writeFileSync(`${this.inflightFile()}.tmp`, JSON.stringify(all), { mode: 0o600 });
+      renameSync(`${this.inflightFile()}.tmp`, this.inflightFile());
+    } catch (e) {
+      this.log.warn("cannot write in-flight journal", { error: (e as Error).message });
+    }
+  }
+  private async reportInterrupted(): Promise<void> {
+    const left = this.readInflight();
+    for (const [id, e] of Object.entries(left)) {
+      const excerpt = e.text.length > 160 ? e.text.slice(0, 160) + "…" : e.text;
+      await this.sendMarkdown(e.chatId, `I restarted while working on this, so it did not finish:\n\n> ${excerpt.replace(/\n/g, " ")}\n\nSend it again if it still matters.`, { threadId: e.threadId })
+        .catch((err) => this.log.warn("cannot report an interrupted message", { error: (err as Error).message }));
+      this.markInflight(id);
+    }
+  }
+
+  private async onMessage(m: TgMessage, handed: () => void = () => {}): Promise<void> {
     if (!this.allowed(m.from?.id)) {
       this.log.warn("ignored message from a user not in telegram.allowFrom", { userId: m.from?.id, chat: m.chat.type });
-      return;
+      return handed();
     }
     const key = TelegramChannel.conversationKey(m);
     let text = (m.text ?? m.caption ?? "").trim();
@@ -143,6 +196,7 @@ export class TelegramChannel {
 
     const cmd = text.match(/^\/([a-z_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
     if (cmd) {
+      handed(); // commands never wait behind each other
       const handled = await this.command(cmd[1].toLowerCase(), (cmd[2] ?? "").trim(), m, key);
       if (handled) return;
     }
@@ -174,11 +228,23 @@ export class TelegramChannel {
     }
     if (m.reply_to_message?.text) notes.unshift(`[replying to: "${m.reply_to_message.text.slice(0, 400)}"]`);
     const body = [...notes, text].filter(Boolean).join("\n");
-    if (!body && !images.length) return;
-    await this.converse(m, key, { text: body || "(image)", images: images.length ? images : undefined, source: "telegram" });
+    if (!body && !images.length) return handed();
+    await this.converse(m, key, { text: body || "(image)", images: images.length ? images : undefined, source: "telegram" }, handed);
   }
 
-  private async converse(m: TgMessage, key: string, input: Parameters<Brain["ask"]>[1]): Promise<void> {
+  private async converse(m: TgMessage, key: string, input: Parameters<Brain["ask"]>[1], handed: () => void = () => {}): Promise<void> {
+    const chatId = m.chat.id;
+    const threadId = m.message_thread_id;
+    const journalId = `${chatId}:${m.message_id}`;
+    this.markInflight(journalId, { chatId, threadId, text: input.text });
+    try {
+      await this.converseInner(m, key, input, handed);
+    } finally {
+      this.markInflight(journalId);
+    }
+  }
+
+  private async converseInner(m: TgMessage, key: string, input: Parameters<Brain["ask"]>[1], handed: () => void): Promise<void> {
     const chatId = m.chat.id;
     const threadId = m.message_thread_id;
     const typing = setInterval(() => void this.api.sendChatAction(chatId, "typing", threadId).catch(() => {}), TYPING_INTERVAL_MS);
@@ -186,10 +252,12 @@ export class TelegramChannel {
     const draft = new Draft(this.api, chatId, m.message_id, threadId, this.cfg.telegram.stream);
     let result: RunResult;
     try {
-      result = await this.brain.ask(key, input, {
+      const running = this.brain.ask(key, input, {
         onText: (t) => draft.update(t),
         onTool: (name, detail) => draft.tool(name, detail),
       });
+      void this.brain.whenRegistered(key).then(handed, handed);
+      result = await running;
     } catch (e) {
       clearInterval(typing);
       await draft.finish(`Carl could not run that: ${(e as Error).message}`);
@@ -208,7 +276,7 @@ export class TelegramChannel {
     if (benched && result.ok && result.model !== this.cfg.model) {
       final += `\n\n_(${result.model.split("/").pop()} answered: ${this.cfg.model.split("/").pop()} is at its usage limit until ${new Date(benched[1]).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})_`;
     }
-    await this.deliverFinal(draft, chatId, final);
+    await this.deliverFinal(draft, chatId, threadId, final);
   }
 
   // ---- Durable delivery: a final reply that fails to send is kept and retried until Telegram takes it. ----
@@ -216,26 +284,43 @@ export class TelegramChannel {
   private readonly outboxFile = () => join(this.cfg.home, "state", "outbox.json");
   private outboxTimer?: NodeJS.Timeout;
 
-  private async deliverFinal(draft: Draft, chatId: number, markdown: string): Promise<void> {
+  private async deliverFinal(draft: Draft, chatId: number, threadId: number | undefined, markdown: string): Promise<void> {
     try {
       await draft.finish(markdown);
     } catch (e) {
-      this.log.error("reply delivery failed; queued for retry", { chatId, error: (e as Error).message });
-      const queue = this.readOutbox();
-      queue.push({ chatId, markdown, firstAt: Date.now(), attempts: 1, lastError: (e as Error).message });
-      this.writeOutbox(queue);
-      this.scheduleOutbox();
+      // Only what did not go out is queued: chunks Telegram already took are not sent twice.
+      this.log.error("reply delivery failed; queued for retry", { chatId, error: (e as Error).message, chunksSent: draft.chunksSent });
+      this.enqueue(chatId, chunkMarkdown(markdown).slice(draft.chunksSent), threadId, (e as Error).message);
     }
   }
 
-  private readOutbox(): { chatId: number; markdown: string; firstAt: number; attempts: number; lastError?: string }[] {
-    try { return JSON.parse(readFileSync(this.outboxFile(), "utf8")); } catch { return []; }
+  private outbox?: OutboxItem[];
+  private flushing?: Promise<void>;
+
+  private loadOutbox(): OutboxItem[] {
+    if (!this.outbox) {
+      try { this.outbox = JSON.parse(readFileSync(this.outboxFile(), "utf8")); } catch { this.outbox = []; }
+      if (!Array.isArray(this.outbox)) this.outbox = [];
+    }
+    return this.outbox!;
   }
 
-  private writeOutbox(queue: unknown[]): void {
+  private saveOutbox(): void {
     const file = this.outboxFile();
-    writeFileSync(`${file}.tmp`, JSON.stringify(queue), { mode: 0o600 });
-    renameSync(`${file}.tmp`, file);
+    try {
+      writeFileSync(`${file}.tmp`, JSON.stringify(this.loadOutbox()), { mode: 0o600 });
+      renameSync(`${file}.tmp`, file);
+    } catch (e) {
+      this.log.error("cannot persist the outbox", { error: (e as Error).message });
+    }
+  }
+
+  /** Queue Markdown chunks for delivery; used for failed replies and failed scheduled deliveries. */
+  enqueue(chatId: number, chunks: string[], threadId?: number, lastError?: string): void {
+    if (!chunks.length) return;
+    this.loadOutbox().push({ id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, chatId, threadId, chunks, firstAt: Date.now(), attempts: 1, lastError });
+    this.saveOutbox();
+    this.scheduleOutbox();
   }
 
   private scheduleOutbox(): void {
@@ -244,24 +329,35 @@ export class TelegramChannel {
     this.outboxTimer.unref();
   }
 
-  async flushOutbox(): Promise<void> {
-    const queue = this.readOutbox();
-    if (!queue.length) return;
-    const left: typeof queue = [];
-    for (const item of queue) {
+  /** Single-flight: concurrent callers share one pass, so nothing is sent twice. */
+  flushOutbox(): Promise<void> {
+    this.flushing ??= this.flushPass().finally(() => { this.flushing = undefined; });
+    return this.flushing;
+  }
+
+  private async flushPass(): Promise<void> {
+    const queue = this.loadOutbox();
+    for (const item of [...queue]) {
       if (Date.now() - item.firstAt > 24 * 3_600_000) {
         this.log.error("undeliverable reply dropped after 24 h", { chatId: item.chatId, attempts: item.attempts, error: item.lastError });
+        queue.splice(queue.indexOf(item), 1);
         continue;
       }
       try {
-        await this.sendMarkdown(item.chatId, `(delivered late)\n\n${item.markdown}`);
+        while (item.chunks.length) {
+          await this.sendMarkdown(item.chatId, item.chunks[0], { threadId: item.threadId });
+          item.chunks.shift(); // persisted below, so a crash resends at most this one chunk
+          this.saveOutbox();
+        }
+        queue.splice(queue.indexOf(item), 1);
         this.log.info("queued reply delivered", { chatId: item.chatId, attempts: item.attempts + 1 });
       } catch (e) {
-        left.push({ ...item, attempts: item.attempts + 1, lastError: (e as Error).message });
+        item.attempts++;
+        item.lastError = (e as Error).message;
       }
     }
-    this.writeOutbox(left);
-    if (left.length) this.scheduleOutbox();
+    this.saveOutbox();
+    if (queue.length) this.scheduleOutbox();
   }
 
   private async command(name: string, args: string, m: TgMessage, key: string): Promise<boolean> {
@@ -371,8 +467,13 @@ export class TelegramChannel {
         return choice === "yes" ? "Approved" : "Denied";
       });
     }
-    const text = `**Approve this command?** (${reason})\n\n\`\`\`\n${command.slice(0, 3_000)}\n\`\`\``;
-    const [msg] = await this.sendMarkdown(chatId, text, { buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
+    // Shown exactly, escaped, never truncated: a command too long to read in chat is not approvable in chat.
+    if (command.length > 3_500) {
+      await this.api.sendMessage(chatId, `Refused without asking: a ${reason} command of ${command.length} characters is too long to review here.`).catch(() => {});
+      return "denied";
+    }
+    const html = `<b>Approve?</b> ${escapeHtml(reason)}\n<pre>${escapeHtml(command)}</pre>`;
+    const msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
     const answer = await new Promise<"approved" | "denied" | "timeout">((resolve) => {
       const timer = setTimeout(() => { this.approvals.delete(id); resolve("timeout"); }, 300_000);
       this.approvals.set(id, (a) => { clearTimeout(timer); this.approvals.delete(id); resolve(a); });
@@ -413,6 +514,8 @@ class Draft {
   private readonly started = Date.now();
   private chain: Promise<unknown> = Promise.resolve();
   private finished = false;
+  /** Final-reply chunks Telegram accepted (for partial-failure recovery). */
+  chunksSent = 0;
 
   private readonly api: TelegramApi;
   private readonly chatId: number;
@@ -491,10 +594,11 @@ class Draft {
       try {
         await send(html, "HTML");
       } catch (e) {
-        if (e instanceof TelegramError && /not modified/i.test(e.description)) continue;
+        if (e instanceof TelegramError && /not modified/i.test(e.description)) { this.chunksSent++; continue; }
         if (!(e instanceof TelegramError) || e.code !== 400) throw e;
         await send(htmlToPlain(html).slice(0, 4096));
       }
+      this.chunksSent++;
     }
   }
 }

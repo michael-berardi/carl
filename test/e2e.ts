@@ -52,6 +52,8 @@ const workspaceProbe = join(root, "carl", "workspace", "doomed");
 
 const cfg = loadConfig(home);
 const gw = new Gateway(cfg);
+const toolCalls: { conversation: string; name: string; args: any }[] = [];
+gw.brain.on("transcript", (e: any) => { for (const c of e.toolCalls ?? []) toolCalls.push({ conversation: e.conversation, name: c.name, args: c.args }); });
 for (const p of await loadPlugins(cfg)) gw.use(p);
 await gw.start();
 const idle = () => tg.waitFor(() => gw.brain.busyCount() === 0, 120_000, "the run to settle");
@@ -79,8 +81,9 @@ await step("startup writes UltraTerm gateway_state.json", async () => {
 
 await step("strangers are ignored", async () => {
   tg.message(STRANGER, "hello?");
-  await new Promise((r) => setTimeout(r, 1_500));
+  await new Promise((r) => setTimeout(r, 3_000));
   assert.equal(tg.texts(STRANGER).length, 0);
+  assert.ok(!gw.brain.activeConversations().some((c) => c.key.includes(String(STRANGER))), "no conversation was opened for a stranger");
 });
 
 await step("operator gets a correct reply", async () => {
@@ -100,8 +103,10 @@ await step("conversation is mirrored into state.db for the UltraTerm pane", asyn
 });
 
 await step("tool use: bash runs and the answer uses its output", async () => {
+  const before = toolCalls.length;
   const shown = await say("Use bash to run: echo carl-$((40+2)). Reply with only the command output.");
   assert.ok(shown.some((t) => t.includes("carl-42")), `reply: ${shown.join(" | ")}`);
+  assert.ok(toolCalls.slice(before).some((c) => c.name === "bash" && /echo/.test(c.args?.command ?? "")), "the answer came from a real bash call");
 });
 
 await step("dangerous command waits for approval, runs after Run once", async () => {
@@ -127,10 +132,13 @@ await step("hardline command is refused without asking", async () => {
 await step("/status and /new commands", async () => {
   await idle();
   const t = Date.now();
+  const before = (await gw.brain.status(`telegram:dm:${OP}`)).sessionId;
   tg.message(OP, "/status");
   await tg.waitFor(() => tg.texts(OP, t).some((x) => x.includes("sessionId")), 10_000, "/status reply");
   tg.message(OP, "/new");
   await tg.waitFor(() => tg.texts(OP, t).some((x) => x.includes("Fresh conversation")), 15_000, "/new reply");
+  const after = (await gw.brain.status(`telegram:dm:${OP}`)).sessionId;
+  assert.ok(before && after && before !== after, `session id changed (${before} -> ${after})`);
 });
 
 await step("API: health, capabilities, jobs, skills, toolsets", async () => {
@@ -162,6 +170,51 @@ await step("composer intake: idempotent, answered in the Telegram thread, mirror
   await tg.waitFor(() => tg.texts(OP).some((t) => t.includes("You (UltraTerm)")), 90_000, "mirrored composer reply");
   const mirrored = tg.texts(OP).find((t) => t.includes("You (UltraTerm)"))!;
   assert.match(mirrored, /periwinkle/i, mirrored);
+  const db2 = new DatabaseSync(join(hermes, "state.db"), { readOnly: true });
+  const runs = (db2.prepare("SELECT COUNT(*) AS n FROM messages WHERE role = 'user' AND content LIKE 'Which word did I ask you to remember%'").get() as any).n;
+  db2.close();
+  assert.equal(runs, 1, "the idempotent request ran exactly once");
+});
+
+await step("steering: a message sent while a turn runs joins that turn", async () => {
+  await idle();
+  const t = Date.now();
+  tg.message(OP, "Run this bash command exactly: sleep 6 && echo first-done. Then reply with the output and anything else I add meanwhile.");
+  await tg.waitFor(() => gw.brain.busyCount() > 0, 10_000, "first run to start");
+  await new Promise((r) => setTimeout(r, 1_500));
+  const second = tg.message(OP, "Also include the word saffron in your reply.");
+  await tg.waitFor(() => tg.calls.some((c) => c.method === "setMessageReaction" && c.body.message_id === second), 15_000, "the 👀 steer acknowledgment");
+  await idle();
+  const shown = tg.texts(OP, t).join(" | ");
+  assert.match(shown, /first-done/, shown);
+  assert.match(shown, /saffron/i, shown);
+});
+
+await step("/stop ends a running turn", async () => {
+  await idle();
+  const t = Date.now();
+  tg.message(OP, "Run this bash command exactly and wait for it: sleep 25 && echo late");
+  await tg.waitFor(() => toolCalls.some((c) => /sleep 25/.test(c.args?.command ?? "")), 60_000, "the sleep to start");
+  tg.message(OP, "/stop");
+  await tg.waitFor(() => tg.texts(OP, t).some((x) => /Stopping/.test(x)), 10_000, "/stop acknowledgment");
+  await idle();
+  const shown = tg.texts(OP, t).join(" | ");
+  assert.doesNotMatch(shown, /\blate\b/, shown);
+  assert.match(shown, /stopped/i, shown);
+});
+
+await step("Deny on an approval card means the command does not run", async () => {
+  await idle();
+  const probe = join(root, "carl", "workspace", "kept");
+  mkdirSync(probe, { recursive: true });
+  const before = tg.calls.length;
+  tg.message(OP, `Run this exact bash command: rm -rf ${probe} . Then tell me what happened in one line.`);
+  await tg.waitFor(() => tg.calls.slice(before).some((c) => c.body.reply_markup?.inline_keyboard?.[0]?.[1]?.callback_data?.startsWith("ca:")), 90_000, "approval card");
+  const card = tg.calls.slice(before).find((c) => c.body.reply_markup?.inline_keyboard?.[0]?.[1]?.callback_data?.startsWith("ca:"))!;
+  assert.match(card.body.text, /<pre>rm -rf /, "the card shows the exact command as code");
+  tg.callback(OP, card.body.reply_markup.inline_keyboard[0][1].callback_data, { message_id: 1, chat: { id: OP, type: "private" }, text: card.body.text });
+  await idle();
+  assert.ok(existsSync(probe), "denied command must not run");
 });
 
 await step("model selection: read and refuse stale writes", async () => {

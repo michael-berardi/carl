@@ -26,3 +26,19 @@ test("bad schedules name the problem", () => {
   assert.throws(() => parseSchedule("61 * * * *"), /minute/);
   assert.throws(() => parseSchedule("every soon"), /expected 5 cron fields/);
 });
+
+test("DST: results are always strictly after the reference time", () => {
+  const s = parseSchedule("*/10 * * * *");
+  let t = new Date("2026-11-01T00:55:00").getTime(); // US fall-back night (when TZ observes it)
+  for (let i = 0; i < 30; i++) {
+    const n = nextRun(s, t);
+    assert.ok(n > t, `step ${i}: ${new Date(n).toISOString()} <= ${new Date(t).toISOString()}`);
+    assert.ok(n - t <= 11 * 60_000 + 3_600_000, "no gap longer than an interval plus one DST hour");
+    t = n;
+  }
+});
+
+test("month-end and leap day", () => {
+  assert.equal(nextRun(parseSchedule("0 0 31 * *"), new Date("2026-04-15T00:00:00").getTime()), new Date("2026-05-31T00:00:00").getTime());
+  assert.equal(nextRun(parseSchedule("0 0 29 2 *"), new Date("2026-03-01T00:00:00").getTime()), new Date("2028-02-29T00:00:00").getTime());
+});

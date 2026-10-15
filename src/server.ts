@@ -13,6 +13,8 @@ const MAX_BODY = 8 * 1024 * 1024;
 export class ApiServer {
   private server?: Server;
   private readonly routes: { method: string; pattern: RegExp; handler: Handler }[] = [];
+  /** Static files served without the key (the web app shell); everything else needs it. */
+  publicAsset?: (pathname: string) => { body: Buffer; type: string } | undefined;
   metrics = { requests: 0, messages: 0, lastRequestAt: undefined as string | undefined };
   status: { state: "connecting" | "connected" | "fatal" | "stopped"; error?: string; updatedAt: string } = { state: "connecting", updatedAt: new Date().toISOString() };
 
@@ -66,10 +68,19 @@ export class ApiServer {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? "/", "http://localhost");
     this.metrics.requests++;
     this.metrics.lastRequestAt = new Date().toISOString();
+    let url = new URL("http://localhost/");
     try {
+      url = new URL(req.url ?? "/", "http://localhost");
+      if (req.method === "GET" && this.publicAsset) {
+        const asset = this.publicAsset(url.pathname);
+        if (asset) {
+          res.writeHead(200, { "content-type": asset.type, "cache-control": "no-cache", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
+            "content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'" });
+          return void res.end(asset.body);
+        }
+      }
       if (!this.authorized(req)) return json(res, 401, { error: { message: "missing or wrong bearer key", type: "unauthorized" } });
       const route = this.routes.find((r) => r.method === req.method && r.pattern.test(url.pathname));
       if (!route) return json(res, 404, { error: { message: `no route ${req.method} ${url.pathname}`, type: "not_found" } });
@@ -78,7 +89,8 @@ export class ApiServer {
     } catch (e) {
       const err = e as Error & { status?: number };
       this.log.error("api request failed", { path: url.pathname, error: err.message });
-      if (!res.headersSent) json(res, err.status ?? 500, { error: { message: err.message, type: err.status ? "invalid_request" : "server_error" } });
+      // Client errors name their cause; server errors are logged in full and summarised here.
+      if (!res.headersSent) json(res, err.status ?? 500, { error: { message: err.status ? err.message : `internal error (see carl.log at ${new Date().toISOString()})`, type: err.status ? "invalid_request" : "server_error" } });
       else res.end();
     }
   }
@@ -103,15 +115,25 @@ export class ApiServer {
       const chunk = (delta: Record<string, unknown>, finish: string | null = null) =>
         res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: this.cfg.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
       chunk({ role: "assistant" });
-      const result = await this.brain.ask(key, { text, source: "api" }, {
-        onText: (t) => {
-          // Stream only the growing tail; a new assistant message (after tools) restarts the text, which we separate.
-          if (t.length < sent) sent = 0, chunk({ content: "\n\n" });
-          if (t.length > sent) chunk({ content: t.slice(sent) }), (sent = t.length);
-        },
-      });
-      if (!result.ok) chunk({ content: `\n\n[${result.aborted ? "stopped" : `error: ${result.error}`}]` });
-      chunk({}, result.ok ? "stop" : "error");
+      // A client that hangs up stops the run instead of leaving tools running for nobody.
+      res.on("close", () => { if (!res.writableEnded) void this.brain.stop(key); });
+      let messages = 0;
+      try {
+        const result = await this.brain.ask(key, { text, source: "api" }, {
+          onMessageStart: () => {
+            if (messages++ > 0 && sent > 0) chunk({ content: "\n\n" });
+            sent = 0;
+          },
+          onText: (t) => {
+            if (t.length > sent) chunk({ content: t.slice(sent) }), (sent = t.length);
+          },
+        });
+        if (!result.ok) chunk({ content: `\n\n[${result.aborted ? "stopped" : `error: ${result.error}`}]` });
+        chunk({}, result.ok ? "stop" : "error");
+      } catch (e) {
+        chunk({ content: `\n\n[error: ${(e as Error).message}]` }, "error");
+        this.log.error("streamed chat failed", { key, error: (e as Error).message });
+      }
       res.write("data: [DONE]\n\n");
       res.end();
       return;
@@ -123,7 +145,12 @@ export class ApiServer {
       created,
       model: result.model,
       choices: [{ index: 0, message: { role: "assistant", content: result.text }, finish_reason: result.ok ? "stop" : "error" }],
-      usage: { prompt_tokens: result.usage.input, completion_tokens: result.usage.output, total_tokens: result.usage.input + result.usage.output },
+      usage: {
+        prompt_tokens: result.usage.input + result.usage.cacheRead + result.usage.cacheWrite,
+        completion_tokens: result.usage.output,
+        total_tokens: result.usage.input + result.usage.cacheRead + result.usage.cacheWrite + result.usage.output,
+        prompt_tokens_details: { cached_tokens: result.usage.cacheRead },
+      },
       ...(result.ok ? {} : { error: { message: result.error ?? "stopped" } }),
     });
   }

@@ -1,7 +1,9 @@
 // The gateway process: wires config, psyche, brain, channels, API and schedules; owns status and shutdown.
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assistantText, Brain, listSessionFiles } from "./brain.ts";
+import { chunkMarkdown } from "./channels/format.ts";
 import { TelegramChannel } from "./channels/telegram.ts";
 import { type CarlConfig, ensureHome, secret } from "./config.ts";
 import { Log } from "./log.ts";
@@ -69,13 +71,21 @@ export class Gateway {
       this.brain.approver = (key) => async (command, reason) => {
         const m = key.match(/^telegram:(?:dm|group):(-?\d+)/);
         if (!m) return "unattended";
-        return tg.requestApproval(Number(m[1]), command, reason);
+        const chat = Number(m[1]);
+        // Approval cards go only to the operator's own chats, whatever conversation key a client chose.
+        if (!this.cfg.telegram.allowFrom.includes(chat) && chat !== this.cfg.telegram.homeChat) return "unattended";
+        return tg.requestApproval(chat, command, reason);
       };
     }
     if (this.cfg.api.enabled) {
       const key = secret(this.cfg.home, this.cfg.api.keyEnv, this.cfg.envFiles);
       if (!key) throw new Error(`api is enabled but ${this.cfg.api.keyEnv} is not set (environment or ${join(this.cfg.home, ".env")})`);
       this.api = new ApiServer(this.cfg, key, this.brain, this.log, () => this.health());
+    }
+    if (this.api) {
+      const { mountPortal, publicAsset } = await import("./portal/api.ts");
+      mountPortal(this.api, this);
+      this.api.publicAsset = publicAsset;
     }
     for (const p of this.plugins) await p.start(this);
     if (this.api) await this.api.start();
@@ -96,9 +106,16 @@ export class Gateway {
     await this.telegram?.stop();
     await this.brain.shutdown();
     await this.api?.stop();
-    for (const p of this.plugins) await p.stop?.();
+    for (const p of this.plugins) {
+      try {
+        await p.stop?.();
+      } catch (e) {
+        this.log.error("plugin stop failed", { plugin: p.name, error: (e as Error).message });
+      }
+    }
     if (this.statusTimer) clearInterval(this.statusTimer);
-    this.writeStatus("stopped", reason);
+    // A gateway that never claimed the pid (it lost the race to another) must not mark the live one stopped.
+    if (this.ownsPid) this.writeStatus("stopped", reason);
     try {
       if (existsSync(this.pidFile) && readFileSync(this.pidFile, "utf8").trim() === String(process.pid)) unlinkSync(this.pidFile);
     } catch {}
@@ -107,10 +124,13 @@ export class Gateway {
   private claimPid(): void {
     if (existsSync(this.pidFile)) {
       const other = Number(readFileSync(this.pidFile, "utf8").trim());
-      if (other && other !== process.pid && alive(other)) throw new Error(`another Carl gateway (pid ${other}) is running on ${this.cfg.home}`);
+      // A live pid only blocks start when it is really a Carl gateway (pids are reused after a reboot).
+      if (other && other !== process.pid && alive(other) && isCarl(other)) throw new Error(`another Carl gateway (pid ${other}) is running on ${this.cfg.home}`);
     }
     writeFileSync(this.pidFile, String(process.pid), { mode: 0o600 });
+    this.ownsPid = true;
   }
+  private ownsPid = false;
 
   health(): Record<string, unknown> {
     return {
@@ -135,7 +155,11 @@ export class Gateway {
     } catch (e) {
       this.log.error("cannot write status", { error: (e as Error).message });
     }
-    this.emitStatus?.(body);
+    try {
+      this.emitStatus?.(body);
+    } catch (e) {
+      this.log.error("status hook failed", { error: (e as Error).message });
+    }
   }
   /** Hook for compatibility writers (UltraTerm's gateway_state.json). */
   emitStatus?: (status: Record<string, unknown>) => void;
@@ -147,15 +171,22 @@ export class Gateway {
     const chatId = target === "home" ? this.cfg.telegram.homeChat : Number(target);
     if (!chatId || !Number.isSafeInteger(chatId)) throw new Error(target === "home" ? "telegram.homeChat is not configured" : `bad chat id "${target}"`);
     if (!this.cfg.telegram.allowFrom.includes(chatId) && chatId !== this.cfg.telegram.homeChat) throw new Error(`chat ${chatId} is not the home chat or an allowed user`);
-    const sent = await this.telegram.sendMarkdown(chatId, text);
-    return `Delivered (${sent.length} message${sent.length === 1 ? "" : "s"}).`;
+    try {
+      const sent = await this.telegram.sendMarkdown(chatId, text);
+      return `Delivered (${sent.length} message${sent.length === 1 ? "" : "s"}).`;
+    } catch (e) {
+      this.telegram.enqueue(chatId, chunkMarkdown(text), undefined, (e as Error).message);
+      return `Telegram refused it for now (${(e as Error).message}); queued and retried every 30 s.`;
+    }
   }
 
   private async runPromptJob(job: Job): Promise<string> {
     const key = `schedule:${job.id}`;
     await this.brain.reset(key); // every run starts clean: schedules never grow a context
     if (job.model) await this.brain.setModel(key, job.model);
-    const result = await this.brain.ask(key, { text: job.prompt!, source: "schedule" });
+    const limit = setTimeout(() => void this.brain.stop(key), Scheduler.RUN_TIMEOUT_MS - 5_000);
+    limit.unref();
+    const result = await this.brain.ask(key, { text: job.prompt!, source: "schedule" }).finally(() => clearTimeout(limit));
     if (!result.ok) throw new Error(result.error ?? "stopped");
     return result.text;
   }
@@ -167,7 +198,7 @@ export class Gateway {
     const decisions = this.psyche.decisions(30);
     const sinceMs = since ? Date.parse(since) : Date.now() - 86_400_000;
     const replies: string[] = [];
-    for (const s of listSessionFiles(this.cfg.home).filter((f) => f.mtime > sinceMs).slice(0, 12)) {
+    for (const s of listSessionFiles(this.cfg.home).filter((f) => f.mtime > sinceMs && !f.key.startsWith("schedule:") && f.key !== "inspect").slice(0, 12)) {
       for (const entry of readJsonl<any>(s.file).slice(-40)) {
         if (entry.type === "message" && entry.message?.role === "assistant") {
           const t = assistantText(entry.message);
@@ -202,6 +233,15 @@ export class Gateway {
         return recent.length ? recent.map((e) => `• ${e.at.slice(5, 16)} [${e.kind}] ${e.summary}`).join("\n") : "The shadow ledger is empty.";
       },
     });
+  }
+}
+
+function isCarl(pid: number): boolean {
+  try {
+    const cmd = execFileSync("/bin/ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 5_000 });
+    return /carl|main\.ts gateway/.test(cmd);
+  } catch {
+    return true; // cannot tell: be safe and treat it as running
   }
 }
 
