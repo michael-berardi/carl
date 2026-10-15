@@ -767,8 +767,8 @@ export class Brain extends EventEmitter {
       await Promise.race([Promise.allSettled(running), new Promise((r) => setTimeout(r, timeoutMs))]);
     }
     // All at once: each close is bounded at 5 s, so shutdown stays inside UltraTerm's grace period.
-    await Promise.all([...this.conversations.values()].map(async (convo) => {
-      if (convo.busy) await convo.session.abort().catch(() => {});
+    await Promise.allSettled([...this.conversations.values()].map(async (convo) => {
+      if (convo.busy) await Promise.race([convo.session.abort().catch(() => {}), new Promise((r) => setTimeout(r, 3_000).unref())]);
       await this.closeSession(convo.session);
     }));
     this.conversations.clear();

@@ -52,6 +52,11 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   const tmuxLike = createNetServer((c) => c.end("tmux")).listen(sock);
   const savedTmux = process.env.TMUX;
   process.env.TMUX = `${sock},1,0`;
+  // Stand-in agent sockets for each name pattern, and an unrelated socket as the control that must stay reachable.
+  const fakeSocks = { sshDir: join(root, "ssh-Xy12", "agent.4242"), named: join(root, "my-agent.sock"), plain: join(root, "plain-service.sock") };
+  mkdirSync(join(root, "ssh-Xy12"));
+  const fakeServers = Object.values(fakeSocks).map((p) => createNetServer((c) => c.end("hello")).listen(p));
+  t.after(() => { for (const s of fakeServers) s.close(); });
   // A process outside the sandbox that commands must not be able to signal.
   const outsider = spawn("/bin/sleep", ["30"]);
   t.after(() => { outsider.kill(); tmuxLike.close(); if (savedTmux === undefined) delete process.env.TMUX; else process.env.TMUX = savedTmux; });
@@ -101,6 +106,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
     `echo "PATHIS=[$PATH]" "FILEONLY=[$CARL_FILE_ONLY]"`,
     `echo t > /private/tmp/carl-sbx-probe-${process.pid}; echo tmp-write=$?`,
     `echo "TMPDIRIS=[$TMPDIR]"`,
+    ...Object.entries(fakeSocks).map(([k, p]) => `/usr/bin/python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${p}'); print('SOCK-${k}-reached')" 2>/dev/null || echo sock-${k}-blocked`),
     ...(agentSock ? [`SSH_AUTH_SOCK=${agentSock} ssh-add -l >/dev/null 2>&1; echo ssh-agent=$?`] : []),
     `ls ~/Library/Keychains >/dev/null 2>&1; echo keychain-files=$?`,
     ...(existsSync(join(homedir(), ".ssh")) ? [`ls ~/.ssh >/dev/null 2>&1; echo ssh-dir=$?`] : []),
@@ -137,6 +143,9 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   assert.ok(out.includes(`TMPDIRIS=[${join(home, "spill", "tmp")}]`), "the agent gets its own temp folder");
   if (agentSock) assert.match(out, /ssh-agent=2/, "the operator's SSH agent is out of reach");
   assert.match(out, /keychain-files=1/, "the Keychain files are unreadable");
+  assert.match(out, /sock-sshDir-blocked/, "ssh-agent sockets in temp folders are out of reach");
+  assert.match(out, /sock-named-blocked/, "sockets named like an agent are out of reach");
+  assert.match(out, /SOCK-plain-reached/, "control: other local sockets still work");
   if (existsSync(join(homedir(), ".ssh"))) assert.match(out, /ssh-dir=1/, "SSH keys are unreadable");
   assert.doesNotMatch(out, /keychain=0/, "the Keychain is out of reach");
   assert.ok(existsSync(join(root, "nest", "deep", "ext.ts")) && /parent-move=1/.test(out), "a folder above protected code cannot be moved aside, even inside a writable folder");
