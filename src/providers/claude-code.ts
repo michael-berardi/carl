@@ -50,8 +50,9 @@ export const CLAUDE_MODELS: { id: string; name: string; native: string; contextW
 export interface ClaudeCodeOptions {
   /** claude executable; default: PATH, then the usual install directories. */
   command?: string;
-  /** Claude Code config directories (one per login). The first is preferred; another is tried when one is limited before any output. */
-  configDirs?: string[];
+  /** Claude Code config directories (one per login), in preference order; called per request so a host can rebalance.
+   *  Another login is tried only when one refuses (401/402/429) before any output. */
+  configDirs?: () => string[];
   /** Read-idle timeout per call, ms. */
   idleTimeoutMs?: number;
   /** Stable private working directory (Claude Code writes its cwd into the prompt; a stable one keeps the cache). */
@@ -100,7 +101,7 @@ function imageBlock(img: { data: string; mimeType: string }): Block {
   return { type: "image", source: { type: "base64", media_type: img.mimeType, data: img.data } };
 }
 
-export function buildFrames(context: TranscriptContext): { system: string; frames: Frame[]; tools: { name: string; description: string; inputSchema: any }[] } {
+export function buildFrames(context: TranscriptContext, dropThinking = false): { system: string; frames: Frame[]; tools: { name: string; description: string; inputSchema: any }[] } {
   const system = getCurrentSystemPrompt(context.messages);
   const tools = getCurrentTools(context.messages).map((t) => {
     if (!/^[A-Za-z0-9_-]{1,50}$/.test(t.name)) throw new ClaudeCodeError(`tool name "${t.name}" is not a 1-50 character ASCII identifier, which the Claude route requires`);
@@ -124,7 +125,7 @@ export function buildFrames(context: TranscriptContext): { system: string; frame
       const content = typeof m.content === "string" ? (m.content ? [{ type: "text", text: m.content }] : []) : m.content.map((c: any) => (c.type === "text" ? { type: "text", text: c.text } : imageBlock(c)));
       push("user", content);
     } else if (m.role === "assistant") {
-      const native = m.provider === PROVIDER; // signed thinking only replays to the model family that signed it
+      const native = m.provider === PROVIDER && !dropThinking; // signed thinking only replays to the family that signed it
       const content: Block[] = [];
       for (const c of m.content ?? []) {
         if (c.type === "thinking" && native && c.thinkingSignature) {
@@ -356,11 +357,19 @@ export function streamClaude(model: Model<any>, context: TranscriptContext, opti
     stream.end(err);
   };
   queueMicrotask(async () => {
-    const dirs = opts.configDirs?.length ? opts.configDirs : [undefined];
+    const configured = opts.configDirs?.() ?? [];
+    const dirs: (string | undefined)[] = configured.length ? configured : [undefined];
     let lastError: ClaudeCodeError | undefined;
     for (let i = 0; i < dirs.length; i++) {
       try {
-        await attempt(model, route, context, options, opts, dirs[i], partial, stream);
+        try {
+          await attempt(model, route, context, options, opts, dirs[i], partial, stream, false);
+        } catch (e) {
+          // Thinking signatures are bound to the login that produced them; after a switch, replay without them.
+          if (!(e instanceof ClaudeCodeError && e.status === 400 && /signature/i.test(e.message)) || partial.content.length) throw e;
+          opts.log?.("warn", "claude rejected replayed thinking signatures; retrying without them", { configDir: dirs[i] ?? "default" });
+          await attempt(model, route, context, options, opts, dirs[i], partial, stream, true);
+        }
         return;
       } catch (e) {
         const err = e instanceof ClaudeCodeError ? e : new ClaudeCodeError((e as Error).message);
@@ -386,18 +395,28 @@ async function attempt(
   configDir: string | undefined,
   partial: AssistantMessage,
   stream: AssistantMessageEventStream,
+  dropThinking: boolean,
 ): Promise<void> {
   const signal = options?.signal;
-  const { system, frames, tools } = buildFrames(context);
+  const { system, frames, tools } = buildFrames(context, dropThinking);
   const env: NodeJS.ProcessEnv = { ...process.env };
   // The Claude route is the subscription login. API keys or other backends in the environment would silently
   // turn it into paid API use; they are removed for the child, and the removal is logged by name.
   const removed = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_EXTRA_BODY", "CLAUDE_CODE_EFFORT_LEVEL"].filter((k) => env[k]);
   for (const k of removed) delete env[k];
   if (removed.some((k) => !k.startsWith("CLAUDE_CODE_E"))) opts.log?.("warn", "claude route ignores API-key/backend overrides from the environment", { removed });
-  const bin = resolveClaude(opts.command, env);
+  // Claude Code's auto-updater replaces the binary in place; during the swap it briefly does not exist.
+  let bin = resolveClaude(opts.command, env);
+  for (let waited = 0; !bin && waited < 15_000 && !signal?.aborted; waited += 500) {
+    await new Promise((r) => setTimeout(r, 500));
+    bin = resolveClaude(opts.command, env);
+  }
   if (!bin) throw new ClaudeCodeError("Claude Code is not installed (no `claude` on PATH). Install it with `npm install -g @anthropic-ai/claude-code`, then run `claude auth login`.", 503);
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
+  // The default login (~/.claude) lives in the keychain under a name that changes when CLAUDE_CONFIG_DIR is set,
+  // so the default account is selected by unsetting it, never by naming ~/.claude.
+  const defaultDir = join(env.HOME ?? homedir(), ".claude");
+  if (configDir && configDir.replace(/\/+$/, "") !== defaultDir) env.CLAUDE_CONFIG_DIR = configDir;
+  else if (configDir) delete env.CLAUDE_CONFIG_DIR;
   Object.assign(env, {
     ENABLE_TOOL_SEARCH: "false",
     CLAUDE_CODE_MAX_RETRIES: "0",

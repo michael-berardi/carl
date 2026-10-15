@@ -12,7 +12,6 @@ const HARDLINE: [RegExp, string][] = [
   [/\b(shutdown|halt|reboot)\b(\s|$)/i, "machine shutdown or reboot"],
   [/\bsudo\b/i, "sudo"],
   [/\bgit\s+push\b[^;&|]*(--force\b|-f\b|--force-with-lease\b)[^;&|]*\b(main|master)\b/i, "force push to main"],
-  [/\bcf\s+deploy\b/i, "bare `cf deploy` (deletes undeclared secrets; use cf-deploy.mjs)"],
 ];
 
 const DANGEROUS: [RegExp, string][] = [
@@ -31,23 +30,31 @@ const DANGEROUS: [RegExp, string][] = [
   [/\bstripe\b[^;&|]*\b(subscriptions?|prices?|invoices?|refunds?)\b[^;&|]*\b(update|cancel|create|delete)\b/i, "billing change"],
 ];
 
-export function classifyCommand(command: string): Verdict {
-  for (const [re, reason] of HARDLINE) if (re.test(command)) return { level: "hardline", reason };
-  for (const [re, reason] of DANGEROUS) if (re.test(command)) return { level: "dangerous", reason };
+export interface GuardRules {
+  /** Extra never-run patterns: [regex source, reason]. */
+  hardline?: [string, string][];
+  /** Extra ask-first patterns: [regex source, reason]. */
+  dangerous?: [string, string][];
+}
+
+export function classifyCommand(command: string, extra: GuardRules = {}): Verdict {
+  const own = (list?: [string, string][]) => (list ?? []).map(([src, why]) => [new RegExp(src, "i"), why] as [RegExp, string]);
+  for (const [re, reason] of [...HARDLINE, ...own(extra.hardline)]) if (re.test(command)) return { level: "hardline", reason };
+  for (const [re, reason] of [...DANGEROUS, ...own(extra.dangerous)]) if (re.test(command)) return { level: "dangerous", reason };
   return { level: "ok" };
 }
 
 export type Approver = (command: string, reason: string) => Promise<"approved" | "denied" | "timeout" | "unattended">;
 
 /** A Pi extension that gates the bash tool for one conversation. */
-export function shellGuard(approve: Approver, onBlock: (command: string, why: string) => void): InlineExtension {
+export function shellGuard(approve: Approver, onBlock: (command: string, why: string) => void, rules: GuardRules = {}): InlineExtension {
   return {
     name: "carl-shell-guard",
     factory: (pi: ExtensionAPI) => {
       pi.on("tool_call", async (event: any) => {
         if (event.toolName !== "bash") return undefined;
         const command = String(event.input?.command ?? "");
-        const verdict = classifyCommand(command);
+        const verdict = classifyCommand(command, rules);
         if (verdict.level === "ok") return undefined;
         if (verdict.level === "hardline") {
           onBlock(command, `hardline: ${verdict.reason}`);

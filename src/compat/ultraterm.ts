@@ -4,7 +4,7 @@
 // conversation pane and usage, and a loopback API for the composer, sessions, schedules and model picker.
 // This plugin writes those files and serves those routes from Carl's own state. Nothing here changes how
 // Carl itself works; remove the plugin and Carl runs standalone.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -36,6 +36,37 @@ export class UltraTermCompat implements GatewayPlugin {
   private intake!: DatabaseSync;
 
   private readonly opts: UltraTermCompatOptions;
+  private accountCache?: { at: number; order: string[] };
+  private preferred?: string;
+
+  /**
+   * Claude logins in the order UltraTerm's account router recommends: eligible, signed in, not cooling down,
+   * least used first, with hysteresis so a conversation keeps its prompt cache unless the gap grows large.
+   * Read-only (`ut-provider-accounts status`); cached for a minute; on any failure the configured order stands.
+   */
+  private claudeAccountOrder(fallback: string[]): string[] {
+    if (this.accountCache && Date.now() - this.accountCache.at < 60_000) return this.accountCache.order;
+    let order = fallback;
+    try {
+      const bin = join(this.opts.overseerBin, "..", "ut-provider-accounts");
+      const out = execText(bin, ["status"]);
+      const accounts = (JSON.parse(out).providers?.claude?.accounts ?? []) as any[];
+      const usable = accounts.filter((a) => a.configured && a.eligible && !a.signedOut && !a.cooldown && typeof a.configDir === "string");
+      if (usable.length) {
+        usable.sort((a, b) => (a.usedPercent ?? 100) - (b.usedPercent ?? 100));
+        let first = usable[0];
+        const current = usable.find((a) => a.configDir === this.preferred);
+        if (current && (current.usedPercent ?? 100) - (first.usedPercent ?? 100) < 25) first = current;
+        this.preferred = first.configDir;
+        order = [first.configDir, ...usable.filter((a) => a !== first).map((a) => a.configDir)];
+      }
+    } catch (e) {
+      this.gw?.log.warn("claude account order unavailable; using configured order", { error: (e as Error).message.slice(0, 200) });
+    }
+    this.accountCache = { at: Date.now(), order };
+    return order;
+  }
+
   constructor(opts: UltraTermCompatOptions) {
     this.opts = opts;
   }
@@ -54,6 +85,8 @@ export class UltraTermCompat implements GatewayPlugin {
         state TEXT NOT NULL, receipt TEXT);`);
 
     gw.emitStatus = (s) => this.writeGatewayState(s);
+    const configured = gw.cfg.claude.configDirs;
+    gw.brain.claudeAccounts = () => this.claudeAccountOrder(configured);
     gw.brain.on("transcript", (e: TranscriptEvent) => {
       try {
         this.mirror(e);
@@ -461,4 +494,8 @@ function run(bin: string, args: string[], timeoutMs: number): Promise<{ code: nu
       resolve({ code: code ?? -1, stdout, stderr, error: signal ? `timed out after ${timeoutMs / 1000}s` : undefined });
     });
   });
+}
+
+function execText(bin: string, args: string[]): string {
+  return execFileSync(bin, args, { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] });
 }
