@@ -285,10 +285,11 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
         } else if (event.toolName === "write" || event.toolName === "edit") {
           const content = String(event.input?.content ?? event.input?.newText ?? event.input?.new_string ?? JSON.stringify(event.input?.edits ?? ""));
           // Never shortened: the operator approves exactly what is written (a card too long for the channel is refused).
-          // The card names the real target when the path itself is a link (the write lands there).
+          // The card names where the write really lands when any step of the path is a link (macOS's own
+          // /var, /tmp and /etc links aside).
           const target = path ? real(path, rules.cwd) : "";
-          const lexical = path ? join(real(dirname(path), rules.cwd), basename(path)) : "";
-          subject = `${event.toolName} ${path}${target && target !== lexical ? ` (a link to ${target})` : ""}\n${content}`;
+          const asWritten = path ? resolve(rules.cwd ?? process.cwd(), path.replace(/^~(?=\/|$)/, HOME)).replace(/^\/(var|tmp|etc)(?=\/|$)/, "/private/$1") : "";
+          subject = `${event.toolName} ${path}${target && target !== asWritten ? ` (really ${target})` : ""}\n${content}`;
           verdict = writeVerdict(path, rules);
         } else if (event.toolName === "read") {
           subject = `read ${path}`;
@@ -318,7 +319,7 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
 }
 
 /** Run a small file utility inside the shell sandbox; the kernel then judges the real path, whatever links it went through. */
-const MAX_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_FILE_BYTES = 64 * 1024 * 1024;
 function sandboxed(profile: string, argv: string[], input?: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = spawn("/usr/bin/sandbox-exec", ["-f", profile, ...argv], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: "/usr/bin:/bin", HOME } });
@@ -405,9 +406,15 @@ export function guardedReadOps(rules: GuardRules & { sandboxProfile?: string }) 
     // Only the type is learned (no content), after the same check; the content itself is read in the sandbox.
     detectImageMimeType: async (abs: string) => {
       check(abs);
-      // Only plain files are sniffed in Carl's own process (a FIFO would block it).
-      const st = await (await import("node:fs/promises")).stat(abs).catch(() => undefined);
-      return st?.isFile() ? detectSupportedImageMimeTypeFromFile(abs) : null;
+      // Only plain files are sniffed in Carl's own process (a FIFO would block it). The check and the read use
+      // one open descriptor, so the file cannot be swapped in between.
+      const fh = await (await import("node:fs/promises")).open(abs, fsc.O_RDONLY | fsc.O_NONBLOCK).catch(() => undefined);
+      if (!fh) return null;
+      try {
+        return (await fh.stat()).isFile() ? await detectSupportedImageMimeTypeFromFile(`/dev/fd/${fh.fd}`) : null;
+      } finally {
+        await fh.close();
+      }
     },
   };
 }
