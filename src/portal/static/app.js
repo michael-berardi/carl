@@ -31,6 +31,22 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+// Minimal Markdown for replies: escape first, then code, bold, italics, links and bullets. Nothing else renders.
+function md(text) {
+  const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const parts = String(text).split(/```(?:[\w+-]*)\n?([\s\S]*?)```/g);
+  return parts.map((part, i) => {
+    if (i % 2) return `<pre class="code">${esc(part)}</pre>`;
+    return esc(part)
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, "$1<em>$2</em>")
+      .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, label, url) => `<a href="${url.replace(/"/g, "&quot;")}" target="_blank" rel="noopener noreferrer">${label}</a>`)
+      .replace(/^[-*] (.*)$/gm, "• $1");
+  }).join("");
+}
+function rich(text) { const span = document.createElement("span"); span.innerHTML = md(text); return span; }
+
 const time = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); };
 
 // ---- login --------------------------------------------------------------------------------------------------
@@ -85,7 +101,7 @@ async function openConversation(key, reloadList = true) {
 
 function line(m) {
   if (m.role === "tool") return el("li", { class: "tool" }, `⚙ ${m.tool} ${m.text}`);
-  return el("li", { class: m.role }, m.text, m.model && m.role === "assistant" ? el("span", { class: "meta" }, `${m.model.split("/").pop()} · ${time(m.at)}`) : null);
+  return el("li", { class: m.role }, m.role === "assistant" ? rich(m.text) : m.text, m.model && m.role === "assistant" ? el("span", { class: "meta" }, `${m.model.split("/").pop()} · ${time(m.at)}`) : null);
 }
 function scrollDown() { const box = $("#messages"); box.scrollTop = box.scrollHeight; }
 
@@ -123,8 +139,8 @@ $("#composer").addEventListener("submit", async (e) => {
         else if (event === "tool") reply.before(el("li", { class: "tool" }, `⚙ ${data.name} ${data.detail}`));
         else if (event === "done") {
           if (data.steered) reply.textContent = "(added to the running reply)";
-          else if (!data.ok) reply.textContent = `${data.text ? data.text + "\n\n" : ""}${data.aborted ? "Stopped." : `Run failed: ${data.error}`}`;
-          else reply.textContent = data.text || "Done.";
+          else if (!data.ok) reply.replaceChildren(rich(`${data.text ? data.text + "\n\n" : ""}${data.aborted ? "Stopped." : `Run failed: ${data.error}`}`));
+          else reply.replaceChildren(rich(data.text || "Done."));
           reply.append(el("span", { class: "meta" }, `${data.model.split("/").pop()} · ${(data.ms / 1000).toFixed(1)} s`));
         }
         scrollDown();
@@ -156,7 +172,7 @@ async function loadSchedules() {
   $("#schedule-rows").replaceChildren(...data.map((j) => el("tr", {},
     el("td", {}, j.name),
     el("td", {}, j.when),
-    el("td", {}, j.prompt ? "agent" : j.command ? "command" : j.builtin || ""),
+    el("td", {}, j.prompt ? "agent" : j.command ? "command" : "built-in"),
     el("td", {}, j.enabled && j.nextRunAt ? time(new Date(j.nextRunAt).toISOString()) : "paused"),
     el("td", {}, j.lastStatus ? `${j.lastStatus}${j.lastError ? `: ${j.lastError}` : ""}` : ""),
     el("td", {},
@@ -183,10 +199,11 @@ async function loadPsyche() {
   const p = await api("/carl/psyche");
   $("#self").value = p.self;
   $("#persona").value = p.persona;
-  $("#lessons").textContent = p.lessons || "No lessons yet. They appear after the first reflection.";
+  $("#lessons").textContent = p.lessons || "None yet.";
   $("#lessons-when").textContent = p.lastIndividuation ? `updated ${time(p.lastIndividuation)}` : "";
-  $("#shadow").replaceChildren(...p.shadow.map((s) => el("li", {}, s.summary, el("small", {}, `${s.kind} · ${time(s.at)}`))));
-  $("#decisions").replaceChildren(...p.decisions.map((d) => el("li", {}, d.decision, el("small", {}, `${time(d.at)}${d.outcome ? ` · outcome: ${d.outcome}` : " · outcome open"}`))));
+  const none = () => el("li", { class: "none" }, "None");
+  $("#shadow").replaceChildren(...(p.shadow.length ? p.shadow.map((s) => el("li", {}, s.summary, el("small", {}, `${s.kind} · ${time(s.at)}`))) : [none()]));
+  $("#decisions").replaceChildren(...(p.decisions.length ? p.decisions.map((d) => el("li", {}, d.decision, el("small", {}, `${time(d.at)}${d.outcome ? ` · outcome: ${d.outcome}` : " · outcome open"}`))) : [none()]));
 }
 for (const b of document.querySelectorAll("[data-save]")) {
   b.addEventListener("click", async () => {

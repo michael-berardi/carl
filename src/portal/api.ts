@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assistantText, listSessionFiles, sessionDir, toolResultText } from "../brain.ts";
+import { assistantText, listSessionFiles, sessionDir, summarizeArgs, toolResultText } from "../brain.ts";
 import type { Gateway } from "../gateway.ts";
 import { readJsonl } from "../psyche.ts";
 import { json, type ApiServer } from "../server.ts";
@@ -19,7 +19,19 @@ export function publicAsset(pathname: string): { body: Buffer; type: string } | 
   return { body: readFileSync(file), type: TYPES[extname(file)] ?? "application/octet-stream" };
 }
 
-const KEY_RE = "([A-Za-z0-9_.:@-]{1,160})";
+// Conversation keys arrive URL-encoded (":" as %3A); match any segment, then validate the decoded key.
+const KEY_RE = "([^/]{1,480})";
+const VALID_KEY = /^[A-Za-z0-9_.:@-]{1,160}$/;
+function conversationKey(url: URL): string {
+  let key: string;
+  try {
+    key = decodeURIComponent(url.pathname.split("/")[3]);
+  } catch {
+    throw Object.assign(new Error("conversation key is not valid URL encoding"), { status: 400 });
+  }
+  if (!VALID_KEY.test(key)) throw Object.assign(new Error("conversation key may use letters, digits and _ . : @ - (max 160)"), { status: 400 });
+  return key;
+}
 
 interface Line { role: "user" | "assistant" | "tool"; text: string; at: number; tool?: string; model?: string }
 
@@ -34,7 +46,7 @@ function transcript(file: string, limit: number): Line[] {
       const text = typeof m.content === "string" ? m.content : (m.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
       if (text) out.push({ role: "user", text, at });
     } else if (m.role === "assistant") {
-      for (const c of m.content ?? []) if (c.type === "toolCall") out.push({ role: "tool", tool: c.name, text: JSON.stringify(c.arguments ?? {}).slice(0, 300), at });
+      for (const c of m.content ?? []) if (c.type === "toolCall") out.push({ role: "tool", tool: c.name, text: summarizeArgs(c.arguments), at });
       const text = assistantText(m);
       if (text || m.errorMessage) out.push({ role: "assistant", text: text || `(${m.stopReason}: ${m.errorMessage})`, at, model: `${m.provider}/${m.model}` });
     } else if (m.role === "toolResult" && m.isError) {
@@ -78,7 +90,7 @@ export function mountPortal(api: ApiServer, gw: Gateway): void {
   });
 
   api.route("GET", new RegExp(`^/carl/conversations/${KEY_RE}/messages$`), (_q, res, url) => {
-    const key = decodeURIComponent(url.pathname.split("/")[3]);
+    const key = conversationKey(url);
     const file = latestFile(cfg.home, key);
     const limit = Math.min(Number(url.searchParams.get("limit") ?? 200) || 200, 1_000);
     json(res, 200, { key, data: file ? transcript(file, limit) : [] });
@@ -86,7 +98,7 @@ export function mountPortal(api: ApiServer, gw: Gateway): void {
 
   // Send a message; the reply streams back as server-sent events: text, tool, done.
   api.route("POST", new RegExp(`^/carl/conversations/${KEY_RE}/messages$`), async (_q, res, url, body) => {
-    const key = decodeURIComponent(url.pathname.split("/")[3]);
+    const key = conversationKey(url);
     const text = typeof body?.text === "string" ? body.text.trim() : "";
     if (!text) return json(res, 400, { error: { message: "text is required" } });
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -104,8 +116,8 @@ export function mountPortal(api: ApiServer, gw: Gateway): void {
   });
 
   api.route("POST", new RegExp(`^/carl/conversations/${KEY_RE}/(stop|new)$`), async (_q, res, url) => {
-    const [, , , rawKey, action] = url.pathname.split("/");
-    const key = decodeURIComponent(rawKey);
+    const action = url.pathname.split("/")[4];
+    const key = conversationKey(url);
     if (action === "stop") return json(res, 200, { stopped: await brain.stop(key) });
     await brain.reset(key);
     json(res, 200, { reset: true });
