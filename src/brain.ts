@@ -1,7 +1,9 @@
 // The brain: one Pi AgentSession per conversation, created lazily, persisted as Pi JSONL, disposed when idle.
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import {
   type AgentSession,
   type AgentSessionEvent,
@@ -35,6 +37,8 @@ export interface Inbound {
 }
 
 export interface ReplySink {
+  /** A new assistant message starts (after tools the visible text restarts). */
+  onMessageStart?(): void;
   /** Streaming text of the assistant message being written. */
   onText?(text: string): void;
   /** A tool started; `detail` is a one-line summary of its arguments. */
@@ -49,7 +53,7 @@ export interface RunResult {
   error?: string;
   aborted: boolean;
   toolCalls: number;
-  usage: { input: number; output: number; cacheRead: number; cost: number };
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
   model: string;
   ms: number;
   /** True when the message was steered into a run that was already going. */
@@ -78,6 +82,8 @@ interface Conversation {
   lastActivity: number;
   source: Inbound["source"];
   pending?: Promise<RunResult>;
+  /** Set by stop(): an abort the operator asked for is "stopped", not "failed". */
+  stopRequested?: boolean;
 }
 
 const IDLE_DISPOSE_MS = 30 * 60_000;
@@ -113,11 +119,24 @@ export class Brain extends EventEmitter {
     this.piDir = join(cfg.home, "pi");
   }
 
+  /** The vendored UltraCompress adapter, when its engine binary is installed (resolved once at init). */
+  private ultracompressExt?: string;
+
   /** Pi's own validated mcp.json reader (not a public export; pinned SDK version). */
   private mcpLoader?: (o: { agentDir: string; cwd: string; projectTrusted: boolean }) => any;
 
   async init(): Promise<void> {
     mkdirSync(this.piDir, { recursive: true, mode: 0o700 });
+    if (this.cfg.ultracompress !== "off") {
+      const bin = findUltraCompress();
+      const ext = fileURLToPath(new URL("../vendor/ultracompress/index.ts", import.meta.url));
+      if (bin && existsSync(ext)) {
+        this.ultracompressExt = ext;
+        this.log.info("compaction: UltraCompress", { bin });
+      } else {
+        this.log.info("compaction: Pi built-in summary (no ultracompress binary found)");
+      }
+    }
     if (this.cfg.mcp && existsSync(join(this.piDir, "mcp.json"))) {
       try {
         const url = new URL("./extensions/mcp/config.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
@@ -136,7 +155,6 @@ export class Brain extends EventEmitter {
       this.runtime.registerProvider(CLAUDE_PROVIDER, claudeCodeProviderConfig({
         command: this.cfg.claude.command,
         configDirs: () => this.claudeAccounts(),
-        workdir: join(this.cfg.home, "state", "claude-cwd"),
         log: (level, msg, data) => this.log[level](msg, data),
       }) as any);
     }
@@ -144,8 +162,8 @@ export class Brain extends EventEmitter {
     for (const f of this.cfg.fallbackModels) this.model(f);
     if (this.cfg.fallbackModels.length) {
       const router = createRouter({
-        primary: this.cfg.model,
-        fallbacks: this.cfg.fallbackModels,
+        primary: () => this.cfg.model, // read per request: a model switch (portal, UltraTerm picker) takes effect at once
+        fallbacks: () => this.cfg.fallbackModels,
         resolve: (ref) => this.model(ref),
         events: {
           onFallback: (from, to, reason, until) => {
@@ -229,7 +247,10 @@ export class Brain extends EventEmitter {
 
   private async createConversation(key: string, source: Inbound["source"], fresh: boolean, inMemory = false): Promise<Conversation> {
     const dir = sessionDir(this.cfg.home, key);
-    if (!inMemory) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (!inMemory) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(dir, "key"), key, { mode: 0o600 }); // the original key, for listings (the dir name is sanitised)
+    }
     const model = this.model(this.sessionModelRef());
     const budget = Math.min(this.cfg.contextBudget, model.contextWindow || this.cfg.contextBudget);
     const settingsManager = SettingsManager.inMemory({
@@ -243,7 +264,13 @@ export class Brain extends EventEmitter {
     } as any);
     const extensionFactories: InlineExtension[] = [
       shellGuard(this.approver(key), (command, why) =>
-        this.psyche.recordShadow({ kind: "tool_error", conversation: key, summary: `shell command blocked: ${why}`, evidence: command.slice(0, 500) }), this.cfg.guard),
+        this.psyche.recordShadow({ kind: "tool_error", conversation: key, summary: `blocked: ${why}`, evidence: command.slice(0, 500) }),
+        {
+          ...this.cfg.guard,
+          // Carl's own control files: changing them changes what Carl may do.
+          protectedPaths: [join(this.cfg.home, "carl.json"), join(this.cfg.home, "pi"), join(this.cfg.home, "psyche", "self.md"), join(this.cfg.home, "app")],
+          secretPaths: [join(this.cfg.home, ".env"), join(this.cfg.piAgentDir, "auth.json"), ...this.cfg.envFiles],
+        }),
       resultBudget(join(this.cfg.home, "spill"), this.cfg.toolResultMaxChars),
     ];
     if (this.cfg.mcp && existsSync(join(this.piDir, "mcp.json")) && this.mcpLoader) {
@@ -263,7 +290,7 @@ export class Brain extends EventEmitter {
       cwd: this.cfg.workspace,
       agentDir: this.piDir,
       settingsManager,
-      additionalExtensionPaths: this.cfg.extensions,
+      additionalExtensionPaths: [...(this.ultracompressExt ? [this.ultracompressExt] : []), ...this.cfg.extensions],
       additionalSkillPaths: this.cfg.skills,
       // Only configured skill directories count (Pi would also pick up user-global ones), and an allowlist
       // keeps even the name+description index small.
@@ -312,9 +339,9 @@ export class Brain extends EventEmitter {
       const idleMs = this.cfg.idleResetMinutes * 60_000;
       if (idleMs > 0 && !existing.busy && Date.now() - existing.lastActivity > idleMs) {
         await this.reset(key);
-      } else {
-        return existing;
+        return this.conversations.get(key)!;
       }
+      return existing;
     }
     let pending = this.creating.get(key);
     if (!pending) {
@@ -335,11 +362,13 @@ export class Brain extends EventEmitter {
       const prev = convo.session.getLastAssistantText() ?? "";
       this.psyche.recordShadow({ kind: "correction", conversation: key, summary: input.text.slice(0, 300), evidence: prev.slice(-1_000) });
     }
+    // API clients expect an answer to each request: wait for the running turn, then run. Chat steers.
+    while (convo.busy && input.source !== "telegram" && convo.pending) await convo.pending.catch(() => {});
     this.emitTranscript(convo, { role: "user", text: input.text, source: input.source });
     if (convo.busy) {
       await convo.session.steer(text, input.images);
       this.log.info("steered into running turn", { key });
-      return { text: "", ok: true, aborted: false, toolCalls: 0, usage: { input: 0, output: 0, cacheRead: 0, cost: 0 }, model: this.modelRef(convo), ms: 0, steered: true };
+      return { text: "", ok: true, aborted: false, toolCalls: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, model: this.modelRef(convo), ms: 0, steered: true };
     }
     convo.busy = true;
     convo.source = input.source;
@@ -354,12 +383,26 @@ export class Brain extends EventEmitter {
 
   private async run(convo: Conversation, text: string, images: ImageContent[] | undefined, sink: ReplySink): Promise<RunResult> {
     const started = Date.now();
-    const firstIndex = convo.session.messages.length;
     let live = "";
     let toolCalls = 0;
     const errors: string[] = [];
+    // Collected from events, not by slicing session.messages: a compaction mid-run rewrites that list.
+    let lastAssistant: any;
+    const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
     const unsubscribe = convo.session.subscribe((e: AgentSessionEvent) => {
-      if (e.type === "message_start" && (e.message as any).role === "assistant") live = "";
+      if (e.type === "message_start" && (e.message as any).role === "assistant") {
+        live = "";
+        sink.onMessageStart?.();
+      }
+      if (e.type === "message_end" && (e.message as any).role === "assistant") {
+        const m = e.message as any;
+        lastAssistant = m;
+        usage.input += m.usage?.input ?? 0;
+        usage.output += m.usage?.output ?? 0;
+        usage.cacheRead += m.usage?.cacheRead ?? 0;
+        usage.cacheWrite += m.usage?.cacheWrite ?? 0;
+        usage.cost += m.usage?.cost?.total ?? 0;
+      }
       if (e.type === "message_update" && e.assistantMessageEvent.type === "text_delta") {
         live += e.assistantMessageEvent.delta;
         sink.onText?.(live);
@@ -385,20 +428,21 @@ export class Brain extends EventEmitter {
     } finally {
       unsubscribe();
     }
-    const fresh = convo.session.messages.slice(firstIndex);
-    const lastAssistant = [...fresh].reverse().find((m: any) => m.role === "assistant") as any;
-    const usage = { input: 0, output: 0, cacheRead: 0, cost: 0 };
-    for (const m of fresh as any[]) {
-      if (m.role !== "assistant" || !m.usage) continue;
-      usage.input += m.usage.input ?? 0;
-      usage.output += m.usage.output ?? 0;
-      usage.cacheRead += m.usage.cacheRead ?? 0;
-      usage.cost += m.usage.cost?.total ?? 0;
-    }
-    const aborted = lastAssistant?.stopReason === "aborted";
-    const error = thrown?.message ?? (lastAssistant?.stopReason === "error" ? lastAssistant.errorMessage ?? "model returned an error" : undefined);
+    const aborted = lastAssistant?.stopReason === "aborted" || !!convo.stopRequested;
+    convo.stopRequested = false;
+    const error = aborted
+      ? undefined
+      : thrown
+      ? thrown.message || String(thrown) || "the run failed without a message"
+      : lastAssistant?.stopReason === "error"
+        ? lastAssistant.errorMessage || "the model returned an error without a message"
+        : !lastAssistant
+          ? "the model produced no reply"
+          : undefined;
+    let replyText = lastAssistant ? assistantText(lastAssistant) : "";
+    if (lastAssistant?.stopReason === "length") replyText += "\n\n(cut off: the reply hit the output limit)";
     const result: RunResult = {
-      text: lastAssistant ? assistantText(lastAssistant) : "",
+      text: replyText,
       ok: !error && !aborted,
       error,
       aborted,
@@ -448,27 +492,38 @@ export class Brain extends EventEmitter {
   async stop(key: string): Promise<boolean> {
     const convo = this.conversations.get(key);
     if (!convo?.busy) return false;
+    convo.stopRequested = true;
     await convo.session.abort();
     return true;
   }
 
   /** Start a fresh session for this conversation; the old one stays on disk. */
   async reset(key: string): Promise<void> {
+    const inflight = this.creating.get(key);
+    if (inflight) await inflight.catch(() => {});
     const convo = this.conversations.get(key);
     if (convo) {
-      if (convo.busy) await convo.session.abort();
+      if (convo.busy) await convo.session.abort().catch(() => {});
       convo.session.dispose();
       this.conversations.delete(key);
     }
-    const fresh = await this.createConversation(key, convo?.source ?? "cli", true);
-    this.conversations.set(key, fresh);
+    const pending = this.createConversation(key, convo?.source ?? "cli", true).finally(() => this.creating.delete(key));
+    this.creating.set(key, pending);
+    this.conversations.set(key, await pending);
   }
 
   async compact(key: string): Promise<string> {
     const convo = await this.get(key, "cli");
     if (convo.busy) return "Busy; try again when the current run finishes.";
     const before = convo.session.getContextUsage()?.tokens;
-    await convo.session.compact();
+    convo.busy = true;
+    try {
+      await convo.session.compact();
+    } catch (e) {
+      return `Not compacted: ${(e as Error).message}`;
+    } finally {
+      convo.busy = false;
+    }
     const after = convo.session.getContextUsage()?.tokens;
     return `Compacted${before ? ` from ~${before} tokens` : ""}${after ? ` to ~${after}` : ""}.`;
   }
@@ -497,6 +552,15 @@ export class Brain extends EventEmitter {
     };
   }
 
+  /** Resolves once a message for this conversation has reached a session (busy), or after 5 s. */
+  async whenRegistered(key: string): Promise<void> {
+    const end = Date.now() + 5_000;
+    while (Date.now() < end) {
+      if (this.conversations.get(key)?.busy) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+
   /** Conversation keys and their state, for /v1/health and the status file. */
   activeConversations(): { key: string; busy: boolean; lastActivity: number }[] {
     return [...this.conversations.values()].map((c) => ({ key: c.key, busy: c.busy, lastActivity: c.lastActivity }));
@@ -508,7 +572,7 @@ export class Brain extends EventEmitter {
 
   private disposeIdle(): void {
     for (const [key, convo] of this.conversations) {
-      if (!convo.busy && Date.now() - convo.lastActivity > IDLE_DISPOSE_MS) {
+      if (!convo.busy && Date.now() - convo.lastActivity > Math.max(IDLE_DISPOSE_MS, this.cfg.idleResetMinutes * 60_000 + 60_000)) {
         convo.session.dispose();
         this.conversations.delete(key);
         this.log.info("conversation closed (idle)", { key });
@@ -517,7 +581,7 @@ export class Brain extends EventEmitter {
   }
 
   /** Wait for running turns (bounded), then dispose everything. */
-  async shutdown(timeoutMs = 20_000): Promise<void> {
+  async shutdown(timeoutMs = 5_000): Promise<void> {
     if (this.sweeper) clearInterval(this.sweeper);
     const running = [...this.conversations.values()].filter((c) => c.pending).map((c) => c.pending!);
     if (running.length) {
@@ -574,15 +638,22 @@ export function sessionDir(home: string, key: string): string {
 }
 
 /** Most recent session file per conversation, for listing past conversations without opening them. */
-export function listSessionFiles(home: string): { key: string; file: string; mtime: number }[] {
+export function listSessionFiles(home: string): { key: string; dir: string; file: string; mtime: number }[] {
   const root = join(home, "sessions");
   if (!existsSync(root)) return [];
-  const out: { key: string; file: string; mtime: number }[] = [];
+  const out: { key: string; dir: string; file: string; mtime: number }[] = [];
   for (const dir of readdirSync(root)) {
     const full = join(root, dir);
+    if (!statSync(full).isDirectory()) continue;
+    const keyFile = join(full, "key");
+    const key = existsSync(keyFile) ? readFileSync(keyFile, "utf8").trim() : dir;
     for (const f of readdirSync(full)) {
       if (!f.endsWith(".jsonl")) continue;
-      out.push({ key: dir, file: join(full, f), mtime: statSync(join(full, f)).mtimeMs });
+      try {
+        out.push({ key, dir, file: join(full, f), mtime: statSync(join(full, f)).mtimeMs });
+      } catch {
+        // a file removed while listing
+      }
     }
   }
   return out.sort((a, b) => b.mtime - a.mtime);
@@ -610,4 +681,12 @@ export function summarizeArgs(args: unknown): string {
   const pick = a.command ?? a.path ?? a.file_path ?? a.query ?? a.url ?? a.name ?? Object.values(a).find((v) => typeof v === "string");
   const s = typeof pick === "string" ? pick : JSON.stringify(a);
   return s.replace(/\s+/g, " ").slice(0, 120);
+}
+
+/** The UltraCompress engine, found the same way its adapter looks: env, UltraTerm, ~/.local, ~/.cargo, PATH. */
+export function findUltraCompress(): string | undefined {
+  const home = homedir();
+  const candidates = [process.env.ULTRACOMPRESS_BIN, join(home, ".ultraterm", "bin", "ultracompress"), join(home, ".local", "bin", "ultracompress"), join(home, ".cargo", "bin", "ultracompress"),
+    ...(process.env.PATH ?? "").split(":").map((d) => join(d, "ultracompress"))];
+  return candidates.find((c) => c && existsSync(c));
 }

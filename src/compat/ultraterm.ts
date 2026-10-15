@@ -5,7 +5,7 @@
 // This plugin writes those files and serves those routes from Carl's own state. Nothing here changes how
 // Carl itself works; remove the plugin and Carl runs standalone.
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { TranscriptEvent } from "../brain.ts";
@@ -15,8 +15,16 @@ import { VERSION } from "../version.ts";
 
 const INTAKE_CONTRACT = "hermes.canonical-intake.v1";
 const MODEL_CONTRACT = "hermes.canonical-model-selection.v1";
-/** Routes UltraTerm's picker offers (PICKER_ROUTES in ultrabot_chat.rs). Carl serves the ones Pi can run. */
-const PICKER_PROVIDERS = new Set(["openai-codex"]);
+/**
+ * UltraTerm's picker only offers fixed routes (PICKER_ROUTES in ultrabot_chat.rs). Carl maps its own model ids
+ * onto them, so the picker works unchanged: [UltraTerm provider, UltraTerm model, Carl model].
+ */
+const PICKER_MAP: [string, string, string][] = [
+  ["claude-subscription-directsdk-experimental", "claude-sonnet-5-5[1m]", "claude-code/claude-sonnet-5-5"],
+  ["openai-codex", "gpt-6.1-sol", "openai-codex/gpt-6.1-sol"],
+];
+const toPicker = (ref: string) => PICKER_MAP.find((r) => r[2] === ref);
+const fromPicker = (provider: string, model: string) => PICKER_MAP.find((r) => r[0] === provider && (r[1] === model || (model === "sonnet" && r[1].startsWith("claude-sonnet"))));
 
 export interface UltraTermCompatOptions {
   /** HERMES_HOME UltraTerm reads (custom mode: ~/.hermes). */
@@ -77,6 +85,10 @@ export class UltraTermCompat implements GatewayPlugin {
     this.db = new DatabaseSync(join(this.opts.home, "state.db"));
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     ensureSchema(this.db);
+    // Transcripts and tool output live here: owner-only.
+    for (const f of ["state.db", "state.db-wal", "state.db-shm"]) {
+      try { chmodSync(join(this.opts.home, f), 0o600); } catch {}
+    }
     this.intake = new DatabaseSync(join(gw.cfg.home, "state", "intake.db"));
     this.intake.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS intake (request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL,
@@ -84,6 +96,7 @@ export class UltraTermCompat implements GatewayPlugin {
       CREATE TABLE IF NOT EXISTS model_selection (request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL,
         state TEXT NOT NULL, receipt TEXT);`);
 
+    this.resumeIntake();
     gw.emitStatus = (s) => this.writeGatewayState(s);
     const configured = gw.cfg.claude.configDirs;
     gw.brain.claudeAccounts = () => this.claudeAccountOrder(configured);
@@ -100,6 +113,7 @@ export class UltraTermCompat implements GatewayPlugin {
   }
 
   stop(): void {
+    if (!this.gw) return; // never started
     this.writeGatewayState({ ...this.gw.health(), state: "stopped" });
     try { this.db?.close(); } catch {}
     try { this.intake?.close(); } catch {}
@@ -188,18 +202,23 @@ export class UltraTermCompat implements GatewayPlugin {
       .run(s.id, e.role, e.text || null, e.toolCallId ?? null, toolCalls, e.toolName ?? null, at);
     const cols = columns(this.db, "sessions");
     const sets = ["message_count = COALESCE(message_count,0) + 1"];
-    if (cols.has("last_activity_at")) sets.push(`last_activity_at = ${at}`);
-    if (e.toolCalls?.length && cols.has("tool_call_count")) sets.push(`tool_call_count = COALESCE(tool_call_count,0) + ${e.toolCalls.length}`);
+    const args: (number | string)[] = [];
+    const add = (sql: string, ...v: (number | string)[]) => { sets.push(sql); args.push(...v); };
+    const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+    if (cols.has("last_activity_at")) add("last_activity_at = ?", at);
+    if (e.toolCalls?.length && cols.has("tool_call_count")) add("tool_call_count = COALESCE(tool_call_count,0) + ?", e.toolCalls.length);
     if (e.usage && cols.has("input_tokens")) {
-      sets.push(`input_tokens = COALESCE(input_tokens,0) + ${e.usage.input}`, `output_tokens = COALESCE(output_tokens,0) + ${e.usage.output}`,
-        `cache_read_tokens = COALESCE(cache_read_tokens,0) + ${e.usage.cacheRead}`, `cache_write_tokens = COALESCE(cache_write_tokens,0) + ${e.usage.cacheWrite}`);
-      if (cols.has("api_call_count")) sets.push("api_call_count = COALESCE(api_call_count,0) + 1");
+      add("input_tokens = COALESCE(input_tokens,0) + ?", n(e.usage.input));
+      add("output_tokens = COALESCE(output_tokens,0) + ?", n(e.usage.output));
+      add("cache_read_tokens = COALESCE(cache_read_tokens,0) + ?", n(e.usage.cacheRead));
+      add("cache_write_tokens = COALESCE(cache_write_tokens,0) + ?", n(e.usage.cacheWrite));
+      if (cols.has("api_call_count")) add("api_call_count = COALESCE(api_call_count,0) + 1");
     }
     if (e.model && cols.has("model")) {
       const [provider, ...rest] = e.model.split("/");
       this.db.prepare("UPDATE sessions SET model = ?, billing_provider = ? WHERE id = ?").run(rest.join("/"), provider, s.id);
     }
-    this.db.prepare(`UPDATE sessions SET ${sets.join(", ")} WHERE id = ?`).run(s.id);
+    this.db.prepare(`UPDATE sessions SET ${sets.join(", ")} WHERE id = ?`).run(...args, s.id);
     if (e.role === "assistant" && e.usage && e.model && hasTable(this.db, "session_model_usage")) {
       const [provider, ...rest] = e.model.split("/");
       const u = e.usage;
@@ -242,11 +261,11 @@ export class UltraTermCompat implements GatewayPlugin {
       const message = typeof body?.message === "string" ? body.message : "";
       if (!message.trim() || message.length > 8_000) return json(res, 400, { error: { message: "message must be 1-8000 characters" } });
       const payload = JSON.stringify({ message, mirror: !!body.mirror, recipient: String(body.recipient ?? "") });
-      const prior = this.intake.prepare("SELECT session_id, payload FROM intake WHERE request_id = ?").get(requestId) as { session_id: string; payload: string } | undefined;
+      const prior = this.intake.prepare("SELECT session_id, payload, state FROM intake WHERE request_id = ?").get(requestId) as { session_id: string; payload: string; state: string } | undefined;
       const receipt = { contract: INTAKE_CONTRACT, requestId, sessionId, accepted: true };
       if (prior) {
         if (prior.payload !== payload || prior.session_id !== sessionId) return json(res, 409, { error: { code: "intake_request_conflict", message: "this Idempotency-Key was used with a different message" } });
-        return json(res, 202, receipt);
+        return json(res, 202, prior.state === "route_changed" ? { ...receipt, execution: "route_changed" } : receipt);
       }
       const conversation = this.conversationFor(sessionId);
       if (!conversation) return json(res, 404, { error: { message: `no Carl conversation for session ${sessionId}` } });
@@ -262,15 +281,17 @@ export class UltraTermCompat implements GatewayPlugin {
 
     // Model picker.
     api.route("GET", /^\/api\/model\/options$/, (_q, res) => {
-      const [provider, ...rest] = this.currentModel().split("/");
-      const models = gw.brain.listModels();
-      const providers = [...PICKER_PROVIDERS].map((slug) => ({ slug, models: models.filter((m) => m.startsWith(slug + "/")).map((m) => m.slice(slug.length + 1)), authenticated: models.some((m) => m.startsWith(slug + "/")) }));
-      json(res, 200, { provider, model: rest.join("/"), providers });
+      const available = new Set(gw.brain.listModels());
+      const current = toPicker(this.currentModel());
+      const providers = PICKER_MAP.map(([slug, model, ref]) => ({ slug, models: [model], authenticated: available.has(ref) }));
+      json(res, 200, { provider: current?.[0] ?? this.currentModel().split("/")[0], model: current?.[1] ?? this.currentModel().split("/").slice(1).join("/"), providers });
     });
     api.route("GET", /^\/api\/sessions\/[^/]+\/model-selection$/, (_q, res, url) => {
       const sessionId = decodeURIComponent(url.pathname.split("/")[3]);
-      const [provider, ...rest] = this.currentModel().split("/");
-      json(res, 200, { contract: MODEL_CONTRACT, sessionId, provider, model: rest.join("/"), resolvedModel: rest.join("/"), persisted: true });
+      const current = toPicker(this.currentModel());
+      // A Carl model outside the picker's routes: the UI falls back to a read-only label.
+      if (!current) return json(res, 404, { error: { code: "model_selection_route_unavailable", message: `${this.currentModel()} is not one of UltraTerm's picker routes` } });
+      json(res, 200, { contract: MODEL_CONTRACT, sessionId, provider: current[0], model: current[1], resolvedModel: current[1], persisted: true });
     });
     api.route("POST", /^\/api\/sessions\/[^/]+\/model-selection$/, async (req, res, url, body) => this.selectModel(req.headers, res, decodeURIComponent(url.pathname.split("/")[3]), body));
 
@@ -324,7 +345,24 @@ export class UltraTermCompat implements GatewayPlugin {
     return this.gw.cfg.model;
   }
 
+  /** Durable intake: requests accepted but never started run now; ones cut off by a restart are reported. */
+  private resumeIntake(): void {
+    const rows = this.intake.prepare("SELECT request_id, session_id, payload, state FROM intake WHERE state IN ('accepted', 'running')").all() as any[];
+    for (const r of rows) {
+      const p = JSON.parse(r.payload);
+      const conversation = this.conversationFor(r.session_id);
+      if (r.state === "running" || !conversation) {
+        this.intake.prepare("UPDATE intake SET state = 'failed', result = ? WHERE request_id = ?").run("interrupted by a restart", r.request_id);
+        if (p.recipient) void this.gw.send(p.recipient, `Carl restarted while answering your UltraTerm message: "${String(p.message).slice(0, 160)}". Send it again if it still matters.`).catch(() => {});
+        continue;
+      }
+      this.gw.log.info("resuming accepted composer request", { requestId: r.request_id });
+      void this.runIntake(r.request_id, conversation, p.message, !!p.mirror, String(p.recipient ?? ""));
+    }
+  }
+
   private async runIntake(requestId: string, conversation: string, message: string, mirror: boolean, recipient: string): Promise<void> {
+    this.intake.prepare("UPDATE intake SET state = 'running' WHERE request_id = ?").run(requestId);
     try {
       const result = await this.gw.brain.ask(conversation, { text: message, source: "telegram" });
       const reply = result.steered ? "(added to the running turn)" : result.ok ? result.text : `Run failed: ${result.error ?? "stopped"}`;
@@ -352,10 +390,12 @@ export class UltraTermCompat implements GatewayPlugin {
       if (prior.state === "committed") return json(res, 200, JSON.parse(prior.receipt));
       return json(res, 409, { error: { code: "model_selection_unknown", message: "an earlier attempt with this id did not finish" } });
     }
-    if (`${body.expectedProvider}/${body.expectedModel}` !== this.currentModel())
+    const expected = fromPicker(String(body.expectedProvider), String(body.expectedModel));
+    if (!expected || expected[2] !== this.currentModel())
       return json(res, 409, { error: { code: "model_selection_stale", message: `current model is ${this.currentModel()}` } });
-    const ref = `${body.provider}/${body.model}`;
-    if (!PICKER_PROVIDERS.has(body.provider)) return json(res, 422, { error: { code: "model_selection_route_denied", message: `${body.provider} is not a Carl route` } });
+    const target = fromPicker(String(body.provider), String(body.model));
+    if (!target) return json(res, 422, { error: { code: "model_selection_route_denied", message: `${body.provider}/${body.model} is not a Carl route` } });
+    const ref = target[2];
     try {
       this.gw.brain.model(ref);
     } catch (e) {
@@ -363,10 +403,13 @@ export class UltraTermCompat implements GatewayPlugin {
     }
     this.intake.prepare("INSERT INTO model_selection (request_id, session_id, payload, state) VALUES (?, ?, ?, 'claimed')").run(requestId, sessionId, payload);
     persistModel(this.gw.cfg.home, ref);
+    // The router reads the primary per request; with no router, sessions pick it up at their next start.
     this.gw.cfg.model = ref;
-    const conversation = this.conversationFor(sessionId);
-    if (conversation) await this.gw.brain.setModel(conversation, ref).catch(() => {});
-    const receipt = { contract: MODEL_CONTRACT, requestId, sessionId, state: "committed", provider: body.provider, model: body.model, persisted: true, resolvedModel: body.model };
+    if (!this.gw.cfg.fallbackModels.length) {
+      const conversation = this.conversationFor(sessionId);
+      if (conversation) await this.gw.brain.setModel(conversation, ref).catch(() => {});
+    }
+    const receipt = { contract: MODEL_CONTRACT, requestId, sessionId, state: "committed", provider: target[0], model: target[1], persisted: true, resolvedModel: target[1] };
     this.intake.prepare("UPDATE model_selection SET state = 'committed', receipt = ? WHERE request_id = ?").run(JSON.stringify(receipt), requestId);
     this.gw.log.info("model switched from UltraTerm", { model: ref });
     json(res, 200, receipt);

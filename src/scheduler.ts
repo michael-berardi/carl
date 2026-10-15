@@ -34,6 +34,10 @@ export class Scheduler {
   private jobs: Job[] = [];
   private timer?: NodeJS.Timeout;
   private readonly running = new Set<string>();
+  /** Process groups of running command jobs, killed on stop. */
+  readonly children = new Set<number>();
+  /** Agent and built-in runs are cut off after this long. */
+  static readonly RUN_TIMEOUT_MS = 30 * 60_000;
   private readonly file: string;
 
   private readonly log: Log;
@@ -54,9 +58,14 @@ export class Scheduler {
       throw new Error(`${this.file} is not valid JSON: ${(e as Error).message}`);
     }
     for (const job of this.jobs) {
-      if (job.lastStatus === "running") job.lastStatus = "error", job.lastError = "interrupted by a restart";
+      const interrupted = job.lastStatus === "running";
+      if (interrupted) {
+        job.lastStatus = "error";
+        job.lastError = "interrupted by a restart";
+      }
       try {
-        if (job.nextRunAt === undefined) job.nextRunAt = this.next(job, Date.now());
+        // An interrupted run waits for its next slot instead of firing again the moment Carl starts.
+        if (job.nextRunAt === undefined || interrupted) job.nextRunAt = this.next(job, Date.now());
       } catch (e) {
         job.enabled = false;
         job.lastError = (e as Error).message;
@@ -89,6 +98,10 @@ export class Scheduler {
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
+    for (const pid of this.children) {
+      try { process.kill(-pid, "SIGKILL"); } catch {}
+    }
+    this.children.clear();
   }
 
   /** Make sure a built-in job exists; the operator may edit its timing or pause it afterwards. */
@@ -131,6 +144,10 @@ export class Scheduler {
       .join("\n");
   }
 
+  get(id: string): Job {
+    return { ...this.find(id) };
+  }
+
   private find(id: string): Job {
     const job = this.jobs.find((j) => j.id === id || j.name === id);
     if (!job) throw new Error(`no schedule ${id}`);
@@ -152,20 +169,22 @@ export class Scheduler {
   private async execute(job: Job): Promise<void> {
     if (this.running.has(job.id)) return;
     this.running.add(job.id);
-    job.lastStatus = "running";
-    job.lastRunAt = Date.now();
-    this.save();
-    this.log.info("schedule started", { id: job.id, name: job.name });
     let output = "";
     try {
+      job.lastStatus = "running";
+      job.lastRunAt = Date.now();
+      this.save();
+      this.log.info("schedule started", { id: job.id, name: job.name });
+      const timed = <T>(p: Promise<T>) =>
+        Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`no result after ${Scheduler.RUN_TIMEOUT_MS / 60_000} minutes`)), Scheduler.RUN_TIMEOUT_MS).unref())]);
       if (job.builtin) {
         const run = this.runners.builtin[job.builtin];
         if (!run) throw new Error(`unknown built-in job "${job.builtin}"`);
-        output = await run(job);
+        output = await timed(run(job));
       } else if (job.command) {
-        output = await runCommand(job.command, 10 * 60_000);
+        output = await runCommand(job.command, 10 * 60_000, this.children);
       } else if (job.prompt) {
-        output = await this.runners.prompt(job);
+        output = await timed(this.runners.prompt(job));
       } else {
         throw new Error("job has neither prompt, command nor builtin");
       }
@@ -184,16 +203,24 @@ export class Scheduler {
         job.nextRunAt = undefined;
       }
       if (job.when.startsWith("once")) job.enabled = false;
-      this.save();
+      try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); }
     }
     const skip = job.deliver === "none" || (job.onlyIfOutput && job.lastStatus === "ok" && !output.trim());
-    if (!skip && output.trim()) await this.runners.deliver(job, output).catch((e) => this.log.error("schedule delivery failed", { id: job.id, error: (e as Error).message }));
+    if (!skip && output.trim()) {
+      await this.runners.deliver(job, output).catch((e) => {
+        job.lastError = `ran, but delivery failed: ${(e as Error).message}`.slice(0, 500);
+        this.log.error("schedule delivery failed", { id: job.id, error: (e as Error).message });
+        try { this.save(); } catch {}
+      });
+    }
   }
 }
 
-export function runCommand(command: string, timeoutMs: number): Promise<string> {
+export function runCommand(command: string, timeoutMs: number, groups?: Set<number>): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("/bin/bash", ["-lc", command], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+    if (child.pid) groups?.add(child.pid);
+    child.on("exit", () => child.pid && groups?.delete(child.pid));
     let out = "";
     const cap = (b: Buffer) => { if (out.length < 200_000) out += b.toString(); };
     child.stdout.on("data", cap);

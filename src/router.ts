@@ -31,14 +31,16 @@ export interface RouterEvents {
 }
 
 /** Route definition for ModelRuntime.registerVirtualModel. */
-export function createRouter(opts: { primary: string; fallbacks: string[]; resolve: (ref: string) => Model<Api>; events: RouterEvents }) {
+export function createRouter(opts: { primary: string | (() => string); fallbacks: string[] | (() => string[]); resolve: (ref: string) => Model<Api>; events: RouterEvents }) {
   const exhaustedUntil = new Map<string, number>();
   const ref = (m: Model<Api>) => `${m.provider}/${m.id}`;
   const available = (r: string) => (exhaustedUntil.get(r) ?? 0) <= Date.now();
-  const chain = [opts.primary, ...opts.fallbacks];
+  const primaryOf = () => (typeof opts.primary === "function" ? opts.primary() : opts.primary);
+  const fallbacksOf = () => (typeof opts.fallbacks === "function" ? opts.fallbacks() : opts.fallbacks);
   return {
     exhaustedUntil,
     route(request: any) {
+      const chain = [primaryOf(), ...fallbacksOf().filter((f) => f !== primaryOf())];
       if (request.reason === "retry" && request.failed && isExhaustion(request.failed.message)) {
         const failed = ref(request.failed.model);
         const ms = cooldownMs(request.failed.message.errorMessage ?? "");
@@ -54,7 +56,7 @@ export function createRouter(opts: { primary: string; fallbacks: string[]; resol
       if (request.reason !== "user" && sticky && available(ref(sticky.model))) {
         return { model: sticky.model, thinkingLevel: request.thinkingLevel };
       }
-      const pick = chain.find(available) ?? opts.primary;
+      const pick = chain.find(available) ?? primaryOf();
       return { model: opts.resolve(pick), thinkingLevel: request.thinkingLevel };
     },
   };

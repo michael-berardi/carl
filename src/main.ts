@@ -86,6 +86,12 @@ async function gateway(args: string[]): Promise<number> {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGHUP", () => void shutdown("SIGHUP"));
   process.on("unhandledRejection", (e) => gw.log.error("unhandled rejection", { error: (e as Error)?.stack ?? String(e) }));
+  process.on("uncaughtException", (e) => {
+    // State may be inconsistent: record why, then exit so the supervisor restarts a clean process.
+    gw.log.error("uncaught exception; exiting for a clean restart", { error: e.stack ?? String(e) });
+    gw.exitCode = 70;
+    void shutdown("uncaught exception");
+  });
   try {
     await gw.start();
   } catch (e) {
@@ -250,8 +256,11 @@ async function ask(args: string[]): Promise<number> {
   await brain.init();
   let shown = 0;
   const result = await brain.ask(values.conversation ?? "cli:default", { text, source: "cli" }, {
+    onMessageStart: () => {
+      if (shown > 0) process.stdout.write("\n\n");
+      shown = 0;
+    },
     onText: (t) => {
-      if (t.length < shown) { process.stdout.write("\n\n"); shown = 0; }
       process.stdout.write(t.slice(shown));
       shown = t.length;
     },

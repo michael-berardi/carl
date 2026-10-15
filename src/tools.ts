@@ -77,24 +77,22 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox):
     name: "schedule",
     label: "Schedule",
     description:
-      'Recurring or one-off work. action=list|add|remove|run|pause|resume. add needs name, when ("every 30m", "0 9 * * 1-5", "@daily", or "once 2026-10-16T09:00") and prompt (an instruction for a fresh agent run) or command (a shell command; its output is delivered without a model call). Results go to deliver ("home" default, "none", or a chat id).',
+      'Recurring or one-off work. action=list|add|remove|run|pause|resume. add needs name, when ("every 30m", "0 9 * * 1-5", "@daily", or "once 2026-10-16T09:00") and prompt (the instruction for a fresh agent run; its tools follow the same approval rules as yours, and unattended runs cannot get approvals). Results go to deliver ("home" default, "none", or a chat id). Shell-command schedules are created by the operator in the web portal, not by you.',
     parameters: Type.Object({
       action: Type.Union(["list", "add", "remove", "run", "pause", "resume"].map((a) => Type.Literal(a))),
       id: Type.Optional(Type.String()),
       name: Type.Optional(Type.String()),
       when: Type.Optional(Type.String()),
       prompt: Type.Optional(Type.String()),
-      command: Type.Optional(Type.String()),
       deliver: Type.Optional(Type.String()),
-      onlyIfOutput: Type.Optional(Type.Boolean({ description: "command jobs: deliver only when the command printed something" })),
     }),
     async execute(_id, p) {
       switch (p.action) {
         case "list":
           return ok(scheduler.describe());
         case "add": {
-          if (!p.name || !p.when || (!p.prompt && !p.command)) throw new Error("add needs name, when, and prompt or command");
-          const job = scheduler.add({ name: p.name, when: p.when, prompt: p.prompt, command: p.command, deliver: p.deliver ?? "home", onlyIfOutput: p.onlyIfOutput });
+          if (!p.name || !p.when || !p.prompt) throw new Error("add needs name, when and prompt");
+          const job = scheduler.add({ name: p.name, when: p.when, prompt: p.prompt, deliver: p.deliver ?? "home" });
           return ok(`Scheduled ${job.id} (${job.when}); next run ${new Date(job.nextRunAt!).toLocaleString()}.`);
         }
         case "remove":
@@ -103,9 +101,11 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox):
         case "resume":
           scheduler.setEnabled(need(p.id), p.action === "resume");
           return ok(p.action === "pause" ? "Paused." : "Resumed.");
-        case "run":
-          void scheduler.runNow(need(p.id));
-          return ok("Started; the result is delivered when it finishes.");
+        case "run": {
+          const job = scheduler.get(need(p.id)); // throws, naming the id, when there is no such job
+          void scheduler.runNow(job.id).catch(() => {});
+          return ok(`Started ${job.name}; the result is delivered when it finishes.`);
+        }
       }
       throw new Error(`unknown action ${p.action}`);
     },

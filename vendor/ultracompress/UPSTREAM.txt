@@ -1,0 +1,2 @@
+Vendored from https://github.com/michael-berardi/ultracompress (extension/) at 809614f, MIT.
+The Pi adapter only; the engine is the `ultracompress` binary (install it separately). Update by copying extension/index.ts and extension/src/*.ts.

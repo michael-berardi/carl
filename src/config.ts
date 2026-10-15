@@ -69,6 +69,8 @@ export interface CarlConfig {
   claude: { enabled: boolean; command?: string; configDirs: string[] };
   /** Extra shell-guard patterns on top of the built-in ones. */
   guard: { hardline: [string, string][]; dangerous: [string, string][] };
+  /** UltraCompress compaction (deterministic brief, no model call, plus recall): "auto" = on when the binary is installed. */
+  ultracompress: "auto" | "off";
   /** Extra KEY=VALUE files read for secrets after the environment and CARL_HOME/.env (values are never copied). */
   envFiles: string[];
 }
@@ -174,6 +176,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
       ? { home: abs(str(raw.ultraterm.home, "~/.hermes", "ultraterm.home"), home), overseerBin: abs(str(raw.ultraterm.overseerBin, "~/.ultraterm/bin/ut-overseer", "ultraterm.overseerBin"), home) }
       : undefined,
     envFiles: strList(raw.envFiles, "envFiles").map((p) => abs(p, home)),
+    ultracompress: raw.ultracompress === "off" || raw.ultracompress === false ? "off" : "auto",
     guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous") },
     claude: {
       enabled: raw.claude?.enabled === undefined ? true : bool(raw.claude.enabled, "claude.enabled"),
