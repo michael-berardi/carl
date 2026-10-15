@@ -242,6 +242,9 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     `(deny file-write* ${startup.map(sbLiterals).join(" ")})`,
     `(deny file-write* ${pinned.map(sbLiterals).join(" ")})`,
     `(deny file-write* (subpath ${sbString(join(homedir(), "Library", "LaunchAgents"))}) (subpath "/Library/LaunchAgents") (subpath "/Library/LaunchDaemons"))`,
+    // UltraTerm's bot folder holds the old gateway's secrets, config and backups: closed, except its scripts
+    // (speech-to-text runs from there inside the sandbox). Before the secret denies, so those still win.
+    ...(cfg.ultraterm ? [`(deny file-read* (subpath ${sbString(cfg.ultraterm.home)}))`, `(allow file-read* (subpath ${sbString(join(cfg.ultraterm.home, "scripts"))}))`] : []),
     // Secrets: unreadable, and neither they nor any folder above them can be moved somewhere readable.
     `(deny file-read* ${secrets.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
     `(deny file-write* ${[...secrets, ...secrets.flatMap(ancestors)].map(sbLiterals).join(" ")})`,
@@ -258,13 +261,13 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     `(deny mach-lookup ${[...LAUNCH_SERVICES, "com.apple.SecurityServer", "com.apple.securityd.xpc"].map((n) => `(global-name "${n}")`).join(" ")})`,
     // The operator's SSH agents (their keys reach every server the operator can log in to): launchd's, GnuPG's
     // and app agents such as 1Password's. The Keychain files themselves are unreadable too.
-    `(deny network-outbound (remote unix-socket (path-regex #"^(/private)?/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$") (path-regex #"/ssh-[^/]+/agent\\.[0-9]+$") (path-regex #"(ssh|agent)[^/]*\\.sock$")) ${["/.gnupg", "/.ssh", "/Library/Group Containers", "/Library/Containers", "/.orbstack", "/.local/share/containers", "/.lima", "/.rd"].map((d) => `(remote unix-socket (subpath ${sbString(homedir() + d)}))`).join(" ")})`,
+    ...[`#"^(/private)?/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$"`, `#"/ssh-[^/]+/agent\\.[0-9]+$"`, `#"(ssh|agent)[^/]*\\.sock$"`]
+      .map((re) => `(deny network-outbound (remote unix-socket (path-regex ${re})))`),
+    ...["/.gnupg", "/.ssh", "/Library/Group Containers", "/Library/Containers", "/.orbstack", "/.local/share/containers", "/.lima", "/.rd"]
+      .map((d) => `(deny network-outbound (remote unix-socket (subpath ${sbString(homedir() + d)})))`),
     `(deny file-read* ${credentialStores(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
     // ...and cannot be changed or moved aside either (matters when agentWritable covers the home folder).
-    `(deny file-write* ${credentialStores(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")} ${credentialStores(cfg).flatMap(ancestors).map(sbLiterals).join(" ")})`,
-    // UltraTerm's bot folder holds the old gateway's secrets, config and backups: closed, except its scripts
-    // (speech-to-text runs from there inside the sandbox).
-    ...(cfg.ultraterm ? [`(deny file-read* (subpath ${sbString(cfg.ultraterm.home)}))`, `(allow file-read* (subpath ${sbString(join(cfg.ultraterm.home, "scripts"))}))`] : []),
+    `(deny file-write* ${credentialStores(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")} ${[...credentialStores(cfg), ...credentialStores(cfg).flatMap(ancestors)].map(sbLiterals).join(" ")})`,
     ...(input.apiPorts.length ? [`(deny network-outbound ${input.apiPorts.map((p) => `(remote ip "*:${p}")`).join(" ")})`] : []),
   ];
   return lines.join("\n") + "\n";
