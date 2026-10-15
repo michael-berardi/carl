@@ -28,6 +28,9 @@ export interface GuardRules {
   cwd?: string;
   /** Programs the kernel sandbox refuses to run: refused up front instead of asking for an approval that cannot help. */
   noExec?: string[];
+  /** MCP servers that run outside the sandbox; their tools matching askTools ("server/tool" patterns) ask first. */
+  trustedMcp?: string[];
+  askTools?: [string, string][];
 }
 
 /** Remove quoting so `"rm" -rf '~'` reads as `rm -rf ~`. */
@@ -294,6 +297,11 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
         } else if (event.toolName === "read") {
           subject = `read ${path}`;
           verdict = readVerdict(path, rules);
+        } else if (/^mcp__.+__.+$/.test(event.toolName)) {
+          // Trusted MCP servers act outside the sandbox: their tools that type into terminals or stand in for the
+          // operator's approval ask first, also when a codemode script calls them.
+          subject = `${event.toolName}\n${JSON.stringify(event.input ?? {}, null, 1)}`;
+          verdict = mcpVerdict(event.toolName, rules);
         } else {
           return undefined;
         }
@@ -316,6 +324,23 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
       });
     },
   } as InlineExtension;
+}
+
+/** Tools of trusted MCP servers that act for the operator outside the sandbox: asked first by default. */
+export const DEFAULT_ASK_TOOLS: [string, string][] = [
+  ["^overseer/overseer_send$", "types into a terminal, which runs it outside the sandbox"],
+  ["^overseer/overseer_(job_approve|decide|decisions_submit|job_waive|job_review_exception|cleanup_scope|pause|resume)$", "records the operator's decision"],
+];
+
+export function mcpVerdict(toolName: string, rules: GuardRules): Verdict {
+  const m = /^mcp__(.+?)__(.+)$/.exec(toolName);
+  if (!m) return { level: "ok" };
+  const [, server, tool] = m;
+  if (!(rules.trustedMcp ?? []).includes(server)) return { level: "ok" }; // sandboxed like the shell
+  // Pi sanitises names into mcp__<server>__<tool>; the tool part may carry the server's own prefix.
+  for (const [src, why] of [...DEFAULT_ASK_TOOLS, ...(rules.askTools ?? [])])
+    if (new RegExp(src).test(`${server}/${tool}`)) return { level: "dangerous", reason: `${server} ${tool} ${why}` };
+  return { level: "ok" };
 }
 
 /** Run a small file utility inside the shell sandbox; the kernel then judges the real path, whatever links it went through. */

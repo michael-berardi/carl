@@ -34,6 +34,8 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   const outside = join(root, "elsewhere-ext");
   mkdirSync(outside);
   writeFileSync(join(outside, "ext.ts"), "// operator code\n");
+  mkdirSync(join(root, "nest", "deep"), { recursive: true });
+  writeFileSync(join(root, "nest", "deep", "ext.ts"), "// operator code\n");
   writeFileSync(join(home, "carl.json"), JSON.stringify({ extensions: [join(outside, "ext.ts")], envFiles: [join(root, "secrets", "extra.env")], shellEnv: ["CARL_TEST_PASS", "CARL_FILE_ONLY"], agentWritable: [root], api: { port: 18_765 } }));
   writeFileSync(join(home, ".env"), "TELEGRAM_BOT_TOKEN=1:secret\nCARL_FILE_ONLY=from-env-file\n");
   mkdirSync(join(root, "secrets"));
@@ -55,7 +57,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   t.after(() => { outsider.kill(); tmuxLike.close(); if (savedTmux === undefined) delete process.env.TMUX; else process.env.TMUX = savedTmux; });
   const homeProbe = join(homedir(), `.carl-sandbox-probe-${process.pid}`);
   t.after(() => { rmSync(homeProbe, { force: true }); rmSync(`/private/tmp/carl-sbx-probe-${process.pid}`, { force: true }); });
-  const profile = installProfile(cfg, { controlPlane: [outside], pinned: executableChain(join(root, "bin", "tool")), apiPorts: [18_765] })!;
+  const profile = installProfile(cfg, { controlPlane: [outside, join(root, "nest", "deep", "ext.ts")], pinned: executableChain(join(root, "bin", "tool")), apiPorts: [18_765] })!;
   process.env.TELEGRAM_BOT_TOKEN = "1:secret-from-env";
   process.env.STRIPE_TEST_KEY = "sk_must_not_leak";
   process.env.CARL_TEST_PASS = "passed-through";
@@ -97,6 +99,9 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
     `echo "PATHIS=[$PATH]" "FILEONLY=[$CARL_FILE_ONLY]"`,
     `echo t > /private/tmp/carl-sbx-probe-${process.pid}; echo tmp-write=$?`,
     `echo "TMPDIRIS=[$TMPDIR]"`,
+    `SSH_AUTH_SOCK=$(ls -d /private/var/run/com.apple.launchd.*/Listeners 2>/dev/null | head -1) ssh-add -l >/dev/null 2>&1; echo ssh-agent=$?`,
+    `security show-keychain-info >/dev/null 2>&1; echo keychain=$?`,
+    `mv ${join(root, "nest")} ${join(root, "nest-moved")}; echo parent-move=$?`,
   ].join(" ; "));
   api.close();
   for (const k of ["TELEGRAM_BOT_TOKEN", "STRIPE_TEST_KEY", "CARL_TEST_PASS", "HOMEBREW_GITHUB_API_TOKEN", "HTTPS_PROXY"]) delete process.env[k];
@@ -126,6 +131,9 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   assert.match(out, /FILEONLY=\[from-env-file\]/, "a shellEnv name can come from the env files");
   assert.match(out, /tmp-write=1/, "the shared /tmp is closed (other programs read what is there)");
   assert.ok(out.includes(`TMPDIRIS=[${join(home, "spill", "tmp")}]`), "the agent gets its own temp folder");
+  assert.match(out, /ssh-agent=2/, "the operator's SSH agent is out of reach");
+  assert.doesNotMatch(out, /keychain=0/, "the Keychain is out of reach");
+  assert.ok(existsSync(join(root, "nest", "deep", "ext.ts")) && /parent-move=1/.test(out), "a folder above protected code cannot be moved aside, even inside a writable folder");
 });
 
 test("file tools: reads and writes run in the sandbox, so a swapped symlink gains nothing", { skip: !sandboxAvailable() && "needs macOS sandbox-exec" }, async (t) => {

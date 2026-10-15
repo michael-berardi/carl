@@ -15,8 +15,6 @@ import {
 } from "./src/transforms";
 import {
 
-// Carl: snapshots live where the agent cannot write (a planted link there would redirect Carl's own writes).
-const snapRoot = () => process.env.ULTRACOMPRESS_STATE_ROOT ?? process.cwd();
   buildCompactStdin,
   formatStatsLine,
   parseUltraCompressArgs,
@@ -24,6 +22,9 @@ const snapRoot = () => process.env.ULTRACOMPRESS_STATE_ROOT ?? process.cwd();
   type CompactEventLike,
   type UltraCompressCompactResult,
 } from "./src/compact-hook";
+
+// Carl: snapshots live where the agent cannot write (a planted link there would redirect Carl's own writes).
+const snapRoot = () => process.env.ULTRACOMPRESS_STATE_ROOT ?? process.cwd();
 
 /**
  * UltraCompress — content-aware compaction for Pi.
