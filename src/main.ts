@@ -13,6 +13,8 @@ import { Scheduler } from "./scheduler.ts";
 import { carlTools } from "./tools.ts";
 import { VERSION } from "./version.ts";
 import { loadPlugins } from "./plugins.ts";
+import { resolveClaude } from "./providers/claude-code.ts";
+import { spawnSync } from "node:child_process";
 
 const HELP = `carl ${VERSION}: the minimal bot gateway
 
@@ -182,12 +184,31 @@ async function doctor(): Promise<number> {
     const m = brain.model(c.model);
     return `${c.model} (window ${m.contextWindow.toLocaleString()} tokens; Carl compacts at ${Math.min(c.contextBudget, m.contextWindow).toLocaleString()})`;
   });
-  await check("model login", async () => {
-    const provider = c.model.split("/")[0];
-    const available = brain.listModels().filter((m) => m.startsWith(provider + "/"));
-    if (!available.length) throw new Error(`no credentials for ${provider} in ${c.piAgentDir}/auth.json (sign in with pi /login)`);
-    return `${provider} signed in`;
-  });
+  for (const ref of [c.model, ...c.fallbackModels]) {
+    const provider = ref.split("/")[0];
+    await check(`login ${provider}`, async () => {
+      if (provider === "claude-code") {
+        const dirs = c.claude.configDirs.length ? c.claude.configDirs : [undefined];
+        const lines: string[] = [];
+        for (const dir of dirs) {
+          const env: NodeJS.ProcessEnv = { ...process.env };
+          const isDefault = !dir || dir.replace(/\/+$/, "") === join(process.env.HOME ?? "", ".claude");
+          if (isDefault) delete env.CLAUDE_CONFIG_DIR; else env.CLAUDE_CONFIG_DIR = dir;
+          const bin = resolveClaude(c.claude.command, env);
+          if (!bin) throw new Error("the claude CLI is not installed (npm install -g @anthropic-ai/claude-code)");
+          const out = spawnSync(bin, ["auth", "status"], { env, encoding: "utf8", timeout: 20_000 });
+          let status: any = {};
+          try { status = JSON.parse(out.stdout); } catch {}
+          if (out.status !== 0 || status.loggedIn === false) throw new Error(`${dir ?? "default"}: not logged in (run \`${isDefault ? "" : `CLAUDE_CONFIG_DIR=${dir} `}claude auth login\`)`);
+          lines.push(`${dir ?? "default"}${status.subscriptionType ? ` (${status.subscriptionType})` : ""}`);
+        }
+        return `Claude Code logged in: ${lines.join(", ")}`;
+      }
+      const available = brain.listModels().filter((m) => m.startsWith(provider + "/"));
+      if (!available.length) throw new Error(`no credentials for ${provider} in ${c.piAgentDir}/auth.json (sign in with pi /login)`);
+      return `${provider} signed in`;
+    });
+  }
   if (c.telegram.enabled) {
     await check("telegram", async () => {
       const token = secret(c.home, c.telegram.tokenEnv, c.envFiles);
