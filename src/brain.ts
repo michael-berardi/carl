@@ -26,7 +26,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { CarlConfig } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
-import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, SECRET_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
+import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { claudeCodeProviderConfig, PROVIDER as CLAUDE_PROVIDER } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
@@ -248,7 +248,7 @@ export class Brain extends EventEmitter {
     const ut = this.cfg.ultraterm?.overseerBin;
     this.trusted = adoptTrustedPath(join(this.stateDir, "bin"),
       { node: process.execPath, claude: this.claudeBin, ultracompress: uc, tmux: undefined, git: undefined }, ut ? [dirname(ut)] : []);
-    const leaked = Object.keys(process.env).filter((n) => secretEnvNames(this.cfg).includes(n) || SECRET_NAME.test(n));
+    const leaked = Object.keys(process.env).filter((n) => secretEnvNames(this.cfg).includes(n) || CREDENTIAL_NAME.test(n));
     if (leaked.length) this.log.warn("credentials are in Carl's process environment; on macOS any program of this user can read another's startup environment, so keep them in files (CARL_HOME/.env) instead", { names: leaked.join(",") });
     this.sandboxProfile = installProfile(this.cfg, { controlPlane: this.controlPlane(), pinned: this.pinnedPaths(), apiPorts: this.cfg.api.enabled ? [this.cfg.api.port] : [] }, join(this.stateDir, "sandbox.sb"));
     if (this.sandboxProfile) this.log.info("shell sandbox: Seatbelt", { profile: this.sandboxProfile });
