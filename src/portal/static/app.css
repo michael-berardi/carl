@@ -49,6 +49,9 @@ main { overflow: hidden; display: flex; min-width: 0; }
 .messages li.user { align-self: flex-end; background: var(--user); padding: 10px 14px; border-radius: 10px; }
 .messages li.assistant { align-self: flex-start; }
 .messages li.tool { align-self: flex-start; color: var(--muted); font: 13px/1.4 var(--mono); }
+.messages li code { font: 0.92em var(--mono); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.messages li pre.code { font: 13px/1.45 var(--mono); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; overflow-x: auto; white-space: pre; margin: 6px 0; }
+.messages li a { color: var(--accent); }
 .messages li .meta { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; white-space: normal; }
 .composer { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); padding-bottom: max(12px, env(safe-area-inset-bottom)); }
 
@@ -65,6 +68,7 @@ label { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
 .pre { white-space: pre-wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; font: 13px/1.5 var(--mono); margin: 0; }
 .ledger { margin: 0; padding-left: 18px; color: var(--ink); }
 .ledger li { margin-bottom: 6px; }
+.ledger li.none { list-style: none; margin-left: -18px; color: var(--muted); }
 .ledger li small { color: var(--muted); display: block; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 20px; margin: 0; }
 .facts dt { color: var(--muted); }
