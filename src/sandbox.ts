@@ -9,11 +9,11 @@
 // Everything else keeps the operator's normal permissions: Carl is an agent that does real work, not a toy box.
 // Where Seatbelt is unavailable (Linux, Windows) the environment scrubbing still applies, and the gap is logged.
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { BashSpawnContext } from "@earendil-works/pi-coding-agent";
-import type { CarlConfig } from "./config.ts";
+import { type CarlConfig, secret as secret_ } from "./config.ts";
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
@@ -42,11 +42,30 @@ export function writablePaths(cfg: CarlConfig): string[] {
   return [cfg.workspace, join(cfg.home, "memory"), join(cfg.home, "media"), join(cfg.home, "spill")];
 }
 
+/** Scratch space every tool expects: the per-user temp and cache folders, /tmp, devices and the npm cache. */
+export function scratchPaths(): string[] {
+  const t = canonical(tmpdir());
+  const out = [t, "/private/tmp", "/private/var/tmp", "/dev", join(homedir(), ".npm")];
+  if (basename(t) === "T") out.push(join(dirname(t), "C")); // macOS: <user dir>/T is temp, <user dir>/C the cache
+  return out;
+}
+
 export function secretFiles(cfg: CarlConfig): string[] {
   return [
     join(cfg.home, ".env"), join(cfg.piAgentDir, "auth.json"), join(cfg.home, "pi", "mcp-auth.json"), ...cfg.envFiles,
-    ...(cfg.ultraterm ? [join(cfg.ultraterm.home, ".env"), join(cfg.ultraterm.home, "auth.json")] : []),
+    ...(cfg.ultraterm ? [join(cfg.ultraterm.home, ".env"), join(cfg.ultraterm.home, "auth.json"),
+      // OverSeer's local HTTP token: with it a command could ask OverSeer to act outside the sandbox.
+      join(dirname(dirname(cfg.ultraterm.overseerBin)), "overseer", "http-token")] : []),
   ];
+}
+
+/** Unix sockets of programs that run commands outside the sandbox on request (tmux servers, Docker). */
+function controlSockets(cfg: CarlConfig): string[] {
+  const uid = process.getuid?.() ?? 0;
+  const out = [join(homedir(), ".ultraterm"), `/private/tmp/tmux-${uid}`, join(homedir(), ".colima"), join(homedir(), ".docker", "run"), "/private/var/run/docker.sock"];
+  for (const sock of [process.env.TMUX?.split(",")[0], process.env.ULTRATERM_TMUX_SOCKET]) if (sock) out.push(dirname(sock));
+  if (cfg.ultraterm) out.push(cfg.ultraterm.home);
+  return out;
 }
 
 /**
@@ -80,7 +99,7 @@ export function executableChain(p: string): string[] {
 
 /** Environment names a sandboxed command may inherit from Carl (plus the operator's shellEnv list). */
 const ENV_ALLOW = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERM_PROGRAM", "COLORTERM", "LANG", "TZ", "TMPDIR",
-  "PWD", "EDITOR", "VISUAL", "PAGER", "SSH_AUTH_SOCK", "TMUX", "TMUX_PANE", "CARL_HOME", "NO_COLOR", "FORCE_COLOR"]);
+  "PWD", "EDITOR", "VISUAL", "PAGER", "SSH_AUTH_SOCK", "CARL_HOME", "NO_COLOR", "FORCE_COLOR"]);
 const ENV_ALLOW_PREFIX = ["LC_", "XDG_", "HOMEBREW_", "ULTRATERM_"];
 const ENV_ALLOW_NETWORK = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"];
@@ -111,9 +130,14 @@ export function adoptTrustedPath(binDir: string, programs: Record<string, string
   return found;
 }
 
+/** The operator's PATH (Carl's own PATH once adoptTrustedPath ran is the trusted one). */
+export function operatorPath(): string {
+  return agentPath ?? process.env.PATH ?? "";
+}
+
 /** Folders of the operator's PATH (where a planted `node` would win at Carl's next start). */
 export function operatorPathDirs(): string[] {
-  return (agentPath ?? process.env.PATH ?? "").split(delimiter).filter((d) => d.startsWith("/"));
+  return operatorPath().split(delimiter).filter((d) => d.startsWith("/"));
 }
 
 /** The environment for anything the agent can influence: allowlisted names only, so no key reaches it by accident. */
@@ -125,7 +149,9 @@ export function cleanEnv(cfg: CarlConfig, env: NodeJS.ProcessEnv = process.env, 
     if (v === undefined || secret.has(k)) continue;
     if (extra.has(k) || ENV_ALLOW.has(k) || (ENV_ALLOW_PREFIX.some((p) => k.startsWith(p)) && !SECRET_NAME.test(k))) out[k] = v;
   }
-  if (agentPath !== undefined) out.PATH = agentPath;
+  // Names the operator chose to hand the agent may live in the env files rather than Carl's environment.
+  for (const k of extra) if (out[k] === undefined && !secret.has(k)) { const v = secret_(cfg.home, k, cfg.envFiles); if (v !== undefined) out[k] = v; }
+  out.PATH = operatorPath();
   return { ...out, ...keep };
 }
 
@@ -142,7 +168,7 @@ export function readNoFollow(path: string): string {
 
 /** Read a file inside the sandbox (for files in the agent's areas that Carl itself loads): links resolve as the agent's would. */
 export function readSandboxed(profile: string, path: string, maxBytes = 1 << 20): string {
-  const r = spawnSync(SANDBOX_EXEC, ["-f", profile, "/bin/cat", path], { maxBuffer: maxBytes, timeout: 10_000, env: { PATH: "/usr/bin:/bin" } });
+  const r = spawnSync(SANDBOX_EXEC, ["-f", profile, "/bin/cat", path], { maxBuffer: maxBytes, timeout: 3_000, env: { PATH: "/usr/bin:/bin" } });
   if (r.error) throw new Error(`cannot read ${path}: ${r.error.message}`);
   if (r.status !== 0) throw new Error(`cannot read ${path}: ${String(r.stderr).trim() || `exit ${r.status}`}`);
   return String(r.stdout);
@@ -179,6 +205,11 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
   const lines = [
     "(version 1)",
     "(allow default)",
+    // Writes go only to the working areas, scratch space and folders the operator adds; everything else (Carl's own
+    // files, programs on PATH, shell startup files, other projects) is read-only to the agent.
+    "(deny file-write*)",
+    `(allow file-write* ${[...scratchPaths(), ...cfg.agentWritable].map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
+    // CARL_HOME stays closed even when it sits inside one of those folders; then its working areas open again.
     `(deny file-write* (subpath ${sbString(cfg.home)}))`,
     `(allow file-write* ${writablePaths(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
     // Code Carl itself runs or loads, wherever it lives; the workspace never holds Pi extensions.
@@ -191,6 +222,10 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     `(deny file-write* ${[...secrets, ...secrets.flatMap(ancestors)].map(sbLiterals).join(" ")})`,
     `(deny process-exec ${NO_EXEC.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
     "(deny appleevent-send)",
+    // No signals to processes outside this command (Carl itself, the operator's programs); its own children are fine.
+    "(deny signal)",
+    "(allow signal (target same-sandbox))",
+    `(deny network-outbound ${controlSockets(cfg).map((p) => `(remote unix-socket (subpath ${sbString(p)}))`).join(" ")})`,
     // LaunchServices starts apps (and their helpers) outside the sandbox.
     `(deny mach-lookup ${LAUNCH_SERVICES.map((n) => `(global-name "${n}")`).join(" ")})`,
     ...(input.apiPorts.length ? [`(deny network-outbound ${input.apiPorts.map((p) => `(remote ip "*:${p}")`).join(" ")})`] : []),
@@ -213,7 +248,8 @@ const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 export function sandboxSpawnHook(cfg: CarlConfig, profilePath: string | undefined): (ctx: BashSpawnContext) => BashSpawnContext {
   return (ctx) => {
     // Variables Pi itself set for the command are kept; everything inherited from Carl goes through the allowlist.
-    const own = Object.fromEntries(Object.entries(ctx.env ?? {}).filter(([k, v]) => v !== undefined && process.env[k] !== v && !secretEnvNames(cfg).includes(k))) as Record<string, string>;
+    // PATH is the operator's (Pi prefixes its own tool folder to Carl's trusted PATH, which the agent should not get).
+    const own = Object.fromEntries(Object.entries(ctx.env ?? {}).filter(([k, v]) => k !== "PATH" && v !== undefined && process.env[k] !== v && !secretEnvNames(cfg).includes(k))) as Record<string, string>;
     const env = cleanEnv(cfg, ctx.env, own);
     if (!profilePath) return { ...ctx, env };
     return { ...ctx, env, command: `exec ${SANDBOX_EXEC} -f ${shQuote(profilePath)} /bin/bash -c ${shQuote(ctx.command)}` };
@@ -221,9 +257,9 @@ export function sandboxSpawnHook(cfg: CarlConfig, profilePath: string | undefine
 }
 
 /** Write the profile into CARL_HOME/state (itself write-protected from the agent) and return its path. */
-export function installProfile(cfg: CarlConfig, input: ProfileInput): string | undefined {
+export function installProfile(cfg: CarlConfig, input: ProfileInput, path = join(cfg.home, "state", "sandbox.sb")): string | undefined {
   if (!sandboxAvailable()) return undefined;
-  const path = join(cfg.home, "state", "sandbox.sb");
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, buildProfile(cfg, input), { mode: 0o600 });
   return path;
 }

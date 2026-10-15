@@ -133,5 +133,7 @@ export function htmlToPlain(html: string): string {
 
 /** Make invisible and direction-changing characters visible (approval cards must show exactly what runs). */
 export function visibleControls(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u00a0\u00ad\u034f\u061c\u115f\u1160\u1680\u17b4\u17b5\u180b-\u180f\u2000-\u200f\u2028-\u202f\u205f-\u2064\u2066-\u206f\u3000\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{1d173}-\u{1d17a}\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+  // Every control, format, separator, odd space and default-ignorable character, except newline, tab and space.
+  return text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}\p{Default_Ignorable_Code_Point}]/gu, (c) =>
+    c === "\n" || c === "\t" || c === " " ? c : `\\u{${c.codePointAt(0)!.toString(16)}}`);
 }

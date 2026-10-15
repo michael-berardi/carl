@@ -77,8 +77,13 @@ export interface CarlConfig {
   ultracompress: "auto" | "off";
   /** Extra KEY=VALUE files read for secrets after the environment and CARL_HOME/.env (values are never copied). */
   envFiles: string[];
-  /** Extra environment names passed to shell commands, MCP servers and command schedules (all others are dropped). */
+  /** Extra environment names passed to shell commands, MCP servers and command schedules (all others are dropped);
+   *  values come from Carl's environment or, failing that, the env files. */
   shellEnv: string[];
+  /** Extra folders the agent may write (it may write only its working areas, temp folders and the npm cache). */
+  agentWritable: string[];
+  /** MCP servers (by name in pi/mcp.json) that run outside the sandbox: the operator's own control tools. */
+  trustedMcp: string[];
 }
 
 export class ConfigError extends Error {
@@ -198,6 +203,8 @@ export function loadConfig(home = carlHome()): CarlConfig {
       : undefined,
     envFiles: strList(raw.envFiles, "envFiles").map((p) => abs(p, home)),
     shellEnv: strList(raw.shellEnv, "shellEnv"),
+    agentWritable: strList(raw.agentWritable, "agentWritable").map((p) => abs(p, home)),
+    trustedMcp: strList(raw.trustedMcp, "trustedMcp"),
     ultracompress: raw.ultracompress === "off" || raw.ultracompress === false ? "off" : "auto",
     hooks: hooksOf(raw.hooks),
     guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous") },

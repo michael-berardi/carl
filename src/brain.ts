@@ -1,5 +1,5 @@
 // The brain: one Pi AgentSession per conversation, created lazily, persisted as Pi JSONL, disposed when idle.
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
@@ -26,7 +26,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { CarlConfig } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
-import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPathDirs, readSandboxed, SECRET_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
+import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, SECRET_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { claudeCodeProviderConfig, PROVIDER as CLAUDE_PROVIDER } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
@@ -122,8 +122,13 @@ export class Brain extends EventEmitter {
   readonly psyche: Psyche;
   readonly log: Log;
   private readonly tools: () => ToolDefinition[];
-  constructor(cfg: CarlConfig, psyche: Psyche, log: Log, tools: () => ToolDefinition[]) {
+  /**
+   * `shared`: this is the gateway, which owns CARL_HOME/state/bin and state/sandbox.sb. Other commands (ask, doctor,
+   * prompt) keep theirs in state/run/<pid>, removed at shutdown, so they never rewrite a running gateway's.
+   */
+  constructor(cfg: CarlConfig, psyche: Psyche, log: Log, tools: () => ToolDefinition[], opts: { shared?: boolean } = {}) {
     super();
+    this.opts = opts;
     this.cfg = cfg;
     this.psyche = psyche;
     this.log = log;
@@ -210,6 +215,8 @@ export class Brain extends EventEmitter {
   private sandboxProfile?: string;
   private claudeBin?: string;
   private trusted: Record<string, string> = {};
+  private readonly opts: { shared?: boolean };
+  private get stateDir(): string { return this.opts.shared ? join(this.cfg.home, "state") : join(this.cfg.home, "state", "run", String(process.pid)); }
   /** The shell sandbox profile, for helpers that run agent-influenced programs (undefined without Seatbelt). */
   get shellSandbox(): string | undefined { return this.sandboxProfile; }
 
@@ -228,15 +235,16 @@ export class Brain extends EventEmitter {
     // Programs Carl (or its unsandboxed helpers) start by name are resolved once, now, from the operator's PATH;
     // from here on those children see only a private bin folder of links to them plus system folders, so a program
     // the agent plants later in a user-writable folder (~/.local/bin, Homebrew) is never picked up.
-    this.claudeBin = this.cfg.claude.enabled ? resolveClaude(this.cfg.claude.command, process.env) : undefined;
-    const uc = findUltraCompress();
+    const opEnv = { ...process.env, PATH: operatorPath() };
+    this.claudeBin = this.cfg.claude.enabled ? resolveClaude(this.cfg.claude.command, opEnv) : undefined;
+    const uc = findUltraCompress(opEnv);
     if (uc) process.env.ULTRACOMPRESS_BIN = uc; // the UltraCompress adapter's first candidate: no second lookup
     const ut = this.cfg.ultraterm?.overseerBin;
-    this.trusted = adoptTrustedPath(join(this.cfg.home, "state", "bin"),
+    this.trusted = adoptTrustedPath(join(this.stateDir, "bin"),
       { node: process.execPath, claude: this.claudeBin, ultracompress: uc, tmux: undefined, git: undefined }, ut ? [dirname(ut)] : []);
     const leaked = Object.keys(process.env).filter((n) => secretEnvNames(this.cfg).includes(n) || SECRET_NAME.test(n));
     if (leaked.length) this.log.warn("credentials are in Carl's process environment; on macOS any program of this user can read another's startup environment, so keep them in files (CARL_HOME/.env) instead", { names: leaked.join(",") });
-    this.sandboxProfile = installProfile(this.cfg, { controlPlane: this.controlPlane(), pinned: this.pinnedPaths(), apiPorts: this.cfg.api.enabled ? [this.cfg.api.port] : [] });
+    this.sandboxProfile = installProfile(this.cfg, { controlPlane: this.controlPlane(), pinned: this.pinnedPaths(), apiPorts: this.cfg.api.enabled ? [this.cfg.api.port] : [] }, join(this.stateDir, "sandbox.sb"));
     if (this.sandboxProfile) this.log.info("shell sandbox: Seatbelt", { profile: this.sandboxProfile });
     else this.log.warn("shell sandbox unavailable on this platform: the pattern guard and secret scrubbing still apply, but Carl's own files are not kernel-protected");
     if (this.cfg.ultracompress !== "off") {
@@ -340,11 +348,10 @@ export class Brain extends EventEmitter {
         this.log.warn("context file missing", { path });
         continue;
       }
-      // Notes in the agent's own areas are read the way the agent would read them (inside the sandbox), so a
-      // link planted there cannot pull a secret into the system prompt.
-      const free = writablePaths(this.cfg).some((w) => (path + "/").startsWith(w.replace(/\/+$/, "") + "/"));
+      // Every context file is read the way the agent would read it (inside the sandbox): a link planted in the
+      // agent's areas, or anywhere on the way to the file, cannot pull a secret into the system prompt.
       try {
-        out.push({ path, content: free && this.sandboxProfile ? readSandboxed(this.sandboxProfile, path) : readFileSync(path, "utf8") });
+        out.push({ path, content: this.sandboxProfile ? readSandboxed(this.sandboxProfile, path) : readFileSync(path, "utf8") });
       } catch (e) {
         this.log.warn("context file not loaded", { path, error: (e as Error).message });
       }
@@ -402,7 +409,8 @@ export class Brain extends EventEmitter {
           loadConfig: (ctx: any) => {
             const loaded = this.mcpLoader!({ agentDir: this.piDir, cwd: ctx.cwd, projectTrusted: false });
             // Stdio servers run under the shell sandbox too, with Carl's secrets blanked in their environment.
-            for (const s of loaded.servers ?? []) if (s.config?.command) s.config = sandboxMcpServer(this.cfg, this.sandboxProfile, s.config);
+            // ...except the operator's own control tools named in trustedMcp, which enforce their own policy.
+            for (const s of loaded.servers ?? []) if (s.config?.command && !this.cfg.trustedMcp.includes(s.name)) s.config = sandboxMcpServer(this.cfg, this.sandboxProfile, s.config);
             return loaded;
           },
         }) as InlineExtension,
@@ -726,6 +734,7 @@ export class Brain extends EventEmitter {
       convo.session.dispose();
     }
     this.conversations.clear();
+    if (!this.opts.shared) rmSync(this.stateDir, { recursive: true, force: true });
   }
 
   /** One-off run in a throwaway in-memory session (individuation, titles). No tools unless given. */
@@ -824,9 +833,9 @@ export function summarizeArgs(args: unknown): string {
 }
 
 /** The UltraCompress engine, found the same way its adapter looks: env, UltraTerm, ~/.local, ~/.cargo, PATH. */
-export function findUltraCompress(): string | undefined {
+export function findUltraCompress(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const home = homedir();
-  const candidates = [process.env.ULTRACOMPRESS_BIN, join(home, ".ultraterm", "bin", "ultracompress"), join(home, ".local", "bin", "ultracompress"), join(home, ".cargo", "bin", "ultracompress"),
-    ...(process.env.PATH ?? "").split(":").map((d) => join(d, "ultracompress"))];
+  const candidates = [env.ULTRACOMPRESS_BIN, join(home, ".ultraterm", "bin", "ultracompress"), join(home, ".local", "bin", "ultracompress"), join(home, ".cargo", "bin", "ultracompress"),
+    ...(env.PATH ?? "").split(":").map((d) => join(d, "ultracompress"))];
   return candidates.find((c) => c && existsSync(c));
 }

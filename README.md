@@ -106,17 +106,17 @@ Only Self, Persona and Lessons enter the prompt. The ledgers stay on disk and ar
 
 Carl runs tools with your own permissions, because it does real work. Two layers keep that safe.
 
-**A kernel sandbox for everything the agent can influence (macOS).** Shell commands, MCP servers, the read, edit and write tools, speech-to-text and command schedules all run under one Seatbelt profile that:
+**A kernel sandbox for everything the agent can influence (macOS).** Shell commands, MCP servers (except the ones you name in `trustedMcp`), the read, edit and write tools, speech-to-text and command schedules all run under one Seatbelt profile that:
 
-- denies writes anywhere in `CARL_HOME` except the agent's working areas (`workspace`, `memory`, `media`, `spill`), and to a `.pi` extension directory in the workspace; the working areas themselves cannot be moved or swapped for a link;
-- denies writes to everything Carl runs or loads outside the sandbox: its own code, the Node and Claude Code installs (and the links Carl starts them through), Pi's agent directory, extensions, skills, context files, UltraTerm's helpers and their Python runtime, `Carl.app`, shell startup files and LaunchAgents;
-- denies reads of credential files (`.env`, configured env files, Pi's `auth.json`), and moving, renaming or hardlinking them or any folder above them;
-- blocks the routes that start work outside the sandbox: `osascript`, `open`, `launchctl`, `crontab`, `at`, `shortcuts` and `sudo`, Apple Events, LaunchServices, and connections to Carl's own API port;
-- passes only an allowlist of environment variables (`PATH`, `HOME`, locale, terminal and similar). Carl's secrets and any keys exported in your shell are dropped; add names the agent should see to `shellEnv`.
+- lets the agent write only its working areas (`workspace`, `memory`, `media`, `spill`), the temp and cache folders tools expect, the npm cache and any folders you list in `agentWritable`. Everything else, including Carl's own files, programs on `PATH`, shell startup files, skills and your other projects, is read-only to it;
+- keeps Carl's own code, Pi extensions and the `.pi` folder unwritable even inside those areas, and keeps the working areas themselves from being moved or swapped for a link;
+- denies reads of credential files (`.env`, configured env files, Pi's `auth.json`, OverSeer's local token), and moving, renaming or hardlinking them;
+- blocks the routes that run work outside the sandbox: `osascript`, `open`, `launchctl`, `crontab`, `at`, `shortcuts` and `sudo`, Apple Events, LaunchServices, tmux and Docker sockets, signals to other processes, and Carl's own API port;
+- passes only an allowlist of environment variables (`PATH`, `HOME`, locale, terminal, proxy and similar). Carl's secrets and keys exported in your shell are dropped; list names the agent should get in `shellEnv` (their values may live in the env files).
 
-Programs Carl itself starts outside the sandbox (Claude Code, UltraTerm's helpers, UltraCompress) are resolved once at startup and run with a `PATH` of folders the agent cannot write, so a program planted later in `~/.local/bin` or Homebrew is never picked up; notes in the agent's own areas that Carl loads into the prompt are read inside the sandbox.
+Programs Carl itself starts outside the sandbox (Claude Code, UltraTerm's helpers, UltraCompress, trusted MCP servers) are resolved once at startup and run with a `PATH` of folders the agent cannot write. Context files are read inside the sandbox, so a link cannot pull a secret into the prompt.
 
-The profile starts from "allow" and denies these routes, so it is a boundary for Carl's own files and secrets, not a general jail: the agent can still read and change your other files, use the network, and talk to other running programs such as tmux. On macOS any program you run can read the startup environment of your other programs, so keep keys in files rather than exported shell variables; Carl warns at startup if one of its own secrets is in its environment. On Linux and Windows the environment allowlist still applies, and the missing kernel boundary is logged at startup.
+The sandbox is a boundary for Carl's own files and secrets and for the rest of your disk, not for the network: the agent can still read your files (except credentials), make network requests and use the authority of the tools you give it. On macOS any program you run can read the startup environment of your other programs, so keep keys in files rather than exported shell variables; Carl lists any credential-like names in its own environment at startup. On Linux and Windows the environment allowlist still applies, and the missing kernel boundary is logged at startup.
 
 **A guard that asks before risky actions.** Commands are parsed into simple commands, respecting quotes and heredocs, and judged by what actually runs:
 
@@ -125,7 +125,7 @@ The profile starts from "allow" and denies these routes, so it is a boundary for
   - In Telegram, Slack or Discord, Carl shows you the exact command (or file content) with **Run once** and **Deny** buttons. No answer within 5 minutes means no.
   - Runs with nobody to ask (schedules, the API) refuse instead.
 
-The guard is a tripwire for mistakes and prompt injection, not a proof. The sandbox is the boundary for Carl's own files and secrets. Carl also holds whatever authority you give it through tools: if it can start workers or drive other apps, it can ask them to act. Routes the sandbox leaves open, such as `tmux send-keys`, always ask first; the programs the sandbox blocks are refused up front.
+The guard is a tripwire for mistakes and prompt injection, not a proof. The sandbox is the boundary for Carl's own files and secrets. Carl also holds whatever authority you give it through tools: if it can start workers or drive other apps, it can ask them to act. Programs the sandbox blocks are refused up front with that reason.
 
 Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 
@@ -150,7 +150,9 @@ Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
   "claude": { "configDirs": ["~/.claude", "~/.claude-work"] },
   "guard": { "hardline": [["\\bterraform\\s+destroy\\b", "terraform destroy"]] },
   "envFiles": ["~/.config/bot/.env"],
-  "shellEnv": ["GITHUB_TOKEN"]
+  "shellEnv": ["GITHUB_TOKEN"],
+  "agentWritable": ["~/projects/scratch"],
+  "trustedMcp": ["overseer"]
 }
 ```
 

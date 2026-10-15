@@ -2,8 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createServer as createNetServer } from "node:net";
+import { spawn } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "../src/config.ts";
 import { executableChain, installProfile, readSandboxed, sandboxAvailable, sandboxSpawnHook } from "../src/sandbox.ts";
@@ -32,8 +34,8 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   const outside = join(root, "elsewhere-ext");
   mkdirSync(outside);
   writeFileSync(join(outside, "ext.ts"), "// operator code\n");
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ extensions: [join(outside, "ext.ts")], envFiles: [join(root, "secrets", "extra.env")], shellEnv: ["CARL_TEST_PASS"], api: { port: 18_765 } }));
-  writeFileSync(join(home, ".env"), "TELEGRAM_BOT_TOKEN=1:secret\n");
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ extensions: [join(outside, "ext.ts")], envFiles: [join(root, "secrets", "extra.env")], shellEnv: ["CARL_TEST_PASS", "CARL_FILE_ONLY"], api: { port: 18_765 } }));
+  writeFileSync(join(home, ".env"), "TELEGRAM_BOT_TOKEN=1:secret\nCARL_FILE_ONLY=from-env-file\n");
   mkdirSync(join(root, "secrets"));
   writeFileSync(join(root, "secrets", "extra.env"), "OTHER=2:secret\n");
   const cfg = loadConfig(home);
@@ -42,6 +44,17 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   mkdirSync(join(root, "bin"));
   symlinkSync("/bin/echo", join(root, "bin", "tool"));
   writeFileSync(join(root, "probe.py"), LS_PROBE);
+  // A stand-in tmux server: its socket must be out of reach (tmux runs whatever it is sent, outside the sandbox).
+  const sock = join(root, "tmux-sock", "s");
+  mkdirSync(dirname(sock));
+  const tmuxLike = createNetServer((c) => c.end("tmux")).listen(sock);
+  const savedTmux = process.env.TMUX;
+  process.env.TMUX = `${sock},1,0`;
+  // A process outside the sandbox that commands must not be able to signal.
+  const outsider = spawn("/bin/sleep", ["30"]);
+  t.after(() => { outsider.kill(); tmuxLike.close(); if (savedTmux === undefined) delete process.env.TMUX; else process.env.TMUX = savedTmux; });
+  const homeProbe = join(homedir(), `.carl-sandbox-probe-${process.pid}`);
+  t.after(() => rmSync(homeProbe, { force: true }));
   const profile = installProfile(cfg, { controlPlane: [outside], pinned: executableChain(join(root, "bin", "tool")), apiPorts: [18_765] })!;
   process.env.TELEGRAM_BOT_TOKEN = "1:secret-from-env";
   process.env.STRIPE_TEST_KEY = "sk_must_not_leak";
@@ -78,6 +91,10 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
     `echo other > ${join(root, "bin", "other")} && echo wrote-beside-pinned`,
     `echo made > ${join(root, "made.txt")} && echo wrote-in-ancestor`,
     `/usr/bin/python3 ${join(root, "probe.py")}`,
+    `echo nope > ${homeProbe}; echo home-write=$?`,
+    `/usr/bin/python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${sock}'); print('TMUX-REACHED', s.recv(9))" 2>/dev/null || echo tmux-blocked`,
+    `kill -0 ${outsider.pid} 2>/dev/null && echo SIGNAL-REACHED || echo signal-blocked`,
+    `echo "PATHIS=[$PATH]" "FILEONLY=[$CARL_FILE_ONLY]"`,
   ].join(" ; "));
   api.close();
   for (const k of ["TELEGRAM_BOT_TOKEN", "STRIPE_TEST_KEY", "CARL_TEST_PASS", "HOMEBREW_GITHUB_API_TOKEN", "HTTPS_PROXY"]) delete process.env[k];
@@ -100,6 +117,11 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   assert.match(out, /wrote-beside-pinned/);
   assert.match(out, /wrote-in-ancestor/, "protecting a folder from renames does not stop new files in it");
   assert.match(out, /default-app none/, "LaunchServices is out of reach");
+  assert.ok(!existsSync(homeProbe) && /home-write=1/.test(out), "nothing outside the working areas and scratch space is writable");
+  assert.match(out, /tmux-blocked/, "terminal servers' sockets are out of reach");
+  assert.match(out, /signal-blocked/, "processes outside the sandbox cannot be signalled");
+  assert.ok(out.includes(`PATHIS=[${process.env.PATH}]`), "agent commands get the operator's PATH, nothing prefixed");
+  assert.match(out, /FILEONLY=\[from-env-file\]/, "a shellEnv name can come from the env files");
 });
 
 test("file tools: reads and writes run in the sandbox, so a swapped symlink gains nothing", { skip: !sandboxAvailable() && "needs macOS sandbox-exec" }, async (t) => {
@@ -141,4 +163,7 @@ test("file tools: reads and writes run in the sandbox, so a swapped symlink gain
   // A device that never ends is cut off instead of filling Carl's memory.
   await assert.rejects(read.readFile("/dev/zero"), /larger than/);
   assert.equal(await read.detectImageMimeType!("/dev/zero"), null);
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.from("IHDR"), Buffer.alloc(17)]);
+  writeFileSync(join(ws, "pic.png"), png);
+  assert.equal(await read.detectImageMimeType!(join(ws, "pic.png")), "image/png");
 });
