@@ -38,7 +38,9 @@ async function scenario(t: any, exposure: "direct" | "codemode", steps: any[]) {
   t.after(() => brain.shutdown());
   faux.setResponses(steps);
   const result = await brain.ask("api:trusted-mcp", { text: "go", source: "api" });
-  return { result, asked, calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [] };
+  const messages = ((brain as any).conversations.get("api:trusted-mcp")?.session.messages ?? []) as any[];
+  const toolText = messages.filter((m) => m.role === "toolResult").flatMap((m) => m.content ?? []).map((c: any) => c.text ?? "").join("\n");
+  return { result, asked, toolText, calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [] };
 }
 
 test("trusted MCP, direct tools: a read runs, an acting tool asks and is not run when denied", async (t) => {
@@ -57,12 +59,16 @@ test("trusted MCP from a codemode script: the same rule applies to nested calls"
   const code = [
     "await tools.mcp__overseer__overseer_status({});",
     "try { await tools.mcp__overseer__overseer_send({ text: 'echo pwned' }); text('send ran'); } catch (e) { text('send blocked: ' + e.message); }",
+    // The script runs in a VM with nothing but the injected tools: no Node process, modules or network.
+    "text('host:' + typeof process + '/' + typeof require + '/' + typeof fetch);",
   ].join("\n");
-  const { asked, calls } = await scenario(t, "codemode", [
+  const { asked, calls, toolText } = await scenario(t, "codemode", [
     fauxAssistantMessage(fauxToolCall("codemode", { code })),
     fauxAssistantMessage(fauxText("done")),
   ]);
   assert.deepEqual(calls, ["overseer_status"], "only the read reached the server");
   assert.equal(asked.length, 1, `asked: ${JSON.stringify(asked)}`);
   assert.match(asked[0].reason, /overseer overseer_send/);
+  assert.match(toolText, /send blocked/);
+  assert.match(toolText, /host:undefined\/undefined\/undefined/, "codemode scripts cannot reach Carl's process");
 });

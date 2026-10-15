@@ -567,7 +567,8 @@ export class Brain extends EventEmitter {
     });
     let thrown: Error | undefined;
     try {
-      await convo.session.prompt(text, { images, source: "rpc" } as any);
+      // Never run Pi extension /commands from message text: a schedule or webhook prompt is data, not a command.
+      await convo.session.prompt(text, { images, source: "rpc", expandPromptTemplates: false } as any);
     } catch (e) {
       thrown = e as Error;
     } finally {
@@ -651,9 +652,10 @@ export class Brain extends EventEmitter {
     if (inflight) await inflight.catch(() => {});
     const convo = this.conversations.get(key);
     if (convo) {
+      // Out of the map first: a message arriving meanwhile starts a fresh session instead of a closing one.
+      this.conversations.delete(key);
       if (convo.busy) await convo.session.abort().catch(() => {});
       await this.closeSession(convo.session);
-      this.conversations.delete(key);
     }
     const pending = this.createConversation(key, convo?.source ?? "cli", true).finally(() => this.creating.delete(key));
     this.creating.set(key, pending);
@@ -739,7 +741,9 @@ export class Brain extends EventEmitter {
   private async closeSession(session: AgentSession): Promise<void> {
     try {
       const runner = (session as any).extensionRunner;
-      if (runner?.hasHandlers?.("session_shutdown")) await runner.emit({ type: "session_shutdown", reason: "quit" });
+      // Bounded: a stuck MCP server must not hang /new or shutdown.
+      if (runner?.hasHandlers?.("session_shutdown"))
+        await Promise.race([runner.emit({ type: "session_shutdown", reason: "quit" }), new Promise((_, no) => setTimeout(() => no(new Error("extensions took over 5 s to shut down")), 5_000))]);
     } catch (e) {
       this.log.warn("extension shutdown failed", { error: (e as Error).message });
     }
@@ -788,7 +792,7 @@ export class Brain extends EventEmitter {
       tools: opts.tools ?? [],
     });
     try {
-      await session.prompt(prompt);
+      await session.prompt(prompt, { expandPromptTemplates: false } as any);
       const last = [...session.messages].reverse().find((m: any) => m.role === "assistant") as any;
       if (last?.stopReason === "error") throw new Error(last.errorMessage ?? "model error");
       return last ? assistantText(last) : "";

@@ -214,6 +214,8 @@ export function loadConfig(home = carlHome()): CarlConfig {
       configDirs: strList(raw.claude?.configDirs, "claude.configDirs").map((p) => abs(p, home)),
     },
   };
+  for (const n of cfg.trustedMcp) if (!/^[A-Za-z0-9_-]{1,32}$/.test(n))
+    throw new ConfigError(`trustedMcp: "${n}" must be 1-32 letters, digits, - or _ (longer names get shortened tool names the guard could not attribute)`);
   if ((cfg.home + "/").startsWith(cfg.workspace.replace(/\/+$/, "") + "/"))
     throw new ConfigError(`workspace (${cfg.workspace}) must not contain CARL_HOME (${cfg.home}): the agent would be able to rewrite Carl's own configuration`);
   if (!THINKING.has(cfg.thinking)) throw new ConfigError(`thinking must be one of ${[...THINKING].join(", ")}`);

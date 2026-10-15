@@ -36,3 +36,15 @@ test("capText keeps head and tail and names the spill file", () => {
   assert.match(out, /\/tmp\/spill\.txt/);
   assert.ok(out.startsWith("aaa") && out.endsWith("bbb"));
 });
+
+test("trusted MCP server names stay short enough for the guard to attribute their tools", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { loadConfig } = await import("../src/config.ts");
+  const home = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ trustedMcp: ["x".repeat(40)] }));
+  assert.throws(() => loadConfig(home), /trustedMcp/);
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ trustedMcp: ["overseer", "ultra-memory"] }));
+  assert.deepEqual(loadConfig(home).trustedMcp, ["overseer", "ultra-memory"]);
+});

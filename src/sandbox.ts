@@ -58,6 +58,18 @@ export function agentScratchEnv(cfg: CarlConfig): Record<string, string> {
   return dirs;
 }
 
+/** Well-known credential stores of the operator's tools: unreadable to the agent (read-denied subpaths). */
+export function credentialStores(cfg: CarlConfig): string[] {
+  const h = homedir();
+  const claudeDirs = [join(h, ".claude"), ...cfg.claude.configDirs];
+  return [
+    join(h, ".ssh"), join(h, ".aws"), join(h, ".gnupg"), join(h, ".netrc"), join(h, ".npmrc"), join(h, ".pypirc"),
+    join(h, ".docker", "config.json"), join(h, ".kube"), join(h, ".config", "gh"), join(h, ".config", "gcloud"),
+    join(h, ".codex", "auth.json"), join(h, ".git-credentials"), join(h, "Library", "Keychains"),
+    ...claudeDirs.map((d) => join(d, ".credentials.json")),
+  ];
+}
+
 export function secretFiles(cfg: CarlConfig): string[] {
   return [
     join(cfg.home, ".env"), join(cfg.piAgentDir, "auth.json"), join(cfg.home, "pi", "mcp-auth.json"), ...cfg.envFiles,
@@ -223,6 +235,8 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     `(allow file-write* ${writablePaths(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
     // Code Carl itself runs or loads, wherever it lives; the workspace never holds Pi extensions.
     `(deny file-write* (subpath ${sbString(join(cfg.workspace, ".pi"))}) ${input.controlPlane.map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
+    // A protected path that is itself a link: the link cannot be repointed either.
+    ...(input.controlPlane.length ? [`(deny file-write* ${input.controlPlane.map(sbLiterals).join(" ")})`] : []),
     `(deny file-write* ${startup.map(sbLiterals).join(" ")})`,
     `(deny file-write* ${pinned.map(sbLiterals).join(" ")})`,
     `(deny file-write* (subpath ${sbString(join(homedir(), "Library", "LaunchAgents"))}) (subpath "/Library/LaunchAgents") (subpath "/Library/LaunchDaemons"))`,
@@ -240,8 +254,10 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     // LaunchServices starts apps (and their helpers) outside the sandbox; the Keychain holds the operator's
     // credentials (HTTPS certificate checks use trustd, which stays reachable).
     `(deny mach-lookup ${[...LAUNCH_SERVICES, "com.apple.SecurityServer", "com.apple.securityd.xpc"].map((n) => `(global-name "${n}")`).join(" ")})`,
-    // The operator's SSH agent (its keys reach every server the operator can log in to).
-    `(deny network-outbound (remote unix-socket (path-regex #"^/private/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$")))`,
+    // The operator's SSH agents (their keys reach every server the operator can log in to): launchd's, GnuPG's
+    // and app agents such as 1Password's. The Keychain files themselves are unreadable too.
+    `(deny network-outbound (remote unix-socket (path-regex #"^(/private)?/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$")) ${["/.gnupg", "/.ssh", "/Library/Group Containers", "/Library/Containers", "/.orbstack", "/.local/share/containers"].map((d) => `(remote unix-socket (subpath ${sbString(homedir() + d)}))`).join(" ")})`,
+    `(deny file-read* ${credentialStores(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
     ...(input.apiPorts.length ? [`(deny network-outbound ${input.apiPorts.map((p) => `(remote ip "*:${p}")`).join(" ")})`] : []),
   ];
   return lines.join("\n") + "\n";

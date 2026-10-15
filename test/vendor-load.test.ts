@@ -26,7 +26,8 @@ test("UltraCompress recall reads only Carl's own session transcripts (the engine
   symlinkSync(join(root, ".env"), join(root, "sessions", "k", "evil.jsonl"));
   process.env.ULTRACOMPRESS_SESSION_ROOT = join(root, "sessions");
   const session = { getSessionFile: () => join(root, "sessions", "k", "s.jsonl"), getLeafId: () => null };
-  assert.ok(recallArgs({ query: "x" }, session).includes(join(root, "sessions", "k", "s.jsonl")));
+  const { realpathSync } = await import("node:fs");
+  assert.ok(recallArgs({ query: "x" }, session).includes(realpathSync(join(root, "sessions", "k", "s.jsonl"))), "the engine gets the checked, resolved path");
   assert.throws(() => recallArgs({ query: "x", sessionFile: join(root, ".env") }, session), /session transcript under/);
   assert.throws(() => recallArgs({ query: "x", sessionFile: join(root, "sessions", "k", "evil.jsonl") }, session), /session transcript under/, "a link out of the folder is refused");
 });
