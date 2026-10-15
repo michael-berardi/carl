@@ -80,7 +80,7 @@ function controlSockets(cfg: CarlConfig): string[] {
  * Every folder above a path (not "/"), both as written and as resolved: renaming any of them, or swapping a
  * symlinked folder on the way, would move the path somewhere unprotected.
  */
-function ancestors(p: string): string[] {
+export function ancestors(p: string): string[] {
   const out = new Set<string>();
   for (let d = dirname(resolve(p)); d !== "/"; d = dirname(d)) out.add(d);
   for (let d = canonical(dirname(p)); d !== "/"; d = dirname(d)) out.add(d);
@@ -107,7 +107,7 @@ export function executableChain(p: string): string[] {
 
 /** Environment names a sandboxed command may inherit from Carl (plus the operator's shellEnv list). */
 const ENV_ALLOW = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERM_PROGRAM", "COLORTERM", "LANG", "TZ", "TMPDIR",
-  "PWD", "EDITOR", "VISUAL", "PAGER", "SSH_AUTH_SOCK", "CARL_HOME", "NO_COLOR", "FORCE_COLOR"]);
+  "PWD", "EDITOR", "VISUAL", "PAGER", "CARL_HOME", "NO_COLOR", "FORCE_COLOR"]);
 const ENV_ALLOW_PREFIX = ["LC_", "XDG_", "HOMEBREW_", "ULTRATERM_"];
 const ENV_ALLOW_NETWORK = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"];
@@ -209,7 +209,8 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
   const startup = [".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile"].map((f) => join(homedir(), f));
   // The working areas stay writable inside, but cannot themselves be renamed or swapped for a symlink.
   const roots = writablePaths(cfg);
-  const pinned = [...new Set([...roots, ...roots.flatMap(ancestors), ...(input.pinned ?? [])])];
+  // Folders above protected paths cannot be renamed either (that would swap in a folder the agent wrote).
+  const pinned = [...new Set([...roots, ...roots.flatMap(ancestors), ...(input.pinned ?? []), ...input.controlPlane.flatMap(ancestors)])];
   const lines = [
     "(version 1)",
     "(allow default)",
@@ -236,8 +237,11 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     `(deny network-outbound ${controlSockets(cfg).map((p) => `(remote unix-socket (subpath ${sbString(p)}))`).join(" ")})`,
     // ...and their socket folders cannot be changed (a socket swapped for the agent's own would answer real clients).
     `(deny file-write* ${controlSockets(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,
-    // LaunchServices starts apps (and their helpers) outside the sandbox.
-    `(deny mach-lookup ${LAUNCH_SERVICES.map((n) => `(global-name "${n}")`).join(" ")})`,
+    // LaunchServices starts apps (and their helpers) outside the sandbox; the Keychain holds the operator's
+    // credentials (HTTPS certificate checks use trustd, which stays reachable).
+    `(deny mach-lookup ${[...LAUNCH_SERVICES, "com.apple.SecurityServer", "com.apple.securityd.xpc"].map((n) => `(global-name "${n}")`).join(" ")})`,
+    // The operator's SSH agent (its keys reach every server the operator can log in to).
+    `(deny network-outbound (remote unix-socket (path-regex #"^/private/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$")))`,
     ...(input.apiPorts.length ? [`(deny network-outbound ${input.apiPorts.map((p) => `(remote ip "*:${p}")`).join(" ")})`] : []),
   ];
   return lines.join("\n") + "\n";
@@ -278,7 +282,7 @@ export function installProfile(cfg: CarlConfig, input: ProfileInput, path = join
  * Wrap an MCP stdio server so it runs under the same profile with only its own configured environment plus the
  * allowlist. `env -i` makes that hold however the MCP client merges environments.
  */
-export function sandboxMcpServer(cfg: CarlConfig, profile: string | undefined, server: { command: string; args?: string[]; env?: Record<string, string> }) {
+export function sandboxMcpServer(cfg: CarlConfig, profile: string | undefined, server: { command: string; args?: string[]; env?: Record<string, string>; cwd?: string }) {
   const env = cleanEnv(cfg, process.env, server.env ?? {});
   const argv = ["/usr/bin/env", "-i", ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...sandboxArgv(profile, [server.command, ...(server.args ?? [])])];
   return { ...server, command: argv[0], args: argv.slice(1), env };

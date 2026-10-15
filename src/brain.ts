@@ -194,6 +194,7 @@ export class Brain extends EventEmitter {
       secretPaths: secretFiles(this.cfg),
       cwd: this.cfg.workspace,
       noExec: this.sandboxProfile ? NO_EXEC : [],
+      trustedMcp: this.cfg.trustedMcp,
       sandboxProfile: this.sandboxProfile,
     };
   }
@@ -228,10 +229,12 @@ export class Brain extends EventEmitter {
 
   async init(): Promise<void> {
     mkdirSync(this.piDir, { recursive: true, mode: 0o700 });
-    // Run from the workspace: tools and extensions that write relative to the process (UltraCompress snapshots,
-    // MCP servers) then stay inside it instead of wherever Carl was launched.
+    // Carl itself runs from a folder only it can write: its unsandboxed children (UltraTerm helpers, trusted MCP
+    // servers, UltraCompress) never start in the agent's workspace, where a planted config file would be read.
+    // Sessions, tools and sandboxed MCP servers get the workspace explicitly.
     mkdirSync(this.cfg.workspace, { recursive: true, mode: 0o700 });
-    process.chdir(this.cfg.workspace);
+    mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    process.chdir(this.stateDir);
     // Programs Carl (or its unsandboxed helpers) start by name are resolved once, now, from the operator's PATH;
     // from here on those children see only a private bin folder of links to them plus system folders, so a program
     // the agent plants later in a user-writable folder (~/.local/bin, Homebrew) is never picked up.
@@ -411,7 +414,11 @@ export class Brain extends EventEmitter {
             const loaded = this.mcpLoader!({ agentDir: this.piDir, cwd: ctx.cwd, projectTrusted: false });
             // Stdio servers run under the shell sandbox too, with Carl's secrets blanked in their environment.
             // ...except the operator's own control tools named in trustedMcp, which enforce their own policy.
-            for (const s of loaded.servers ?? []) if (s.config?.command && !this.cfg.trustedMcp.includes(s.name)) s.config = sandboxMcpServer(this.cfg, this.sandboxProfile, s.config);
+            for (const s of loaded.servers ?? []) {
+              if (!s.config?.command) continue;
+              if (this.cfg.trustedMcp.includes(s.name)) s.config = { ...s.config, cwd: s.config.cwd ?? this.stateDir };
+              else s.config = sandboxMcpServer(this.cfg, this.sandboxProfile, { ...s.config, cwd: s.config.cwd ?? this.cfg.workspace });
+            }
             return loaded;
           },
         }) as InlineExtension,
