@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -55,6 +55,8 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   // A process outside the sandbox that commands must not be able to signal.
   const outsider = spawn("/bin/sleep", ["30"]);
   t.after(() => { outsider.kill(); tmuxLike.close(); if (savedTmux === undefined) delete process.env.TMUX; else process.env.TMUX = savedTmux; });
+  // Positive control: the SSH agent socket exists and answers outside the sandbox, so a refusal inside means something.
+  const agentSock = process.env.SSH_AUTH_SOCK && spawnSync("/usr/bin/ssh-add", ["-l"], { env: { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK } }).status !== 2 ? process.env.SSH_AUTH_SOCK : undefined;
   const homeProbe = join(homedir(), `.carl-sandbox-probe-${process.pid}`);
   t.after(() => { rmSync(homeProbe, { force: true }); rmSync(`/private/tmp/carl-sbx-probe-${process.pid}`, { force: true }); });
   const profile = installProfile(cfg, { controlPlane: [outside, join(root, "nest", "deep", "ext.ts")], pinned: executableChain(join(root, "bin", "tool")), apiPorts: [18_765] })!;
@@ -99,7 +101,9 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
     `echo "PATHIS=[$PATH]" "FILEONLY=[$CARL_FILE_ONLY]"`,
     `echo t > /private/tmp/carl-sbx-probe-${process.pid}; echo tmp-write=$?`,
     `echo "TMPDIRIS=[$TMPDIR]"`,
-    `SSH_AUTH_SOCK=$(ls -d /private/var/run/com.apple.launchd.*/Listeners 2>/dev/null | head -1) ssh-add -l >/dev/null 2>&1; echo ssh-agent=$?`,
+    ...(agentSock ? [`SSH_AUTH_SOCK=${agentSock} ssh-add -l >/dev/null 2>&1; echo ssh-agent=$?`] : []),
+    `ls ~/Library/Keychains >/dev/null 2>&1; echo keychain-files=$?`,
+    ...(existsSync(join(homedir(), ".ssh")) ? [`ls ~/.ssh >/dev/null 2>&1; echo ssh-dir=$?`] : []),
     `security show-keychain-info >/dev/null 2>&1; echo keychain=$?`,
     `mv ${join(root, "nest")} ${join(root, "nest-moved")}; echo parent-move=$?`,
   ].join(" ; "));
@@ -131,7 +135,9 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   assert.match(out, /FILEONLY=\[from-env-file\]/, "a shellEnv name can come from the env files");
   assert.match(out, /tmp-write=1/, "the shared /tmp is closed (other programs read what is there)");
   assert.ok(out.includes(`TMPDIRIS=[${join(home, "spill", "tmp")}]`), "the agent gets its own temp folder");
-  assert.match(out, /ssh-agent=2/, "the operator's SSH agent is out of reach");
+  if (agentSock) assert.match(out, /ssh-agent=2/, "the operator's SSH agent is out of reach");
+  assert.match(out, /keychain-files=1/, "the Keychain files are unreadable");
+  if (existsSync(join(homedir(), ".ssh"))) assert.match(out, /ssh-dir=1/, "SSH keys are unreadable");
   assert.doesNotMatch(out, /keychain=0/, "the Keychain is out of reach");
   assert.ok(existsSync(join(root, "nest", "deep", "ext.ts")) && /parent-move=1/.test(out), "a folder above protected code cannot be moved aside, even inside a writable folder");
 });
