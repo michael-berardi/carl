@@ -126,6 +126,8 @@ const ENV_ALLOW_NETWORK = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
 for (const n of ENV_ALLOW_NETWORK) ENV_ALLOW.add(n);
 /** Names that look like credentials never pass on a prefix match (HOMEBREW_GITHUB_API_TOKEN, say); only shellEnv admits them. */
 export const SECRET_NAME = /(KEY|TOKEN|SECRET|PASSW|AUTH|CRED|COOKIE|SESSION)/i;
+/** Names that really hold credentials (for the startup warning; SECRET_NAME is deliberately broader for dropping). */
+export const CREDENTIAL_NAME = /(API_KEY|_KEY|_TOKEN|_SECRET|PASSWORD|PASSWD|CREDENTIALS?)(_[A-Z0-9]+)?$/;
 
 /** The PATH the operator's shell had: the agent's commands keep it, while Carl's own children use a trusted one. */
 let agentPath: string | undefined;

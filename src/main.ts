@@ -239,6 +239,7 @@ async function doctor(): Promise<number> {
   for (const d of c.skills) await check("skills dir", () => { if (!existsSync(d)) throw new Error(`${d} is missing`); return d; });
   if (c.stt) await check("speech-to-text", () => { if (!existsSync(c.stt![0])) throw new Error(`${c.stt![0]} is missing`); return c.stt!.join(" "); });
   await check("mcp", () => (existsSync(join(c.home, "pi", "mcp.json")) ? `${join(c.home, "pi", "mcp.json")} (servers via codemode)` : "no mcp.json (no MCP servers)"));
+  await brain.shutdown(); // removes its state/run/<pid> folder
   return failed ? 1 : 0;
 }
 
