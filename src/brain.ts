@@ -651,13 +651,16 @@ export class Brain extends EventEmitter {
     const inflight = this.creating.get(key);
     if (inflight) await inflight.catch(() => {});
     const convo = this.conversations.get(key);
-    if (convo) {
-      // Out of the map first: a message arriving meanwhile starts a fresh session instead of a closing one.
-      this.conversations.delete(key);
-      if (convo.busy) await convo.session.abort().catch(() => {});
-      await this.closeSession(convo.session);
-    }
-    const pending = this.createConversation(key, convo?.source ?? "cli", true).finally(() => this.creating.delete(key));
+    // The fresh conversation is registered before anything is awaited: a message arriving while the old one closes
+    // waits for the fresh one instead of resuming the old transcript.
+    this.conversations.delete(key);
+    const pending = (async () => {
+      if (convo) {
+        if (convo.busy) await convo.session.abort().catch(() => {});
+        await this.closeSession(convo.session);
+      }
+      return this.createConversation(key, convo?.source ?? "cli", true);
+    })().finally(() => this.creating.delete(key));
     this.creating.set(key, pending);
     this.conversations.set(key, await pending);
   }
@@ -742,8 +745,14 @@ export class Brain extends EventEmitter {
     try {
       const runner = (session as any).extensionRunner;
       // Bounded: a stuck MCP server must not hang /new or shutdown.
-      if (runner?.hasHandlers?.("session_shutdown"))
-        await Promise.race([runner.emit({ type: "session_shutdown", reason: "quit" }), new Promise((_, no) => setTimeout(() => no(new Error("extensions took over 5 s to shut down")), 5_000))]);
+      if (runner?.hasHandlers?.("session_shutdown")) {
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([runner.emit({ type: "session_shutdown", reason: "quit" }), new Promise((_, no) => { timer = setTimeout(() => no(new Error("extensions took over 5 s to shut down")), 5_000); })]);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
     } catch (e) {
       this.log.warn("extension shutdown failed", { error: (e as Error).message });
     }
@@ -757,10 +766,11 @@ export class Brain extends EventEmitter {
       this.log.info("waiting for running turns before exit", { count: running.length });
       await Promise.race([Promise.allSettled(running), new Promise((r) => setTimeout(r, timeoutMs))]);
     }
-    for (const convo of this.conversations.values()) {
+    // All at once: each close is bounded at 5 s, so shutdown stays inside UltraTerm's grace period.
+    await Promise.all([...this.conversations.values()].map(async (convo) => {
       if (convo.busy) await convo.session.abort().catch(() => {});
       await this.closeSession(convo.session);
-    }
+    }));
     this.conversations.clear();
     if (!this.opts.shared) rmSync(this.stateDir, { recursive: true, force: true });
   }
