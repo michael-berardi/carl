@@ -20,6 +20,7 @@ test("after a restart, a message whose turn ran no tool is picked up again; one 
   writeFileSync(join(home, "state", "inflight.json"), JSON.stringify({
     [`${OP}:10`]: { chatId: OP, text: "what is on my calendar today", at: new Date().toISOString() },
     [`${OP}:11`]: { chatId: OP, text: "deploy the site now", at: new Date().toISOString() },
+    [`${OP}:12`]: { chatId: OP, text: "summarise my inbox", at: new Date().toISOString(), resumed: true },
   }));
   // The second one had already run a tool when Carl stopped.
   const dir = join(home, "sessions", `telegram_dm_${OP}`);
@@ -37,9 +38,10 @@ test("after a restart, a message whose turn ran no tool is picked up again; one 
   const channel = new TelegramChannel(loadConfig(home), "123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz", brain, new Log(undefined));
   await channel.start();
   t.after(async () => { await channel.stop(); await tg.stop(); rmSync(home, { recursive: true, force: true }); });
-  await tg.waitFor(() => asked.length >= 1 && tg.calls.filter((c) => c.method === "sendMessage").length >= 3, 15_000, "resume and notices");
+  await tg.waitFor(() => asked.length >= 1 && tg.calls.filter((c) => c.method === "sendMessage").length >= 4, 15_000, "resume and notices");
   const texts = tg.calls.filter((c) => c.method === "sendMessage").map((c) => String(c.body.text));
   assert.deepEqual(asked, ["what is on my calendar today"], "only the message that ran no tool is rerun");
   assert.ok(texts.some((s) => /picking it up again/.test(s) && s.includes("calendar")));
   assert.ok(texts.some((s) => /did not finish/.test(s) && s.includes("deploy the site")), "the one that ran a tool is reported, not rerun");
+  assert.ok(texts.some((s) => /did not finish/.test(s) && s.includes("summarise my inbox")), "a message already resumed once is reported, not resumed again");
 });

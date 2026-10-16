@@ -172,10 +172,10 @@ export class TelegramChannel {
   // ---- In-flight journal: a restart mid-turn is reported to the operator instead of silently dropped. ----
 
   private readonly inflightFile = () => join(this.cfg.home, "state", "inflight.json");
-  private readInflight(): Record<string, { chatId: number; threadId?: number; text: string; at: string }> {
+  private readInflight(): Record<string, { chatId: number; threadId?: number; text: string; at: string; resumed?: boolean }> {
     try { return JSON.parse(readFileSync(this.inflightFile(), "utf8")); } catch { return {}; }
   }
-  private markInflight(id: string, entry?: { chatId: number; threadId?: number; text: string }): void {
+  private markInflight(id: string, entry?: { chatId: number; threadId?: number; text: string; resumed?: boolean }): void {
     const all = this.readInflight();
     if (entry) all[id] = { ...entry, at: new Date().toISOString() };
     else delete all[id];
@@ -194,12 +194,14 @@ export class TelegramChannel {
       // repeated. Anything else (a tool may have acted, a voice note or file, a group) is reported instead.
       const messageId = Number(id.split(":")[1]);
       const textOnly = e.text.length < 500 && e.text !== "(voice note)" && e.text !== "(attachment)";
-      if (e.chatId > 0 && textOnly && Number.isInteger(messageId) && !toolsRanAfter(this.cfg.home, `telegram:dm:${e.chatId}`, e.text)) {
+      // At most once: a message that was already picked up after one restart is reported after the next.
+      if (!e.resumed && e.chatId > 0 && textOnly && Number.isInteger(messageId) && !toolsRanAfter(this.cfg.home, `telegram:dm:${e.chatId}`, e.text)) {
         this.log.info("resuming a message interrupted by a restart", { chat: e.chatId, message: messageId });
         await this.sendMarkdown(e.chatId, `I restarted while answering this, so I am picking it up again:\n\n> ${excerpt.replace(/\n/g, " ")}`, { threadId: e.threadId })
           .catch((err) => this.log.warn("cannot announce a resumed message", { error: (err as Error).message }));
         this.markInflight(id);
         this.enqueueMessage({ message_id: messageId, date: Math.floor(Date.now() / 1000), chat: { id: e.chatId, type: "private" }, from: { id: e.chatId, is_bot: false, first_name: "" }, text: e.text } as TgMessage);
+        this.markInflight(id, { chatId: e.chatId, threadId: e.threadId, text: e.text, resumed: true });
         continue;
       }
       await this.sendMarkdown(e.chatId, `I restarted while working on this, so it did not finish:\n\n> ${excerpt.replace(/\n/g, " ")}\n\nSend it again if it still matters.`, { threadId: e.threadId })
