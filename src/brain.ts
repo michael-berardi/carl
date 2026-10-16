@@ -814,6 +814,25 @@ export class Brain extends EventEmitter {
 }
 
 /** Filesystem-safe directory for a conversation key (e.g. "telegram:dm:123"). */
+/**
+ * Did a tool run after this user message in the conversation's latest transcript? false when none did, or the
+ * message never reached the transcript (the turn can be rerun without repeating any action).
+ */
+export function toolsRanAfter(home: string, key: string, text: string): boolean {
+  const dir = sessionDir(home, key);
+  if (!existsSync(dir)) return false;
+  const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl")).sort();
+  if (!files.length) return false;
+  const needle = text.slice(0, 200);
+  const messages = readFileSync(join(dir, files[files.length - 1]), "utf8").split("\n").filter(Boolean)
+    .map((line) => { try { return JSON.parse(line).message; } catch { return undefined; } }).filter(Boolean) as any[];
+  const contentText = (m: any) => typeof m.content === "string" ? m.content : (m.content ?? []).map((c: any) => c.text ?? "").join("\n");
+  let at = -1;
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user" && contentText(messages[i]).includes(needle)) { at = i; break; }
+  if (at < 0) return false;
+  return messages.slice(at + 1).some((m) => m.role === "toolResult" || (m.role === "assistant" && (m.content ?? []).some?.((c: any) => c.type === "toolCall")));
+}
+
 export function sessionDir(home: string, key: string): string {
   return join(home, "sessions", key.replace(/[^A-Za-z0-9_.-]+/g, "_"));
 }

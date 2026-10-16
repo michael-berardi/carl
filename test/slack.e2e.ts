@@ -1,7 +1,7 @@
 // Slack channel end to end: real model, fake Slack (Web API + Socket Mode).
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { Gateway } from "../src/gateway.ts";
@@ -11,7 +11,7 @@ const slack = new FakeSlack();
 await slack.start();
 const home = mkdtempSync(join(process.env.CARL_E2E_DIR ?? tmpdir(), "carl-slack-"));
 writeFileSync(join(home, ".env"), "SLACK_APP_TOKEN=xapp-test\nSLACK_BOT_TOKEN=xoxb-test\n");
-writeFileSync(join(home, "carl.json"), JSON.stringify({ model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol", thinking: "low", tools: ["read", "bash"],
+writeFileSync(join(home, "carl.json"), JSON.stringify({ model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol", agentDir: process.env.CARL_E2E_AGENT_DIR ?? join(homedir(), ".pi", "agent"), thinking: "low", tools: ["read", "bash"],
   telegram: { enabled: false }, api: { enabled: false }, slack: { allowFrom: ["UOP"], homeChannel: "D1", apiBase: slack.base } }));
 const gw = new Gateway(loadConfig(home));
 await gw.start();

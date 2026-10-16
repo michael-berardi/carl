@@ -25,6 +25,7 @@ export class Gateway {
   readonly psyche: Psyche;
   readonly brain: Brain;
   readonly scheduler: Scheduler;
+  private hooks?: { journal: import("./hooks.ts").HookJournal; resume: () => void };
   telegram?: TelegramChannel;
   slack?: import("./channels/slack.ts").SlackChannel;
   discord?: import("./channels/discord.ts").DiscordChannel;
@@ -115,11 +116,12 @@ export class Gateway {
       this.api.publicAsset = publicAsset;
       if (Object.keys(this.cfg.hooks).length) {
         const { mountHooks } = await import("./hooks.ts");
-        mountHooks(this.api, this, this.cfg.hooks);
+        this.hooks = mountHooks(this.api, this, this.cfg.hooks);
       }
     }
     for (const p of this.plugins) await p.start(this);
     if (this.api) await this.api.start();
+    this.hooks?.resume();
     if (this.telegram) await this.telegram.start();
     if (this.slack) await this.slack.start();
     if (this.discord) await this.discord.start();
@@ -141,6 +143,7 @@ export class Gateway {
     await this.discord?.stop();
     await this.brain.shutdown();
     await this.api?.stop();
+    this.hooks?.journal.close();
     for (const p of this.plugins) {
       try {
         await p.stop?.();
