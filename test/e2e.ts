@@ -158,7 +158,7 @@ await step("API: health, capabilities, jobs, skills, toolsets", async () => {
   assert.ok(caps.durable && caps.idempotent && caps.canonicalMessaging);
   const jobs = await (await api("/api/jobs?include_disabled=true")).json();
   // Under UltraTerm, Dream and Nightmare own the learning loop: no Individuation schedule.
-  assert.ok(Array.isArray(jobs.jobs) && !jobs.jobs.some((j: any) => j.name === "Individuation"));
+  assert.ok(Array.isArray(jobs.jobs) && !jobs.jobs.some((j: any) => j.name === "Individuation" && j.enabled !== false));
   assert.ok(Array.isArray((await (await api("/v1/skills")).json()).data));
   assert.ok(Array.isArray((await (await api("/v1/toolsets")).json()).data));
 });

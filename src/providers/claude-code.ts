@@ -13,7 +13,7 @@
 //   - Carl runs the agent loop, executes tools, compacts and persists; Claude Code is only the model client.
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -541,14 +541,23 @@ function dispose(proc: Launched): void {
   rmSync(proc.tmp, { recursive: true, force: true });
 }
 
-async function takeSpare(key: string): Promise<Launched | undefined> {
+async function takeSpare(key: string, signal?: AbortSignal): Promise<Launched | undefined> {
   const s = spares.get(key);
   if (!s) return undefined;
   spares.delete(key);
   clearTimeout(s.timer);
-  const proc = await s.ready;
+  // A stop while the spare is still starting ends the wait at once; the spare is killed when it is up.
+  const aborted = new Promise<"aborted">((resolve) => {
+    if (signal?.aborted) resolve("aborted");
+    signal?.addEventListener("abort", () => resolve("aborted"), { once: true });
+  });
+  const proc = await Promise.race([s.ready, aborted]);
+  if (proc === "aborted") {
+    void s.ready.then((p) => p && dispose(p));
+    throw new ClaudeCodeError("aborted");
+  }
   if (!proc) return undefined;
-  if (proc.child.exitCode !== null || proc.child.signalCode !== null) { dispose(proc); return undefined; }
+  if (proc.child.exitCode !== null || proc.child.signalCode !== null || proc.admission.used) { dispose(proc); return undefined; }
   return proc;
 }
 
@@ -561,7 +570,10 @@ function drop(key: string): void {
 }
 
 /** Start a process for `key` in the background; it waits up to SPARE_TTL_MS for a call, then is killed. */
+let sparesClosed = false;
+
 function prestart(key: string, spec: LaunchSpec, log?: ClaudeCodeOptions["log"]): void {
+  if (sparesClosed) return;
   drop(key);
   while (spares.size >= MAX_SPARES) drop(spares.keys().next().value!);
   const ready = launch(spec).catch((e) => { log?.("warn", "could not pre-start the next claude call", { error: (e as Error).message }); return undefined; });
@@ -572,13 +584,40 @@ function prestart(key: string, spec: LaunchSpec, log?: ClaudeCodeOptions["log"])
   spares.set(key, entry);
 }
 
-/** Kill every spare (gateway shutdown, tests). */
+/** Kill every spare (tests, or a host that keeps running). */
 export function disposeSpares(): void {
   for (const k of [...spares.keys()]) drop(k);
 }
+
+/** Shutdown: kill every spare and start no new ones (turns still finishing must not leave processes behind). */
+export function closeSpares(): void {
+  sparesClosed = true;
+  disposeSpares();
+}
 // Shutdown: kill started spares synchronously. A launch still in progress cannot be awaited here; that process
 // loses its stdin and its loopback relay with this process and exits on its own.
-process.once("exit", () => { for (const s of spares.values()) killGroup(s.proc?.child); });
+process.once("exit", () => {
+  for (const s of spares.values()) {
+    killGroup(s.proc?.child);
+    if (s.proc) rmSync(s.proc.tmp, { recursive: true, force: true });
+  }
+});
+
+/** Remove per-call folders a killed process left behind (each holds a copy of a system prompt). Only folders
+ *  older than an hour go, so a folder another live Carl process is using is never touched. */
+export function sweepCallFolders(tmpRoot: string): number {
+  let removed = 0;
+  try {
+    for (const name of readdirSync(tmpRoot)) {
+      if (!name.startsWith("carl-claude-")) continue;
+      const p = join(tmpRoot, name);
+      try {
+        if (Date.now() - statSync(p).mtimeMs > 3_600_000) { rmSync(p, { recursive: true, force: true }); removed++; }
+      } catch {}
+    }
+  } catch {}
+  return removed;
+}
 
 /** Number of pre-started processes waiting (tests and status). */
 export function spareCount(): number {
@@ -609,12 +648,22 @@ async function launch(spec: LaunchSpec, signal?: AbortSignal): Promise<Launched>
     // ENOEXEC/ETXTBSY/ENOENT. Wait for the write to finish (bounded) instead of failing the turn.
     let child: ChildProcess;
     for (let waited = 0; ; waited += 500) {
-      const c = spawn(spec.bin, args, { cwd: spec.workdir, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
-      const outcome = await new Promise<NodeJS.ErrnoException | null>((resolve) => {
-        c.once("spawn", () => resolve(null));
-        c.once("error", (e) => resolve(e));
-      });
-      if (!outcome) { child = c; break; }
+      // spawn() throws synchronously for some failures (ENOEXEC while the binary is being rewritten) and reports
+      // others as an "error" event; both take the same bounded retry.
+      let c: ChildProcess | undefined;
+      let outcome: NodeJS.ErrnoException | null;
+      try {
+        c = spawn(spec.bin, args, { cwd: spec.workdir, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+        const started = c;
+        outcome = await new Promise<NodeJS.ErrnoException | null>((resolve) => {
+          started.once("spawn", () => resolve(null));
+          started.once("error", (e) => resolve(e));
+        });
+      } catch (e) {
+        outcome = e as NodeJS.ErrnoException;
+      }
+      if (!outcome && c) { child = c; break; }
+      outcome ??= Object.assign(new Error("spawn failed"), { code: "EUNKNOWN" });
       if (!["ENOEXEC", "ETXTBSY", "ENOENT", "EACCES"].includes(outcome.code ?? "") || waited >= 15_000 || signal?.aborted)
         throw new ClaudeCodeError(`could not start claude (${outcome.code ?? "error"}): ${outcome.message}`, 503);
       await new Promise((r) => setTimeout(r, 500));
@@ -717,7 +766,19 @@ export function streamClaude(model: Model<any>, context: TranscriptContext, opti
   return stream;
 }
 
-async function attempt(
+/** One call; a pre-started process that fails before reaching the API is replaced by a fresh one, once. */
+async function attempt(...args: Parameters<typeof attemptOnce>): Promise<void> {
+  try {
+    await attemptOnce(...args);
+  } catch (e) {
+    if (!(e as any)?.coldRetry) throw e;
+    args[4].log?.("warn", "a pre-started claude process failed before its request; retrying with a fresh one", { error: (e as Error).message });
+    args[9] = false;
+    await attemptOnce(...args);
+  }
+}
+
+async function attemptOnce(
   model: Model<any>,
   route: (typeof CLAUDE_MODELS)[number] | undefined,
   context: TranscriptContext,
@@ -727,6 +788,7 @@ async function attempt(
   partial: AssistantMessage,
   stream: AssistantMessageEventStream,
   dropThinking: boolean,
+  allowSpare = true,
 ): Promise<void> {
   const signal = options?.signal;
   const sigTag = signatureTag(configDir, model.id);
@@ -737,9 +799,10 @@ async function attempt(
   const removed = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_FOUNDRY_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_EXTRA_BODY", "CLAUDE_CODE_EFFORT_LEVEL"].filter((k) => env[k]);
   for (const k of removed) delete env[k];
   if (removed.some((k) => !k.startsWith("CLAUDE_CODE_E"))) opts.log?.("warn", "claude route ignores API-key/backend overrides from the environment", { removed });
-  // Claude Code's auto-updater replaces the binary in place; during the swap it briefly does not exist.
+  // Claude Code's auto-updater reinstalls the package in place (an npm reinstall of ~250 MB, seen taking over
+  // 5 s); during the swap the binary does not exist.
   let bin = resolveClaude(opts.command, env);
-  for (let waited = 0; !bin && waited < 5_000 && !signal?.aborted; waited += 500) {
+  for (let waited = 0; !bin && waited < 30_000 && !signal?.aborted; waited += 500) {
     await new Promise((r) => setTimeout(r, 500));
     bin = resolveClaude(opts.command, env);
   }
@@ -788,7 +851,7 @@ async function attempt(
   const key = launchKey(spec, configDir);
   if (signal?.aborted) throw new ClaudeCodeError("aborted");
   // A process started ahead of time for exactly this request shape skips the CLI's startup (~0.8 s per call).
-  const warm = await takeSpare(key);
+  const warm = allowSpare ? await takeSpare(key, signal) : undefined;
   let proc: Launched;
   try {
     proc = warm ?? (await launch(spec, signal));
@@ -960,6 +1023,10 @@ async function attempt(
     void result;
     stream.push({ type: "done", reason: final.stopReason as "stop" | "length" | "toolUse", message: final });
     stream.end(final);
+  } catch (e) {
+    if (warm && !admission.used && !partial.content.length && !signal?.aborted)
+      throw Object.assign(e instanceof ClaudeCodeError ? e : new ClaudeCodeError((e as Error).message), { coldRetry: true });
+    throw e;
   } finally {
     signal?.removeEventListener("abort", onAbort);
     kill();

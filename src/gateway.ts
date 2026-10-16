@@ -128,7 +128,7 @@ export class Gateway {
     if (this.slack) await this.slack.start();
     if (this.discord) await this.discord.start();
     if (this.cfg.learning === "carl") this.scheduler.ensureBuiltin("individuation", "Individuation", "40 5 * * *");
-    else this.scheduler.removeBuiltin("individuation"); // UltraTerm Dream and Nightmare own the learning loop
+    else this.scheduler.pauseBuiltin("individuation", "learning"); // UltraTerm Dream and Nightmare own the learning loop
     this.scheduler.start();
     this.writeStatus();
     this.statusTimer = setInterval(() => this.writeStatus(), 15_000);
