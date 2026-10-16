@@ -23,7 +23,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { CarlConfig } from "./config.ts";
+import { type CarlConfig, mcpFile } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
@@ -133,7 +133,8 @@ export class Brain extends EventEmitter {
     this.psyche = psyche;
     this.log = log;
     this.tools = tools;
-    this.piDir = join(cfg.home, "pi");
+    // The SDK's own folder (settings it may write); Carl's MCP servers live in CARL_HOME/mcp.json.
+    this.piDir = join(cfg.home, "engine");
   }
 
   /** Everything Carl executes or loads, outside the agent's working areas: the agent must not be able to change it. */
@@ -142,7 +143,7 @@ export class Brain extends EventEmitter {
     const add = (p: string | undefined) => { if (p) out.add(p); };
     const realOf = (p: string) => { try { return realpathSync(p); } catch { return p; } };
     add(fileURLToPath(new URL("..", import.meta.url))); // Carl's own code and node_modules
-    add(this.cfg.piAgentDir);
+    add(this.cfg.agentDir);
     add(dirname(dirname(realOf(process.execPath)))); // the Node install running Carl
     if (this.claudeBin) add(dirname(dirname(realOf(this.claudeBin))));
     const uc = findUltraCompress();
@@ -263,7 +264,7 @@ export class Brain extends EventEmitter {
         this.log.info("compaction: Pi built-in summary (no ultracompress binary found)");
       }
     }
-    if (this.cfg.mcp && existsSync(join(this.piDir, "mcp.json"))) {
+    if (this.cfg.mcp && existsSync(mcpFile(this.cfg))) {
       try {
         const url = new URL("./extensions/mcp/config.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
         this.mcpLoader = (await import(url.href)).loadMcpConfig;
@@ -274,8 +275,8 @@ export class Brain extends EventEmitter {
       }
     }
     this.runtime = await ModelRuntime.create({
-      authPath: join(this.cfg.piAgentDir, "auth.json"),
-      modelsPath: join(this.cfg.piAgentDir, "models.json"),
+      authPath: join(this.cfg.agentDir, "auth.json"),
+      modelsPath: join(this.cfg.agentDir, "models.json"),
     });
     if (this.cfg.claude.enabled) {
       this.runtime.registerProvider(CLAUDE_PROVIDER, claudeCodeProviderConfig({
@@ -403,7 +404,7 @@ export class Brain extends EventEmitter {
         this.guardRules()),
       resultBudget(join(this.cfg.home, "spill"), this.cfg.toolResultMaxChars),
     ];
-    if (this.cfg.mcp && existsSync(join(this.piDir, "mcp.json")) && this.mcpLoader) {
+    if (this.cfg.mcp && existsSync(mcpFile(this.cfg)) && this.mcpLoader) {
       // MCP servers reach the model through codemode: one tool, scripts call servers in parallel and
       // filter large results before they enter the context.
       extensionFactories.push(
@@ -411,9 +412,9 @@ export class Brain extends EventEmitter {
         createToolSearchExtension() as InlineExtension,
         createMcpExtension({
           logPath: join(this.cfg.home, "logs", "mcp.log"),
-          // Pi's default loader reads the global ~/.pi/agent/mcp.json; Carl's servers live in CARL_HOME/pi.
+          // The SDK's default loader reads ~/.pi/agent/mcp.json; Carl's servers live in CARL_HOME/mcp.json.
           loadConfig: (ctx: any) => {
-            const loaded = this.mcpLoader!({ agentDir: this.piDir, cwd: ctx.cwd, projectTrusted: false });
+            const loaded = this.mcpLoader!({ agentDir: this.cfg.home, cwd: ctx.cwd, projectTrusted: false }); // reads CARL_HOME/mcp.json
             // Stdio servers run under the shell sandbox too, with Carl's secrets blanked in their environment.
             // ...except the operator's own control tools named in trustedMcp, which enforce their own policy.
             for (const s of loaded.servers ?? []) {

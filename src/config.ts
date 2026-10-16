@@ -1,5 +1,5 @@
 // Carl's configuration: one JSON file (carl.json) in CARL_HOME, secrets from the environment or CARL_HOME/.env.
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -40,7 +40,7 @@ export interface CarlConfig {
   /** Recent tokens kept verbatim through a compaction. */
   keepRecentTokens: number;
   /** Pi agent dir: auth.json and models.json come from here, so Carl shares Pi's logins. */
-  piAgentDir: string;
+  agentDir: string;
   /** Agent working directory (tools run here). */
   workspace: string;
   /** Extra instruction files appended to the system prompt, in order (e.g. a team AGENTS.md). */
@@ -154,7 +154,9 @@ export function loadConfig(home = carlHome()): CarlConfig {
     sideModel: raw.sideModel === undefined ? undefined : str(raw.sideModel, "", "sideModel"),
     contextBudget: int(raw.contextBudget, 96_000, "contextBudget", 8_000),
     keepRecentTokens: int(raw.keepRecentTokens, 16_000, "keepRecentTokens", 1_000),
-    piAgentDir: abs(raw.piAgentDir ?? "~/.pi/agent", home),
+    // Model logins (auth.json) and custom models (models.json). Carl's own folder by default; point it at another
+    // Pi-SDK app's folder (e.g. ~/.pi/agent) to share its logins. "piAgentDir" is the older name.
+    agentDir: abs(raw.agentDir ?? raw.piAgentDir ?? join(home, "agent"), home),
     workspace: abs(raw.workspace ?? "workspace", home),
     contextFiles: strList(raw.contextFiles, "contextFiles").map((p) => abs(p, home)),
     skills: strList(raw.skills, "skills").map((p) => abs(p, home)),
@@ -224,7 +226,21 @@ export function loadConfig(home = carlHome()): CarlConfig {
   return cfg;
 }
 
+/** Carl's MCP server list. */
+export function mcpFile(cfg: CarlConfig): string {
+  return join(cfg.home, "mcp.json");
+}
+
+/** Earlier versions kept the SDK folder at CARL_HOME/pi with mcp.json inside it: move both to their current places. */
+function migrateLayout(home: string): void {
+  const old = join(home, "pi");
+  if (!existsSync(old)) return;
+  if (existsSync(join(old, "mcp.json")) && !existsSync(join(home, "mcp.json"))) renameSync(join(old, "mcp.json"), join(home, "mcp.json"));
+  if (!existsSync(join(home, "engine"))) renameSync(old, join(home, "engine"));
+}
+
 export function ensureHome(cfg: CarlConfig): void {
+  migrateLayout(cfg.home);
   for (const dir of [cfg.home, cfg.workspace, join(cfg.home, "sessions"), join(cfg.home, "psyche"), join(cfg.home, "logs"), join(cfg.home, "state"), join(cfg.home, "media")]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }

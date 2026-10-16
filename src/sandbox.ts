@@ -72,7 +72,7 @@ export function credentialStores(cfg: CarlConfig): string[] {
 
 export function secretFiles(cfg: CarlConfig): string[] {
   return [
-    join(cfg.home, ".env"), join(cfg.piAgentDir, "auth.json"), join(cfg.piAgentDir, "mcp-auth.json"), join(cfg.home, "pi", "mcp-auth.json"), ...cfg.envFiles,
+    join(cfg.home, ".env"), join(cfg.agentDir, "auth.json"), join(cfg.agentDir, "mcp-auth.json"), join(cfg.home, "engine", "mcp-auth.json"), ...cfg.envFiles,
     ...(cfg.ultraterm ? [join(cfg.ultraterm.home, ".env"), join(cfg.ultraterm.home, "auth.json"),
       // OverSeer's local HTTP token: with it a command could ask OverSeer to act outside the sandbox.
       join(dirname(dirname(cfg.ultraterm.overseerBin)), "overseer", "http-token")] : []),

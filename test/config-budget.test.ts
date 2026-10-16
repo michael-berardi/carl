@@ -48,3 +48,31 @@ test("trusted MCP server names stay short enough for the guard to attribute thei
   writeFileSync(join(home, "carl.json"), JSON.stringify({ trustedMcp: ["overseer", "ultra-memory"] }));
   assert.deepEqual(loadConfig(home).trustedMcp, ["overseer", "ultra-memory"]);
 });
+
+test("model logins live in Carl's own folder unless agentDir (or the older piAgentDir) points elsewhere", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { loadConfig } = await import("../src/config.ts");
+  const home = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(home, "carl.json"), "{}");
+  assert.equal(loadConfig(home).agentDir, join(home, "agent"));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ piAgentDir: "/opt/shared-agent" }));
+  assert.equal(loadConfig(home).agentDir, "/opt/shared-agent");
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ agentDir: "/opt/a", piAgentDir: "/opt/b" }));
+  assert.equal(loadConfig(home).agentDir, "/opt/a");
+});
+
+test("an older layout (CARL_HOME/pi with mcp.json inside) moves to mcp.json and engine/", async () => {
+  const { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { ensureHome, loadConfig } = await import("../src/config.ts");
+  const home = mkdtempSync(join(tmpdir(), "carl-layout-"));
+  writeFileSync(join(home, "carl.json"), "{}");
+  mkdirSync(join(home, "pi"));
+  writeFileSync(join(home, "pi", "mcp.json"), '{"mcpServers":{}}');
+  ensureHome(loadConfig(home));
+  assert.equal(readFileSync(join(home, "mcp.json"), "utf8"), '{"mcpServers":{}}');
+  assert.ok(existsSync(join(home, "engine")) && !existsSync(join(home, "pi")));
+});

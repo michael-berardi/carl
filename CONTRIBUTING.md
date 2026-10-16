@@ -1,6 +1,6 @@
 # Contributing
 
-Keep Carl small: a change should earn its lines. New integrations belong in modules (`src/channels/`, `src/compat/`, Pi extensions), not in the core.
+Keep Carl small: a change should earn its lines. New integrations belong in modules (`src/channels/`, `src/compat/`, SDK extensions), not in the core.
 
 ```sh
 npm ci
