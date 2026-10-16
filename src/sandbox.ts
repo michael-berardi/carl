@@ -66,6 +66,7 @@ export function credentialStores(cfg: CarlConfig): string[] {
     join(h, ".ssh"), join(h, ".aws"), join(h, ".gnupg"), join(h, ".netrc"), join(h, ".npmrc"), join(h, ".pypirc"),
     join(h, ".docker", "config.json"), join(h, ".kube"), join(h, ".config", "gh"), join(h, ".config", "gcloud"),
     join(h, ".codex", "auth.json"), join(h, ".git-credentials"), join(h, "Library", "Keychains"),
+    join(h, ".config", "cloudflare"), join(h, "Library", "Preferences", "cloudflare"), join(h, "Library", "Preferences", ".wrangler"),
     ...claudeDirs.map((d) => join(d, ".credentials.json")),
   ];
 }

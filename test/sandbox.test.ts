@@ -194,3 +194,12 @@ test("file tools: reads and writes run in the sandbox, so a swapped symlink gain
   writeFileSync(join(ws, "pic.png"), png);
   assert.equal(await read.detectImageMimeType!(join(ws, "pic.png")), "image/png");
 });
+
+test("the Cloudflare CLI logins (cf and Wrangler) are credential stores the agent cannot read", async () => {
+  const { credentialStores } = await import("../src/sandbox.ts");
+  const { homedir } = await import("node:os");
+  const stores = credentialStores({ claude: { configDirs: [] } } as never);
+  assert.ok(stores.includes(join(homedir(), ".config", "cloudflare")));
+  assert.ok(stores.includes(join(homedir(), "Library", "Preferences", "cloudflare")));
+  assert.ok(stores.includes(join(homedir(), "Library", "Preferences", ".wrangler")));
+});
