@@ -25,6 +25,12 @@ export interface Job {
   model?: string;
   /** Command jobs: minutes before the run is killed (default 10, at most 240). */
   timeoutMinutes?: number;
+  /**
+   * Command jobs only, operator-set (the portal or schedules.json; the agent's schedule tool cannot set it): run outside
+   * the shell sandbox, still with the clean environment. For an operator's own script that needs a credential store the
+   * sandbox denies, such as cf's login (Mike 2026-10-16: the PlataPlace photo render could not reach Cloudflare).
+   */
+  unsandboxed?: boolean;
   createdAt: string;
   lastRunAt?: number;
   lastStatus?: "ok" | "error" | "running";
@@ -221,7 +227,9 @@ export class Scheduler {
         if (!run) throw new Error(`unknown built-in job "${job.builtin}"`);
         output = await timed(run(job));
       } else if (job.command) {
-        output = await runCommand(job.command, Math.min(Math.max(job.timeoutMinutes ?? 10, 1), 240) * 60_000, this.children, this.runners.commandSandbox?.());
+        const sandbox = this.runners.commandSandbox?.();
+        output = await runCommand(job.command, Math.min(Math.max(job.timeoutMinutes ?? 10, 1), 240) * 60_000, this.children,
+          sandbox && job.unsandboxed === true ? { ...sandbox, wrap: (argv) => argv } : sandbox);
       } else if (job.prompt) {
         output = await timed(this.runners.prompt(job));
       } else {

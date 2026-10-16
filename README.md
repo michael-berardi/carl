@@ -74,6 +74,7 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
   - Cron syntax, `every 30m`, `@daily` and `once <time>`.
   - Each run starts fresh, so schedules never build up context.
   - Shell-command schedules (created by the operator) deliver their output without a model call.
+  - They run in the shell sandbox. To run one of your own scripts outside it (one that needs a login the sandbox hides, such as `cf`'s), set `"unsandboxed": true` on that job in `~/.carl/schedules.json`. The agent cannot set it.
 - **Models:**
   - A primary model, plus fallbacks used only when the primary is provably out of quota (see Routing).
   - Switch the model per conversation or globally.

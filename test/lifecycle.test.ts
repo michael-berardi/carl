@@ -55,3 +55,27 @@ test("a built-in resumed after a learning pause waits for its next slot instead 
   again.ensureBuiltin("individuation", "Individuation", "40 5 * * *");
   assert.ok(again.list()[0].nextRunAt! > Date.now());
 });
+
+test("an operator's unsandboxed command schedule skips the shell sandbox but keeps the clean environment; others stay wrapped", async () => {
+  const home = mkdtempSync(join(tmpdir(), "carl-sched-"));
+  const delivered = new Map<string, string>();
+  const runners = {
+    prompt: async () => "", builtin: {}, deliver: async (job: { name: string }, text: string) => { delivered.set(job.name, text); },
+    commandSandbox: () => ({ wrap: (argv: string[]) => ["/usr/bin/env", "WRAPPED=1", ...argv], env: { PATH: "/usr/bin:/bin", ONLY: "clean", HOME: home } }),
+  };
+  const s = new Scheduler(home, new Log(join(home, "log")), runners as never);
+  const cmd = 'echo "wrapped=${WRAPPED:-0} only=${ONLY:-}"';
+  const plain = s.add({ name: "plain", when: "@daily", command: cmd, deliver: "home" });
+  const operator = s.add({ name: "operator", when: "@daily", command: cmd, deliver: "home" });
+  // Only the operator sets the flag (schedules.json or the portal); add() has no way to.
+  const file = join(home, "schedules.json");
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  raw.jobs.find((j: { id: string }) => j.id === operator.id).unsandboxed = true;
+  writeFileSync(file, JSON.stringify(raw));
+  const again = new Scheduler(home, new Log(join(home, "log")), runners as never);
+  await again.runNow(plain.id);
+  await again.runNow(operator.id);
+  assert.equal(delivered.get("plain"), "wrapped=1 only=clean");
+  assert.equal(delivered.get("operator"), "wrapped=0 only=clean");
+  assert.equal(again.get(operator.id).lastStatus, "ok");
+});
