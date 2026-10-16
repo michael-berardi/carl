@@ -547,11 +547,14 @@ async function takeSpare(key: string, signal?: AbortSignal): Promise<Launched | 
   spares.delete(key);
   clearTimeout(s.timer);
   // A stop while the spare is still starting ends the wait at once; the spare is killed when it is up.
+  let onAbort: (() => void) | undefined;
   const aborted = new Promise<"aborted">((resolve) => {
     if (signal?.aborted) resolve("aborted");
-    signal?.addEventListener("abort", () => resolve("aborted"), { once: true });
+    onAbort = () => resolve("aborted");
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
   const proc = await Promise.race([s.ready, aborted]);
+  if (onAbort) signal?.removeEventListener("abort", onAbort); // one signal spans every call of a run
   if (proc === "aborted") {
     void s.ready.then((p) => p && dispose(p));
     throw new ClaudeCodeError("aborted");
@@ -801,8 +804,9 @@ async function attemptOnce(
   if (removed.some((k) => !k.startsWith("CLAUDE_CODE_E"))) opts.log?.("warn", "claude route ignores API-key/backend overrides from the environment", { removed });
   // Claude Code's auto-updater reinstalls the package in place (an npm reinstall of ~250 MB, seen taking over
   // 5 s); during the swap the binary does not exist.
+  // Only a CLI that was installed at startup (opts.command) is waited for; a missing install fails at once.
   let bin = resolveClaude(opts.command, env);
-  for (let waited = 0; !bin && waited < 30_000 && !signal?.aborted; waited += 500) {
+  for (let waited = 0; !bin && opts.command && waited < 30_000 && !signal?.aborted; waited += 500) {
     await new Promise((r) => setTimeout(r, 500));
     bin = resolveClaude(opts.command, env);
   }

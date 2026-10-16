@@ -66,3 +66,11 @@ test("a night with no new lessons is a no-op, not an error", () => {
   assert.equal(p.writeIntegrated(""), 0);
   assert.equal(p.read("integrated.md"), "- Keep replies short.");
 });
+
+test("a no-op night still moves the reflection window", () => {
+  const p = new Psyche(home());
+  assert.equal(p.lastIndividuation(), undefined);
+  p.writeIntegrated("None.");
+  assert.ok(p.lastIndividuation());
+  assert.equal(p.promptSections().some((s) => /Lessons from your own shadow/.test(s)), false);
+});
