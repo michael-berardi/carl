@@ -11,7 +11,7 @@ import { Log } from "./log.ts";
 import { Psyche } from "./psyche.ts";
 import { Scheduler } from "./scheduler.ts";
 import { carlTools } from "./tools.ts";
-import { VERSION } from "./version.ts";
+import { COMMIT, VERSION } from "./version.ts";
 import { loadPlugins } from "./plugins.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { login, logout } from "./login.ts";
@@ -46,7 +46,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     case "--version":
     case "version":
-      console.log(VERSION);
+      console.log(`${VERSION} (${COMMIT})`);
       return 0;
     case "gateway":
       return gateway(rest);

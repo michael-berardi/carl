@@ -2,3 +2,4 @@ node_modules/
 *.log
 .carl-test-*/
 .steak-pi/
+COMMIT
