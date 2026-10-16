@@ -1,7 +1,6 @@
 #!/bin/zsh -f
 # UltraBot slot -> Carl. UltraTerm runs this file in custom mode; `exec` keeps one pid (UltraTerm checks it).
 # Carl: ~/.carl (config carl.json, persona in psyche/), release ~/.carl/app/current, deploy ~/.carl/scripts/deploy.sh.
-# Rollback to Hermes: restore ~/.hermes/backups/carl-cutover-*/ultrabot-gateway.sh and restart UltraBot in UltraTerm.
 #
 # Carl starts from a clean environment: only terminal, locale and UltraTerm identity variables pass, never anything
 # that looks like a credential (on macOS any program of this user can read another's startup environment).

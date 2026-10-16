@@ -1,8 +1,12 @@
 # Carl
 
-Carl is a small, fast bot gateway for getting work done with AI agents. One process runs one agent per conversation and connects it to Telegram, Slack, Discord, a web app, an OpenAI-compatible API and a scheduler. It runs Claude through your own Claude Code login, GPT through your Codex login, or any of about 40 other model providers.
+Carl is the bot you message to run your AI agents. Ask what they are doing, tell them what to do next, and approve anything risky with a tap, from your phone or desk.
 
-It is built the way [Pi](https://pi.dev) is built: a small core that does its job well, with everything else added as modules. Carl's own code is about 6,700 lines of TypeScript plus a 500-line web app. It runs from source on Node 22 with no build step and has one runtime dependency, the Pi SDK, which supplies the agent loop, sessions, compaction, MCP and the model providers. You never need to install or run Pi itself.
+It is built for people who run many agents at once and need a supervisor that answers in seconds instead of burning the budget. On the same model and the same job-status question, Carl answered in 20.8 s on 67k prompt tokens where the Hermes gateway it replaced took 40.8 s on 373k (measurements below).
+
+Technically, Carl is a small, fast bot gateway for getting work done with AI agents. One process runs one agent per conversation and connects it to Telegram, Slack, Discord, a web app, an OpenAI-compatible API and a scheduler. It runs Claude through your own Claude Code login, GPT through your Codex login, or any of about 40 other model providers.
+
+It is built the way [Pi](https://pi.dev) is built: a small core that does its job well, with everything else added as modules. Carl's own code is about 7,000 lines of TypeScript plus a 500-line web app. It runs from source on Node 22 with no build step and has one runtime dependency, the Pi SDK, which supplies the agent loop, sessions, compaction, MCP and the model providers. You never need to install or run Pi itself.
 
 The SDK carries every provider's client library, so a production install is about 160 MB on disk; only the providers you use are loaded, and a running gateway uses about 55 MB of memory.
 
@@ -188,7 +192,7 @@ carl app [--install]    open the web app in its own window; --install adds Carl.
 ```sh
 npm ci
 npm run verify          # typecheck + unit tests
-npm run test:e2e        # real model, fake Telegram: 18 end-to-end steps
+npm run test:e2e        # real model, fake Telegram: 20 end-to-end steps
 ```
 
 `test/e2e.ts` drives the whole gateway against a fake Telegram Bot API and a temporary home. It uses your real Codex or Claude login, so set `CARL_E2E_MODEL` to choose the model.
