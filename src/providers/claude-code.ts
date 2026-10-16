@@ -12,7 +12,7 @@
 //     one upstream request. The relay captures the streamed response, which is authoritative.
 //   - Carl runs the agent loop, executes tools, compacts and persists; Claude Code is only the model client.
 import { type ChildProcess, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpRequest } from "node:http";
@@ -351,7 +351,8 @@ export class Admission {
   url = "";
   private readonly upstream: URL;
   private readonly idleMs: number;
-  private readonly queried?: Block[];
+  /** The frame Carl queried (for cache-breakpoint pinning); a pre-started process gets it when it is adopted. */
+  queried?: Block[];
   private upstreamRequest?: { destroy(): void };
   /** Set when the CLI tried to authenticate with an API key instead of the subscription login. */
   refusedAuth?: string;
@@ -485,6 +486,181 @@ function effortFor(level: string | undefined): string | undefined {
   return ({ minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } as Record<string, string>)[level] ?? "medium";
 }
 
+// ---- Process launch and the warm spare ------------------------------------------------------------------------
+//
+// Starting `claude -p` costs about 0.8 s before it sends anything. When a reply asks for a tool, the next call is
+// certain, so one process for the same request shape (model, effort, system prompt, tools, login, settings) is
+// started while the tools run and adopted by that call. The key covers every input the process reads at startup;
+// anything else gets a fresh process. A spare is used at most once and expires unused after SPARE_TTL_MS.
+
+interface LaunchSpec {
+  bin: string;
+  workdir: string;
+  env: NodeJS.ProcessEnv;
+  tmpRoot?: string;
+  system: string;
+  tools: string;
+  settings: string;
+  maxOutput: string;
+  model: string;
+  effort?: string;
+  idleMs: number;
+}
+
+interface Launched {
+  child: ChildProcess;
+  admission: Admission;
+  tmp: string;
+  bornAt: number;
+  stderr: string;
+  /** The adopting call's abort signal. */
+  signal?: AbortSignal;
+  exited: Promise<number | null>;
+  next: () => Promise<any | null>;
+}
+
+const SPARE_TTL_MS = 120_000;
+const MAX_SPARES = 2;
+// A spare is registered as soon as its launch starts, so a call that comes before the process is up still waits for it.
+const spares = new Map<string, { ready: Promise<Launched | undefined>; timer: NodeJS.Timeout; proc?: Launched }>();
+
+function launchKey(spec: LaunchSpec, configDir: string | undefined): string {
+  const { env: _env, idleMs: _idle, ...rest } = spec;
+  return createHash("sha256").update(JSON.stringify({ ...rest, configDir: configDir ?? null, configEnv: spec.env.CLAUDE_CONFIG_DIR ?? null, upstream: process.env.CARL_CLAUDE_UPSTREAM ?? null })).digest("hex");
+}
+
+function killGroup(child: ChildProcess | undefined): void {
+  if (child?.pid && child.exitCode === null && child.signalCode === null) {
+    try { process.kill(-child.pid, "SIGKILL"); } catch {}
+  }
+}
+
+function dispose(proc: Launched): void {
+  killGroup(proc.child);
+  proc.admission.close();
+  rmSync(proc.tmp, { recursive: true, force: true });
+}
+
+async function takeSpare(key: string): Promise<Launched | undefined> {
+  const s = spares.get(key);
+  if (!s) return undefined;
+  spares.delete(key);
+  clearTimeout(s.timer);
+  const proc = await s.ready;
+  if (!proc) return undefined;
+  if (proc.child.exitCode !== null || proc.child.signalCode !== null) { dispose(proc); return undefined; }
+  return proc;
+}
+
+function drop(key: string): void {
+  const s = spares.get(key);
+  if (!s) return;
+  spares.delete(key);
+  clearTimeout(s.timer);
+  void s.ready.then((p) => p && dispose(p));
+}
+
+/** Start a process for `key` in the background; it waits up to SPARE_TTL_MS for a call, then is killed. */
+function prestart(key: string, spec: LaunchSpec, log?: ClaudeCodeOptions["log"]): void {
+  drop(key);
+  while (spares.size >= MAX_SPARES) drop(spares.keys().next().value!);
+  const ready = launch(spec).catch((e) => { log?.("warn", "could not pre-start the next claude call", { error: (e as Error).message }); return undefined; });
+  const entry: { ready: Promise<Launched | undefined>; timer: NodeJS.Timeout; proc?: Launched } = { ready, timer: undefined as unknown as NodeJS.Timeout };
+  void ready.then((p) => { entry.proc = p; });
+  entry.timer = setTimeout(() => { if (spares.get(key) === entry) drop(key); }, SPARE_TTL_MS);
+  entry.timer.unref();
+  spares.set(key, entry);
+}
+
+/** Kill every spare (gateway shutdown, tests). */
+export function disposeSpares(): void {
+  for (const k of [...spares.keys()]) drop(k);
+}
+// Shutdown: kill started spares synchronously. A launch still in progress cannot be awaited here; that process
+// loses its stdin and its loopback relay with this process and exits on its own.
+process.once("exit", () => { for (const s of spares.values()) killGroup(s.proc?.child); });
+
+/** Number of pre-started processes waiting (tests and status). */
+export function spareCount(): number {
+  return spares.size;
+}
+
+async function launch(spec: LaunchSpec, signal?: AbortSignal): Promise<Launched> {
+  const tmp = mkdtempSync(join(spec.tmpRoot ?? tmpdir(), "carl-claude-"));
+  // CARL_CLAUDE_UPSTREAM exists for loopback test fixtures only (the Admission constructor refuses anything else but HTTPS).
+  let admission: Admission | undefined;
+  try {
+    admission = new Admission(process.env.CARL_CLAUDE_UPSTREAM ?? "https://api.anthropic.com", spec.idleMs);
+    writeFileSync(join(tmp, "tools.json"), spec.tools, { mode: 0o600 });
+    writeFileSync(join(tmp, "system.md"), spec.system, { mode: 0o600 });
+    writeFileSync(join(tmp, "settings.json"), spec.settings, { mode: 0o600 });
+    await admission.start();
+    const env = { ...spec.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: spec.maxOutput, ANTHROPIC_BASE_URL: admission.url };
+    const mcp = { mcpServers: { carl: { command: process.execPath, args: [INERT_MCP, join(tmp, "tools.json")] } } };
+    const args = [
+      "-p", "--model", spec.model,
+      "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+      "--tools", "", "--system-prompt-file", join(tmp, "system.md"), "--settings", join(tmp, "settings.json"),
+      "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--max-turns", "1",
+      "--permission-mode", "dontAsk", "--no-session-persistence", "--mcp-config", JSON.stringify(mcp),
+      ...(spec.effort ? ["--effort", spec.effort] : []),
+    ];
+    // Claude Code's auto-updater rewrites the binary in place; a spawn that lands mid-write fails with
+    // ENOEXEC/ETXTBSY/ENOENT. Wait for the write to finish (bounded) instead of failing the turn.
+    let child: ChildProcess;
+    for (let waited = 0; ; waited += 500) {
+      const c = spawn(spec.bin, args, { cwd: spec.workdir, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+      const outcome = await new Promise<NodeJS.ErrnoException | null>((resolve) => {
+        c.once("spawn", () => resolve(null));
+        c.once("error", (e) => resolve(e));
+      });
+      if (!outcome) { child = c; break; }
+      if (!["ENOEXEC", "ETXTBSY", "ENOENT", "EACCES"].includes(outcome.code ?? "") || waited >= 15_000 || signal?.aborted)
+        throw new ClaudeCodeError(`could not start claude (${outcome.code ?? "error"}): ${outcome.message}`, 503);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const proc: Launched = { child, admission, tmp, bornAt: Date.now(), stderr: "", signal, exited: undefined as any, next: undefined as any };
+    // A CLI that exits early turns our stdin writes into EPIPE; the exit is reported through the result path.
+    child.stdin!.on("error", () => {});
+    child.stderr!.on("data", (b) => { if (proc.stderr.length < 8_000) proc.stderr += b; });
+    proc.exited = new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
+    const spawnError = new Promise<never>((_, reject) => child.on("error", (e) => reject(new ClaudeCodeError(`claude process error: ${e.message}`, 503))));
+    spawnError.catch(() => {});
+    // Output is queued from the start: a pre-started process may print before a call adopts it.
+    const lines = createInterface({ input: child.stdout! });
+    const queue: any[] = [];
+    let waiter: (() => void) | undefined;
+    let ended = false;
+    lines.on("line", (line) => {
+      if (!line.trim()) return;
+      try {
+        queue.push(JSON.parse(line));
+      } catch {
+        queue.push({ type: "__invalid", line: line.slice(0, 300) });
+      }
+      waiter?.();
+    });
+    lines.on("close", () => { ended = true; waiter?.(); });
+    proc.next = async (): Promise<any | null> => {
+      const deadline = Date.now() + spec.idleMs;
+      while (!queue.length) {
+        if (ended) return null;
+        if (proc.signal?.aborted) throw new ClaudeCodeError("aborted");
+        if (Date.now() > deadline) throw new ClaudeCodeError(`Claude Code sent nothing for ${spec.idleMs / 1000}s`);
+        await Promise.race([new Promise<void>((r) => { waiter = r; setTimeout(r, 250); }), spawnError]);
+      }
+      const e = queue.shift();
+      if (e.type === "__invalid") throw new ClaudeCodeError(`Claude Code printed non-JSON output: ${JSON.stringify(e.line)}`);
+      return e;
+    };
+    return proc;
+  } catch (e) {
+    admission?.close();
+    rmSync(tmp, { recursive: true, force: true });
+    throw e;
+  }
+}
+
 export function streamClaude(model: Model<any>, context: TranscriptContext, options: SimpleStreamOptions | undefined, opts: ClaudeCodeOptions): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
   const route = CLAUDE_MODELS.find((m) => m.id === model.id);
@@ -603,82 +779,40 @@ async function attempt(
   const workdir = opts.workdir ?? defaultWorkdir();
   mkdirSync(workdir, { recursive: true, mode: 0o700 });
   if (opts.tmpRoot) mkdirSync(opts.tmpRoot, { recursive: true, mode: 0o700 });
-  const tmp = mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "carl-claude-"));
-  // CARL_CLAUDE_UPSTREAM exists for loopback test fixtures only (the Admission constructor refuses anything else but HTTPS).
-  const admission = new Admission(process.env.CARL_CLAUDE_UPSTREAM ?? "https://api.anthropic.com", opts.idleTimeoutMs ?? 180_000, frames[frames.length - 1]?.message.content);
-  let child: ChildProcess | undefined;
-  const kill = () => {
-    if (child?.pid && child.exitCode === null) {
-      try { process.kill(-child.pid, "SIGKILL"); } catch {}
-    }
+  const spec: LaunchSpec = {
+    bin, workdir, env, tmpRoot: opts.tmpRoot,
+    system, tools: JSON.stringify(tools), settings: JSON.stringify({ env: { CLAUDE_CODE_EXTRA_BODY: JSON.stringify(body) } }),
+    maxOutput: String(body.max_tokens ?? route?.maxTokens ?? model.maxTokens ?? 32_000),
+    model: route?.native ?? model.id, effort, idleMs: opts.idleTimeoutMs ?? 180_000,
   };
+  const key = launchKey(spec, configDir);
+  if (signal?.aborted) throw new ClaudeCodeError("aborted");
+  // A process started ahead of time for exactly this request shape skips the CLI's startup (~0.8 s per call).
+  const warm = await takeSpare(key);
+  let proc: Launched;
+  try {
+    proc = warm ?? (await launch(spec, signal));
+  } catch (e) {
+    throw e instanceof ClaudeCodeError ? e : new ClaudeCodeError((e as Error).message, 503);
+  }
+  if (warm) opts.log?.("info", "claude call used a pre-started process", { ageMs: Date.now() - warm.bornAt });
+  const { admission, tmp } = proc;
+  admission.queried = frames[frames.length - 1]?.message.content;
+  proc.signal = signal;
+  const child = proc.child;
+  const kill = () => killGroup(child);
   const onAbort = () => { kill(); admission.close(); };
   signal?.addEventListener("abort", onAbort, { once: true });
+  let prewarmed = false;
+  const prewarm = () => {
+    if (prewarmed || signal?.aborted) return;
+    prewarmed = true;
+    prestart(key, spec, opts.log);
+  };
   try {
-    writeFileSync(join(tmp, "tools.json"), JSON.stringify(tools), { mode: 0o600 });
-    writeFileSync(join(tmp, "system.md"), system, { mode: 0o600 });
-    writeFileSync(join(tmp, "settings.json"), JSON.stringify({ env: { CLAUDE_CODE_EXTRA_BODY: JSON.stringify(body) } }), { mode: 0o600 });
-    env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(body.max_tokens ?? route?.maxTokens ?? model.maxTokens ?? 32_000);
-    await admission.start();
-    env.ANTHROPIC_BASE_URL = admission.url;
-    const mcp = { mcpServers: { carl: { command: process.execPath, args: [INERT_MCP, join(tmp, "tools.json")] } } };
-    const args = [
-      "-p", "--model", route?.native ?? model.id,
-      "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-      "--tools", "", "--system-prompt-file", join(tmp, "system.md"), "--settings", join(tmp, "settings.json"),
-      "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--max-turns", "1",
-      "--permission-mode", "dontAsk", "--no-session-persistence", "--mcp-config", JSON.stringify(mcp),
-      ...(effort ? ["--effort", effort] : []),
-    ];
     if (signal?.aborted) throw new ClaudeCodeError("aborted");
-    // Claude Code's auto-updater rewrites the binary in place; a spawn that lands mid-write fails with
-    // ENOEXEC/ETXTBSY/ENOENT. Wait for the write to finish (bounded) instead of failing the turn.
-    for (let waited = 0; ; waited += 500) {
-      const c = spawn(bin, args, { cwd: workdir, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
-      const outcome = await new Promise<NodeJS.ErrnoException | null>((resolve) => {
-        c.once("spawn", () => resolve(null));
-        c.once("error", (e) => resolve(e));
-      });
-      if (!outcome) { child = c; break; }
-      if (!["ENOEXEC", "ETXTBSY", "ENOENT", "EACCES"].includes(outcome.code ?? "") || waited >= 15_000 || signal?.aborted)
-        throw new ClaudeCodeError(`could not start claude (${outcome.code ?? "error"}): ${outcome.message}`, 503);
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    let stderr = "";
-    // A CLI that exits early turns our stdin writes into EPIPE; the exit is reported through the result path.
-    child!.stdin!.on("error", () => {});
-    child!.stderr!.on("data", (b) => { if (stderr.length < 8_000) stderr += b; });
-    const exited = new Promise<number | null>((resolve) => child!.on("close", (code) => resolve(code)));
-    const spawnError = new Promise<never>((_, reject) => child!.on("error", (e) => reject(new ClaudeCodeError(`claude process error: ${e.message}`, 503))));
-    spawnError.catch(() => {});
-
-    const lines = createInterface({ input: child.stdout! });
-    const queue: any[] = [];
-    let waiter: (() => void) | undefined;
-    let ended = false;
-    lines.on("line", (line) => {
-      if (!line.trim()) return;
-      try {
-        queue.push(JSON.parse(line));
-      } catch {
-        queue.push({ type: "__invalid", line: line.slice(0, 300) });
-      }
-      waiter?.();
-    });
-    lines.on("close", () => { ended = true; waiter?.(); });
-    const idle = opts.idleTimeoutMs ?? 180_000;
-    const next = async (): Promise<any | null> => {
-      const deadline = Date.now() + idle;
-      while (!queue.length) {
-        if (ended) return null;
-        if (signal?.aborted) throw new ClaudeCodeError("aborted");
-        if (Date.now() > deadline) throw new ClaudeCodeError(`Claude Code sent nothing for ${idle / 1000}s`);
-        await Promise.race([new Promise<void>((r) => { waiter = r; setTimeout(r, 250); }), spawnError]);
-      }
-      const e = queue.shift();
-      if (e.type === "__invalid") throw new ClaudeCodeError(`Claude Code printed non-JSON output: ${JSON.stringify(e.line)}`);
-      return e;
-    };
+    const { next, exited } = proc;
+    const stderr = () => proc.stderr;
 
     // Replay history: every user frame but the last is recorded without a model call (a zero-turn result).
     for (let i = 0; i < frames.length; i++) {
@@ -689,7 +823,7 @@ async function attempt(
       if (replay) {
         for (;;) {
           const ack = await next();
-          if (!ack) throw new ClaudeCodeError(`Claude Code exited during history replay${stderr ? `: ${stderr.trim().slice(-300)}` : ""}`);
+          if (!ack) throw new ClaudeCodeError(`Claude Code exited during history replay${stderr() ? `: ${stderr().trim().slice(-300)}` : ""}`);
           if (ack.type === "result") {
             if (ack.num_turns !== 0 || ack.is_error) throw new ClaudeCodeError("Claude Code did not accept the history replay (expected a zero-turn acknowledgment)");
             break;
@@ -733,6 +867,7 @@ async function attempt(
           partial.content.push({ type: "thinking", thinking: "", ...(b.type === "redacted_thinking" ? { redacted: true, thinkingSignature: sigTag + b.data } : {}) });
           stream.push({ type: "thinking_start", contentIndex: idx, partial: { ...partial } });
         } else if (b.type === "tool_use") {
+          prewarm(); // a tool round means another call follows: start its process while the tools run
           partial.content.push({ type: "toolCall", id: b.id, name: String(b.name).replace(PREFIX, ""), arguments: {} });
           stream.push({ type: "toolcall_start", contentIndex: idx, partial: { ...partial } });
         } else {
@@ -782,7 +917,7 @@ async function attempt(
     if (!admission.used) {
       if (nativeError?.code === "authentication_failed") throw new ClaudeCodeError(`Claude Code is not logged in${configDir ? ` for ${configDir}` : ""}: run \`claude auth login\` (${nativeError.text})`, 401);
       if (nativeError) throw new ClaudeCodeError(`Claude Code error: ${nativeError.text}`, nativeError.code ? NATIVE_STATUS[nativeError.code] : undefined);
-      throw new ClaudeCodeError(`Claude Code made no model request (exit ${code})${stderr ? `: ${stderr.trim().slice(-300)}` : ""}`);
+      throw new ClaudeCodeError(`Claude Code made no model request (exit ${code})${stderr() ? `: ${stderr().trim().slice(-300)}` : ""}`);
     }
 
     // The relay's capture of the one upstream response is authoritative.
