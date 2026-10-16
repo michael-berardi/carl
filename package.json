@@ -1,23 +1,45 @@
 {
   "name": "carl-gateway",
   "version": "0.1.0",
-  "description": "Carl: the minimal bot gateway. One process, one Pi agent per conversation, Telegram + an OpenAI-compatible API, schedules, and a self-reflecting psyche.",
+  "description": "Carl: a small, fast bot gateway for AI agents. Telegram, Slack, Discord, a web app, an OpenAI-compatible API and schedules, with a kernel sandbox and a self-reflecting psyche.",
+  "keywords": [
+    "agent",
+    "ai",
+    "bot",
+    "gateway",
+    "telegram",
+    "slack",
+    "discord",
+    "claude",
+    "codex",
+    "mcp",
+    "sandbox"
+  ],
+  "homepage": "https://github.com/michael-berardi/carl#readme",
+  "bugs": {
+    "url": "https://github.com/michael-berardi/carl/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/michael-berardi/carl.git"
+  },
   "license": "MIT",
   "type": "module",
   "bin": {
     "carl": "bin/carl"
   },
-  "engines": {
-    "node": ">=22.19.0"
-  },
   "files": [
     "bin",
     "src",
     "vendor",
+    "scripts",
     "README.md",
     "LICENSE",
-    "docs"
+    "SECURITY.md"
   ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
     "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
     "typecheck": "tsc --noEmit",
@@ -39,19 +61,5 @@
     "@earendil-works/pi-tui": "1.0.4",
     "@earendil-works/chord": "1.0.4",
     "@earendil-works/pi-telemetry": "1.0.4"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/michael-berardi/carl.git"
-  },
-  "homepage": "https://github.com/michael-berardi/carl#readme",
-  "keywords": [
-    "pi-package",
-    "agent",
-    "telegram",
-    "bot",
-    "claude",
-    "codex",
-    "gateway"
-  ]
+  }
 }
