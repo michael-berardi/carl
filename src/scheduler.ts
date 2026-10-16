@@ -119,6 +119,13 @@ export class Scheduler {
     this.add({ name, when, builtin, deliver });
   }
 
+  /** Drop a built-in job (e.g. when another system owns that work). */
+  removeBuiltin(builtin: string): void {
+    const before = this.jobs.length;
+    this.jobs = this.jobs.filter((j) => j.builtin !== builtin);
+    if (this.jobs.length !== before) this.save();
+  }
+
   add(spec: { name: string; when: string; prompt?: string; command?: string; builtin?: string; deliver: string; onlyIfOutput?: boolean; model?: string; timeoutMinutes?: number }): Job {
     if (!spec.name?.trim()) throw Object.assign(new Error("a schedule needs a name"), { status: 400 });
     if (!spec.prompt && !spec.command && !spec.builtin) throw Object.assign(new Error("a schedule needs a prompt or a command"), { status: 400 });

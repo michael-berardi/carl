@@ -76,3 +76,17 @@ test("an older layout (CARL_HOME/pi with mcp.json inside) moves to mcp.json and 
   assert.equal(readFileSync(join(home, "mcp.json"), "utf8"), '{"mcpServers":{}}');
   assert.ok(existsSync(join(home, "engine")) && !existsSync(join(home, "pi")));
 });
+
+test("learning defaults to UltraTerm Dream/Nightmare with the UltraTerm module, else Carl's own pass", () => {
+  const plain = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(plain, "carl.json"), "{}");
+  assert.equal(loadConfig(plain).learning, "carl");
+  const ut = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(ut, "carl.json"), JSON.stringify({ ultraterm: { home: ut } }));
+  assert.equal(loadConfig(ut).learning, "ultraterm");
+  const forced = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(forced, "carl.json"), JSON.stringify({ ultraterm: { home: forced }, learning: "carl" }));
+  assert.equal(loadConfig(forced).learning, "carl");
+  writeFileSync(join(forced, "carl.json"), JSON.stringify({ learning: "dreams" }));
+  assert.throws(() => loadConfig(forced), /learning must be/);
+});

@@ -60,8 +60,11 @@ export function looksLikeCorrection(text: string): boolean {
 
 export class Psyche {
   readonly dir: string;
-  constructor(home: string) {
+  /** "ultraterm": UltraTerm Dream and Nightmare distil the ledgers; Carl keeps no lessons of its own. */
+  readonly learning: "carl" | "ultraterm";
+  constructor(home: string, learning: "carl" | "ultraterm" = "carl") {
     this.dir = join(home, "psyche");
+    this.learning = learning;
   }
 
   private path(name: string): string {
@@ -89,7 +92,7 @@ export class Psyche {
     if (self) out.push(self);
     const persona = this.read("persona.md");
     if (persona) out.push(persona);
-    const lessons = this.read("integrated.md");
+    const lessons = this.learning === "carl" ? this.read("integrated.md") : "";
     if (lessons) out.push(`# Lessons from your own shadow\n\nDistilled from your past failures and corrections. Act on them.\n\n${lessons}`);
     return out;
   }

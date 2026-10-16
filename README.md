@@ -108,6 +108,8 @@ Carl is named after Carl Jung, and its self-model borrows his layers. Each layer
 
 Only Self, Persona and Lessons enter the prompt. The ledgers stay on disk and are read only when needed.
 
+With the UltraTerm module on, Carl joins UltraTerm's own learning loop instead of running a second one. Dream and Nightmare read Carl's shadow and decision ledgers along with every other agent's work. Lessons Mike approves reach Carl through shared memory. Carl then runs no individuation pass and keeps no `integrated.md` in its prompt. Set `"learning": "carl"` to keep Carl's own pass, or `"ultraterm"` to use UltraTerm's loop without the rest of the module.
+
 ## Safety
 
 Carl runs tools with your own permissions, because it does real work. Two layers keep that safe.

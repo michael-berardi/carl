@@ -47,3 +47,14 @@ test("individuation prompt and parse", () => {
   assert.equal(parsed.contradictions, "None found");
   assert.equal(parsed.proposals, "- p");
 });
+
+test("under UltraTerm learning the private lessons layer stays out of the prompt; ledgers still record", () => {
+  const p = new Psyche(home(), "ultraterm");
+  p.seed();
+  p.writeIntegrated("- When X, I Y; instead I Z.");
+  const sections = p.promptSections();
+  assert.equal(sections.length, 2);
+  assert.ok(!sections.some((s) => /Lessons from your own shadow/.test(s)));
+  p.recordShadow({ kind: "tool_error", conversation: "c", summary: "codemode failed" });
+  assert.equal(p.shadowSince().length, 1);
+});
