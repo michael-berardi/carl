@@ -297,5 +297,5 @@ function hooksOf(v: unknown): Record<string, { prompt: string; deliver: string; 
 function learningMode(v: unknown, ultraterm: boolean): "carl" | "ultraterm" {
   if (v === undefined) return ultraterm ? "ultraterm" : "carl";
   if (v === "carl" || v === "ultraterm") return v;
-  throw new Error(`learning must be "carl" or "ultraterm" (got ${JSON.stringify(v)})`);
+  throw new ConfigError(`learning must be "carl" or "ultraterm" (got ${JSON.stringify(v)})`);
 }

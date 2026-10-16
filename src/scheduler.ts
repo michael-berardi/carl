@@ -16,6 +16,8 @@ export interface Job {
   command?: string;
   /** Built-in handler name (e.g. "individuation"). */
   builtin?: string;
+  /** Set when a built-in was paused because another system owns its work (e.g. "learning"). */
+  pausedBy?: string;
   /** "home" | "none" | chat id */
   deliver: string;
   enabled: boolean;
@@ -115,15 +117,24 @@ export class Scheduler {
 
   /** Make sure a built-in job exists; the operator may edit its timing or pause it afterwards. */
   ensureBuiltin(builtin: string, name: string, when: string, deliver = "home"): void {
-    if (this.jobs.some((j) => j.builtin === builtin)) return;
+    const existing = this.jobs.find((j) => j.builtin === builtin);
+    if (existing) {
+      // Turned back on after another system owned it; an operator's own pause stays.
+      if (existing.pausedBy === "learning") { existing.enabled = true; delete existing.pausedBy; this.save(); }
+      return;
+    }
     this.add({ name, when, builtin, deliver });
   }
 
-  /** Drop a built-in job (e.g. when another system owns that work). */
-  removeBuiltin(builtin: string): void {
-    const before = this.jobs.length;
-    this.jobs = this.jobs.filter((j) => j.builtin !== builtin);
-    if (this.jobs.length !== before) this.save();
+  /** Pause a built-in job while another system owns that work; its schedule and edits are kept. */
+  pauseBuiltin(builtin: string, by: string): void {
+    let changed = false;
+    for (const j of this.jobs) {
+      if (j.builtin !== builtin || !j.enabled) continue;
+      // A paused job's last failure is no longer actionable; UltraTerm would keep showing it as a failed schedule.
+      j.enabled = false; j.pausedBy = by; delete j.lastError; delete j.lastStatus; changed = true;
+    }
+    if (changed) this.save();
   }
 
   add(spec: { name: string; when: string; prompt?: string; command?: string; builtin?: string; deliver: string; onlyIfOutput?: boolean; model?: string; timeoutMinutes?: number }): Job {

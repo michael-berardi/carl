@@ -28,7 +28,7 @@ import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
-import { claudeCodeProviderConfig, PROVIDER as CLAUDE_PROVIDER } from "./providers/claude-code.ts";
+import { claudeCodeProviderConfig, closeSpares, PROVIDER as CLAUDE_PROVIDER, sweepCallFolders } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
 import { type Approver, guardedFileOps, guardedReadOps, shellGuard } from "./guard.ts";
 import { looksLikeCorrection, type Psyche } from "./psyche.ts";
@@ -138,7 +138,7 @@ export class Brain extends EventEmitter {
   }
 
   /** Everything Carl executes or loads, outside the agent's working areas: the agent must not be able to change it. */
-  private controlPlane(): string[] {
+  private controlPlane(forSandbox = true): string[] {
     const out = new Set<string>();
     const add = (p: string | undefined) => { if (p) out.add(p); };
     const realOf = (p: string) => { try { return realpathSync(p); } catch { return p; } };
@@ -168,6 +168,8 @@ export class Brain extends EventEmitter {
     // such folders are left out, and the programs in them are still pinned one by one (pinnedPaths).
     // Compared as given and resolved: /var and /private/var (or a linked home) name the same folder.
     const freeReal = writablePaths(this.cfg).map((w) => realOf(w).replace(/\/+$/, "") + "/");
+    // The file-tool guard gets every folder: there, working areas already win over protected paths.
+    if (!forSandbox) return [...out];
     return [...out].filter((p) => {
       const inside = free.some((w) => w.startsWith(p.replace(/\/+$/, "") + "/")) || freeReal.some((w) => w.startsWith(realOf(p).replace(/\/+$/, "") + "/"));
       if (inside) this.log.warn("not protecting a folder that contains a working area; its programs are pinned individually", { path: p });
@@ -192,7 +194,7 @@ export class Brain extends EventEmitter {
   private guardRules() {
     return {
       ...this.cfg.guard,
-      protectedPaths: [this.cfg.home, ...this.controlPlane()],
+      protectedPaths: [this.cfg.home, ...this.controlPlane(false)],
       writablePaths: writablePaths(this.cfg),
       secretPaths: secretFiles(this.cfg),
       cwd: this.cfg.workspace,
@@ -285,6 +287,8 @@ export class Brain extends EventEmitter {
       modelsPath: join(this.cfg.agentDir, "models.json"),
     });
     if (this.cfg.claude.enabled) {
+      const swept = sweepCallFolders(join(this.cfg.home, "state", "claude-tmp"));
+      if (swept) this.log.info("removed per-call Claude folders left by an earlier process", { count: swept });
       this.runtime.registerProvider(CLAUDE_PROVIDER, claudeCodeProviderConfig({
         command: this.claudeBin ?? this.cfg.claude.command,
         // Carl-only folders: the sandboxed agent cannot plant a CLAUDE.md or swap the per-call settings file.
@@ -775,6 +779,7 @@ export class Brain extends EventEmitter {
 
   async shutdown(timeoutMs = 5_000): Promise<void> {
     if (this.sweeper) clearInterval(this.sweeper);
+    closeSpares(); // turns finishing below must not pre-start processes nobody will use
     const running = [...this.conversations.values()].filter((c) => c.pending).map((c) => c.pending!);
     if (running.length) {
       this.log.info("waiting for running turns before exit", { count: running.length });
