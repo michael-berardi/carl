@@ -157,7 +157,8 @@ await step("API: health, capabilities, jobs, skills, toolsets", async () => {
   assert.equal(caps.contract, "hermes.canonical-intake.v1");
   assert.ok(caps.durable && caps.idempotent && caps.canonicalMessaging);
   const jobs = await (await api("/api/jobs?include_disabled=true")).json();
-  assert.ok(Array.isArray(jobs.jobs) && jobs.jobs.some((j: any) => j.name === "Individuation"));
+  // Under UltraTerm, Dream and Nightmare own the learning loop: no Individuation schedule.
+  assert.ok(Array.isArray(jobs.jobs) && !jobs.jobs.some((j: any) => j.name === "Individuation"));
   assert.ok(Array.isArray((await (await api("/v1/skills")).json()).data));
   assert.ok(Array.isArray((await (await api("/v1/toolsets")).json()).data));
 });

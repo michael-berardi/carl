@@ -17,7 +17,7 @@ Most bot frameworks send tens of thousands of tokens of instructions and tool sc
 - **Fixed overhead:** about 2k tokens out of the box. A heavy production setup (15 KB of operator rules, a memory pack, a long persona and 11 skills) measures about 12k, against 30k for the Hermes deployment it replaced.
 - **MCP through codemode:** MCP servers sit behind one `codemode` tool. The model writes a short script that calls servers in parallel and filters their results, so a 20 KB status dump never enters the context.
 - **Capped tool output:** large tool results are cut to their head and tail. The full output is saved to a file the model can read in pieces.
-- **Compaction at your budget:** Carl compacts at a context budget you set (100k tokens, say), whatever the model's window is. With [UltraCompress](https://github.com/michael-berardi/ultracompress) installed, compaction is a deterministic brief built in milliseconds with no model call, and a recall tool can still reach anything it dropped.
+- **Compaction at your budget:** Carl compacts at a context budget you set (96k tokens by default), whatever the model's window is. With UltraCompress, keep it at 40k or more: the newest turns (up to about 25k tokens) stay verbatim. With [UltraCompress](https://github.com/michael-berardi/ultracompress) installed, compaction is a deterministic brief built in milliseconds with no model call, and a recall tool can still reach anything it dropped.
 
 Measured on 2026-10-15 against the Hermes gateway it replaced: the same four questions, the same model (Claude Sonnet 5.5), through each bot's API, with the same answers.
 

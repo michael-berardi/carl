@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { Brain } from "../src/brain.ts";
@@ -24,7 +24,7 @@ await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
 process.env.CARL_CLAUDE_UPSTREAM = `http://127.0.0.1:${(fake.address() as any).port}`;
 
 const home = mkdtempSync(join(process.env.CARL_E2E_DIR ?? tmpdir(), "carl-fallback-"));
-writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "claude-code/claude-sonnet-5-5", fallbackModels: ["openai-codex/gpt-6.1-sol"], thinking: "low", tools: [], telegram: { enabled: false }, api: { enabled: false } }));
+writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "claude-code/claude-sonnet-5-5", fallbackModels: ["openai-codex/gpt-6.1-sol"], agentDir: process.env.CARL_E2E_AGENT_DIR ?? join(homedir(), ".pi", "agent"), thinking: "low", tools: [], telegram: { enabled: false }, api: { enabled: false } }));
 const cfg = loadConfig(home);
 const psyche = new Psyche(home);
 const log = new Log(join(home, "carl.log"));
