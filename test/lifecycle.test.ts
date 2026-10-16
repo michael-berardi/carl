@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, existsSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Scheduler } from "../src/scheduler.ts";
@@ -40,4 +40,18 @@ test("a bad learning value is a config error (exit 78), not a crash", () => {
   const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
   writeFileSync(join(h, "carl.json"), JSON.stringify({ learning: "dreams" }));
   assert.throws(() => loadConfig(h), (e: Error) => e instanceof ConfigError);
+});
+
+test("a built-in resumed after a learning pause waits for its next slot instead of running at once", () => {
+  const home = mkdtempSync(join(tmpdir(), "carl-sched-"));
+  const runners = { prompt: async () => "", builtin: { individuation: async () => "" }, deliver: async () => {} };
+  const s = new Scheduler(home, new Log(join(home, "log")), runners);
+  s.ensureBuiltin("individuation", "Individuation", "40 5 * * *");
+  s.pauseBuiltin("individuation", "learning");
+  const raw = JSON.parse(readFileSync(join(home, "schedules.json"), "utf8"));
+  raw.jobs[0].nextRunAt = Date.now() - 86_400_000; // a slot that passed while paused
+  writeFileSync(join(home, "schedules.json"), JSON.stringify(raw));
+  const again = new Scheduler(home, new Log(join(home, "log")), runners);
+  again.ensureBuiltin("individuation", "Individuation", "40 5 * * *");
+  assert.ok(again.list()[0].nextRunAt! > Date.now());
 });

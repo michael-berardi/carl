@@ -9,7 +9,7 @@
 //
 // Only Self, Persona and Lessons reach the system prompt. The raw shadow and decision ledgers stay on disk
 // and are read on demand (by the individuation pass and the mirror), so the psyche costs few tokens per turn.
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const DEFAULT_SELF = `# Self
@@ -154,7 +154,12 @@ export class Psyche {
       .filter((l) => /^[-•*]\s+\S/.test(l))
       .map((l) => "- " + l.replace(/^[-•*]\s+/, "").replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, "").slice(0, 300))
       .slice(0, 12);
-    if (!bullets.length) return 0;
+    if (!bullets.length) {
+      // Nothing new: keep the lessons, but move the reflection window so the same shadow is not re-read nightly.
+      const p = this.path("integrated.md");
+      if (existsSync(p)) { const now = new Date(); utimesSync(p, now, now); } else writeFileSync(p, "", { mode: 0o600 });
+      return 0;
+    }
     writeFileSync(this.path("integrated.md"), bullets.join("\n") + "\n", { mode: 0o600 });
     return bullets.length;
   }

@@ -120,7 +120,12 @@ export class Scheduler {
     const existing = this.jobs.find((j) => j.builtin === builtin);
     if (existing) {
       // Turned back on after another system owned it; an operator's own pause stays.
-      if (existing.pausedBy === "learning") { existing.enabled = true; delete existing.pausedBy; this.save(); }
+      if (existing.pausedBy === "learning") {
+        existing.enabled = true;
+        delete existing.pausedBy;
+        existing.nextRunAt = this.next(existing, Date.now()); // not a run missed while paused
+        this.save();
+      }
       return;
     }
     this.add({ name, when, builtin, deliver });
@@ -161,6 +166,7 @@ export class Scheduler {
   setEnabled(id: string, enabled: boolean): void {
     const job = this.find(id);
     job.enabled = enabled;
+    delete job.pausedBy; // the operator decides from here
     if (enabled) job.nextRunAt = this.next(job, Date.now());
     this.save();
   }
