@@ -1,7 +1,7 @@
 // Discord channel end to end: real model, fake Discord (REST + Gateway).
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { Gateway } from "../src/gateway.ts";
@@ -11,7 +11,7 @@ const dc = new FakeDiscord();
 await dc.start();
 const home = mkdtempSync(join(process.env.CARL_E2E_DIR ?? tmpdir(), "carl-discord-"));
 writeFileSync(join(home, ".env"), "DISCORD_BOT_TOKEN=test-token\n");
-writeFileSync(join(home, "carl.json"), JSON.stringify({ model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol", thinking: "low", tools: ["read", "bash"],
+writeFileSync(join(home, "carl.json"), JSON.stringify({ model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol", agentDir: process.env.CARL_E2E_AGENT_DIR ?? join(homedir(), ".pi", "agent"), thinking: "low", tools: ["read", "bash"],
   telegram: { enabled: false }, api: { enabled: false }, discord: { allowFrom: ["42"], homeChannel: "100", apiBase: dc.base } }));
 const gw = new Gateway(loadConfig(home));
 await gw.start();

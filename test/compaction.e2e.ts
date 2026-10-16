@@ -2,7 +2,7 @@
 // (through the brief or ultracompress_recall). Model from CARL_E2E_MODEL (default GPT-6.1 Sol).
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { Brain } from "../src/brain.ts";
 import { loadConfig } from "../src/config.ts";
@@ -10,7 +10,7 @@ import { Log } from "../src/log.ts";
 import { Psyche } from "../src/psyche.ts";
 
 const home = mkdtempSync(join(process.env.CARL_E2E_DIR ?? tmpdir(), "carl-compaction-"));
-writeFileSync(join(home, "carl.json"), JSON.stringify({ model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol", thinking: "low", contextBudget: 12_000, keepRecentTokens: 2_000, tools: ["read", "bash"], toolResultMaxChars: 40_000, telegram: { enabled: false }, api: { enabled: false } }));
+writeFileSync(join(home, "carl.json"), JSON.stringify({ model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol", agentDir: process.env.CARL_E2E_AGENT_DIR ?? join(homedir(), ".pi", "agent"), thinking: "low", contextBudget: 12_000, keepRecentTokens: 2_000, tools: ["read", "bash"], toolResultMaxChars: 40_000, telegram: { enabled: false }, api: { enabled: false } }));
 mkdirSync(join(home, "psyche"), { recursive: true });
 mkdirSync(join(home, "workspace"), { recursive: true });
 const cfg = loadConfig(home);

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { cleanEnv, readNoFollow, sandboxArgv } from "../sandbox.ts";
-import type { Brain, RunResult } from "../brain.ts";
+import { type Brain, type RunResult, toolsRanAfter } from "../brain.ts";
 import type { CarlConfig } from "../config.ts";
 import type { Log } from "../log.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
@@ -190,6 +190,18 @@ export class TelegramChannel {
     const left = this.readInflight();
     for (const [id, e] of Object.entries(left)) {
       const excerpt = e.text.length > 160 ? e.text.slice(0, 160) + "…" : e.text;
+      // A plain text message in a DM whose turn had not run any tool is simply picked up again: nothing can be
+      // repeated. Anything else (a tool may have acted, a voice note or file, a group) is reported instead.
+      const messageId = Number(id.split(":")[1]);
+      const textOnly = e.text.length < 500 && e.text !== "(voice note)" && e.text !== "(attachment)";
+      if (e.chatId > 0 && textOnly && Number.isInteger(messageId) && !toolsRanAfter(this.cfg.home, `telegram:dm:${e.chatId}`, e.text)) {
+        this.log.info("resuming a message interrupted by a restart", { chat: e.chatId, message: messageId });
+        await this.sendMarkdown(e.chatId, `I restarted while answering this, so I am picking it up again:\n\n> ${excerpt.replace(/\n/g, " ")}`, { threadId: e.threadId })
+          .catch((err) => this.log.warn("cannot announce a resumed message", { error: (err as Error).message }));
+        this.markInflight(id);
+        this.enqueueMessage({ message_id: messageId, date: Math.floor(Date.now() / 1000), chat: { id: e.chatId, type: "private" }, from: { id: e.chatId, is_bot: false, first_name: "" }, text: e.text } as TgMessage);
+        continue;
+      }
       await this.sendMarkdown(e.chatId, `I restarted while working on this, so it did not finish:\n\n> ${excerpt.replace(/\n/g, " ")}\n\nSend it again if it still matters.`, { threadId: e.threadId })
         .catch((err) => this.log.warn("cannot report an interrupted message", { error: (err as Error).message }));
       this.markInflight(id);

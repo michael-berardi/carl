@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { loadConfig } from "../src/config.ts";
@@ -42,7 +42,7 @@ chmodSync(overseer, 0o755);
 writeFileSync(join(home, ".env"), `TELEGRAM_BOT_TOKEN=123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz\nCARL_API_KEY=${KEY}\nHOOK_SECRET=hook-secret-123\n`);
 const port = 18_000 + Math.floor(Math.random() * 1_000);
 writeFileSync(join(home, "carl.json"), JSON.stringify({
-  model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol",
+  model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol", agentDir: process.env.CARL_E2E_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
   thinking: "low",
   tools: ["read", "bash"],
   telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: true },

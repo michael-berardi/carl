@@ -54,14 +54,14 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
   - `/stop`, `/new`, `/status`, `/model`, `/compact` and `/mirror` work at any time.
   - Voice notes go through any speech-to-text command you configure; photos and files go to the model.
   - Slack connects over Socket Mode (no public URL needed). Discord connects over its Gateway.
-  - Replies that fail to send are retried for 24 hours. If Carl restarts mid-reply, it tells you which message was interrupted.
+  - Replies that fail to send are retried for 24 hours. If Carl restarts mid-reply, it picks the message up again when its answer had not run any tool yet, and otherwise tells you which message was interrupted (it never repeats an action on its own).
 - **Web app:**
   - Chat with any conversation, including the Telegram one.
   - Manage schedules.
   - Read and edit the psyche (below).
   - Status and recent log.
   - No framework and no build step.
-- **Webhooks:** `POST /v1/hooks/<name>` turns an event from GitHub, Stripe, a form or another bot into an agent run, with the result delivered where you choose. Requests need the API key or a valid HMAC signature (GitHub's `X-Hub-Signature-256` format).
+- **Webhooks:** `POST /v1/hooks/<name>` turns an event from GitHub, Stripe, a form or another bot into an agent run, with the result delivered where you choose. Requests need the API key or a valid HMAC signature (GitHub's `X-Hub-Signature-256` format). Each delivery is recorded before Carl answers: after a restart, one that had not started runs, and one cut short is reported rather than rerun. A repeated delivery id (`X-GitHub-Delivery` or `Idempotency-Key`) runs once.
 - **API:**
   - An OpenAI-compatible `/v1/chat/completions` that streams and keeps conversation state.
   - The `/carl/*` routes the web app uses.
