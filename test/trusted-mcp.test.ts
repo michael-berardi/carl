@@ -20,12 +20,12 @@ async function scenario(t: any, exposure: "direct" | "codemode", steps: any[]) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "carl");
   const piAgent = join(root, "pi-agent");
-  mkdirSync(join(home, "pi"), { recursive: true });
+  mkdirSync(home, { recursive: true });
   mkdirSync(piAgent, { recursive: true });
   writeFileSync(join(piAgent, "models.json"), JSON.stringify({ providers: { faux: { api: faux.api, baseUrl: "http://127.0.0.1:9", apiKey: "test", models: [{ id: "faux-1", name: "Faux", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200_000, maxTokens: 8_000 }] } } }));
   const calls = join(root, "calls.log");
-  writeFileSync(join(home, "pi", "mcp.json"), JSON.stringify({ mcpServers: { overseer: { command: process.execPath, args: [fixture, calls], exposure } } }));
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "faux/faux-1", piAgentDir: piAgent, tools: ["read", "bash"], mcp: true, trustedMcp: ["overseer"],
+  writeFileSync(join(home, "mcp.json"), JSON.stringify({ mcpServers: { overseer: { command: process.execPath, args: [fixture, calls], exposure } } }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "faux/faux-1", agentDir: piAgent, tools: ["read", "bash"], mcp: true, trustedMcp: ["overseer"],
     claude: { enabled: false }, ultracompress: "off", telegram: { enabled: false }, api: { enabled: false } }));
   const cfg = loadConfig(home);
   ensureHome(cfg);

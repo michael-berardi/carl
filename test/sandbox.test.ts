@@ -30,7 +30,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   const root = mkdtempSync(join(base, "run-"));
   t.after(() => { rmSync(root, { recursive: true, force: true }); try { rmdirSync(base); } catch {} });
   const home = join(root, "carl");
-  for (const d of ["state", "workspace", "pi"]) mkdirSync(join(home, d), { recursive: true });
+  for (const d of ["state", "workspace", "engine"]) mkdirSync(join(home, d), { recursive: true });
   const outside = join(root, "elsewhere-ext");
   mkdirSync(outside);
   writeFileSync(join(outside, "ext.ts"), "// operator code\n");
@@ -49,13 +49,13 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   // A stand-in tmux server: its socket must be out of reach (tmux runs whatever it is sent, outside the sandbox).
   const sock = join(root, "tmux-sock", "s");
   mkdirSync(dirname(sock));
-  const tmuxLike = createNetServer((c) => c.end("tmux")).listen(sock);
+  const tmuxLike = createNetServer((c) => { c.on("error", () => {}); c.end("tmux"); }).listen(sock);
   const savedTmux = process.env.TMUX;
   process.env.TMUX = `${sock},1,0`;
   // Stand-in agent sockets for each name pattern, and an unrelated socket as the control that must stay reachable.
   const fakeSocks = { sshDir: join(root, "ssh-Xy12", "agent.4242"), named: join(root, "my-agent.sock"), plain: join(root, "plain-service.sock") };
   mkdirSync(join(root, "ssh-Xy12"));
-  const fakeServers = Object.values(fakeSocks).map((p) => createNetServer((c) => c.end("hello")).listen(p));
+  const fakeServers = Object.values(fakeSocks).map((p) => createNetServer((c) => { c.on("error", () => {}); c.end("hello"); }).listen(p));
   t.after(() => { for (const s of fakeServers) s.close(); });
   // A process outside the sandbox that commands must not be able to signal.
   const outsider = spawn("/bin/sleep", ["30"]);
@@ -80,7 +80,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
     `echo hacked >> ${join(home, "carl.json")}`,
     `cat ${join(home, ".env")}`,
     `echo "TOKEN=[$TELEGRAM_BOT_TOKEN]"`,
-    `echo ext > ${join(home, "pi", "x.ts")}`,
+    `echo ext > ${join(home, "engine", "x.ts")}`,
     `mkdir -p ${join(ws, ".pi")} && echo y > ${join(ws, ".pi", "y.ts")}`,
     `ln ${join(home, ".env")} ${join(ws, "env-link")}`,
     `mv ${join(home, ".env")} ${join(ws, "env-moved")}`,
@@ -120,7 +120,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   assert.ok(!existsSync(join(ws, "config-link")), "control files cannot be hardlinked into the workspace");
   assert.ok(existsSync(join(root, "secrets", "extra.env")) && !existsSync(join(ws, "secrets-moved")), "a folder holding a secret cannot be moved somewhere readable");
   assert.match(out, /TOKEN=\[\]/);
-  assert.ok(!existsSync(join(home, "pi", "x.ts")), "no writes into Carl's Pi dir");
+  assert.ok(!existsSync(join(home, "engine", "x.ts")), "no writes into Carl's engine folder");
   assert.ok(!existsSync(join(ws, ".pi", "y.ts")), "no Pi extension dir inside the workspace");
   assert.ok(!existsSync(join(ws, "env-link")) && !existsSync(join(ws, "env-moved")), "secrets cannot be linked or moved out");
   assert.equal(readFileSync(join(outside, "ext.ts"), "utf8"), "// operator code\n", "control-plane code outside CARL_HOME is protected");
@@ -156,7 +156,7 @@ test("file tools: reads and writes run in the sandbox, so a swapped symlink gain
   const root = mkdtempSync(join(base, "ops-"));
   t.after(() => { rmSync(root, { recursive: true, force: true }); try { rmdirSync(base); } catch {} });
   const home = join(root, "carl");
-  for (const d of ["state", "workspace", "pi"]) mkdirSync(join(home, d), { recursive: true });
+  for (const d of ["state", "workspace", "engine"]) mkdirSync(join(home, d), { recursive: true });
   // A secret whose name the guard does not recognise: only the kernel knows it is one.
   writeFileSync(join(root, "vault.txt"), "VAULT=3:secret\n");
   writeFileSync(join(home, "carl.json"), JSON.stringify({ envFiles: [join(root, "vault.txt")] }));
@@ -175,10 +175,10 @@ test("file tools: reads and writes run in the sandbox, so a swapped symlink gain
   await assert.rejects(read.access(join(ws, "missing.md")), { code: "ENOENT" });
   // A folder swapped for a link to Carl's Pi dir, and a link to the secrets file.
   rmSync(join(ws, "notes"), { recursive: true });
-  symlinkSync(join(home, "pi"), join(ws, "notes"));
+  symlinkSync(join(home, "engine"), join(ws, "notes"));
   symlinkSync(join(root, "vault.txt"), join(ws, "env"));
   await assert.rejects(ops.writeFile(join(ws, "notes", "ext.ts"), "pwned"), /not permitted/i);
-  assert.ok(!existsSync(join(home, "pi", "ext.ts")));
+  assert.ok(!existsSync(join(home, "engine", "ext.ts")));
   await assert.rejects(read.readFile(join(ws, "env")), /not permitted/i);
   await assert.rejects(ops.writeFile(join(ws, "env"), "x"), /not permitted/i);
   assert.equal(readFileSync(join(root, "vault.txt"), "utf8"), "VAULT=3:secret\n");

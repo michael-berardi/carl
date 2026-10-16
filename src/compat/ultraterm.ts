@@ -336,7 +336,7 @@ export class UltraTermCompat implements GatewayPlugin {
       json(res, 200, { object: "list", platform: "carl", data: [
         { name: "pi", label: "Pi built-ins", description: "Pi's own tools", enabled: true, configured: true, tools: gw.cfg.tools },
         { name: "carl", label: "Carl", description: "Psyche, messaging and schedules", enabled: true, configured: true, tools: ["decision_log", "shadow_note", "send_message", "schedule"] },
-        { name: "mcp", label: "MCP via codemode", description: "MCP servers reached through codemode scripts", enabled: gw.cfg.mcp, configured: existsSync(join(gw.cfg.home, "pi", "mcp.json")), tools: mcpServers(gw.cfg.home) },
+        { name: "mcp", label: "MCP via codemode", description: "MCP servers reached through codemode scripts", enabled: gw.cfg.mcp, configured: existsSync(join(gw.cfg.home, "mcp.json")), tools: mcpServers(gw.cfg.home) },
       ] }));
     api.route("GET", /^\/v1\/skills$/, (_q, res) => json(res, 200, { object: "list", data: listSkills(gw.cfg.skills) }));
   }
@@ -492,7 +492,7 @@ function persistModel(home: string, ref: string): void {
 }
 
 function mcpServers(home: string): string[] {
-  const file = join(home, "pi", "mcp.json");
+  const file = join(home, "mcp.json");
   if (!existsSync(file)) return [];
   try {
     return Object.keys(JSON.parse(readFileSync(file, "utf8")).mcpServers ?? {});

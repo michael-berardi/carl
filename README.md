@@ -1,8 +1,10 @@
 # Carl
 
-Carl is a small, fast bot gateway for getting work done with AI agents. One process runs one [Pi](https://pi.dev) agent per conversation and connects it to Telegram, a web app, an OpenAI-compatible API and a scheduler. It runs Claude through your own Claude Code login, GPT through your Codex login, or any model Pi supports.
+Carl is a small, fast bot gateway for getting work done with AI agents. One process runs one agent per conversation and connects it to Telegram, Slack, Discord, a web app, an OpenAI-compatible API and a scheduler. It runs Claude through your own Claude Code login, GPT through your Codex login, or any of about 40 other model providers.
 
-It is built the way Pi is built: a small core that does its job well, with everything else added as modules. Carl's own code is about 5,200 lines of TypeScript, plus a 500-line web app, with one runtime dependency (the Pi SDK). It runs from source on Node 22 with no build step.
+It is built the way [Pi](https://pi.dev) is built: a small core that does its job well, with everything else added as modules. Carl's own code is about 6,700 lines of TypeScript plus a 500-line web app. It runs from source on Node 22 with no build step and has one runtime dependency, the Pi SDK, which supplies the agent loop, sessions, compaction, MCP and the model providers. You never need to install or run Pi itself.
+
+The SDK carries every provider's client library, so a production install is about 160 MB on disk; only the providers you use are loaded, and a running gateway uses about 55 MB of memory.
 
 ## Why it is small
 
@@ -38,8 +40,8 @@ Then:
 2. Add your Telegram user id to `telegram.allowFrom` and `telegram.homeChat` in `~/.carl/carl.json`. Carl answers nobody else.
 3. Sign in to a model:
    - **Claude:** install Claude Code and run `claude auth login`.
-   - **GPT through Codex:** run `pi` and then `/login`.
-   - **Anything else Pi supports:** use Pi's own login or `models.json`.
+   - **GPT through Codex:** `carl login openai-codex`.
+   - **Anything else:** `carl login` lists the providers and which are already set up; `carl login <provider>` signs in (add `--api-key` for a key). Logins are stored in `~/.carl/agent/auth.json`; set `agentDir` to share another app's folder instead.
 4. Run `carl doctor`, then `carl gateway`.
 
 Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (or *Add to Dock*) turns it into a desktop app window.
@@ -109,9 +111,9 @@ Carl runs tools with your own permissions, because it does real work. Two layers
 **A kernel sandbox for everything the agent can influence (macOS).** Shell commands, MCP servers (except the ones you name in `trustedMcp`), the read, edit and write tools, speech-to-text and command schedules all run under one Seatbelt profile that:
 
 - lets the agent write only its working areas (`workspace`, `memory`, `media`, `spill`), the temp and cache folders tools expect, the npm cache and any folders you list in `agentWritable`. Everything else, including Carl's own files, programs on `PATH`, shell startup files, skills and your other projects, is read-only to it;
-- keeps Carl's own code, Pi extensions and the `.pi` folder unwritable even inside those areas, and keeps the working areas themselves from being moved or swapped for a link;
+- keeps Carl's own code, extensions and any `.pi` extension folder unwritable even inside those areas, and keeps the working areas themselves from being moved or swapped for a link;
 - closes UltraTerm's bot folder (`~/.hermes`: the old gateway's config, secrets and backups) except its `scripts`;
-- denies reads of credential files: Carl's (`.env`, configured env files, Pi's `auth.json`, OverSeer's local token) and the usual stores of your other tools (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.npmrc`, `~/.kube`, the GitHub CLI's and gcloud's config, Docker's config, Codex's and Claude Code's credential files, the Keychain files), and moving, renaming or hardlinking Carl's;
+- denies reads of credential files: Carl's (`.env`, configured env files, the model logins in `auth.json`, OverSeer's local token) and the usual stores of your other tools (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.npmrc`, `~/.kube`, the GitHub CLI's and gcloud's config, Docker's config, Codex's and Claude Code's credential files, the Keychain files), and moving, renaming or hardlinking Carl's;
 - blocks the routes that run work outside the sandbox or reach your credentials: `osascript`, `open`, `launchctl`, `crontab`, `at`, `shortcuts` and `sudo`, Apple Events, LaunchServices, tmux and Docker sockets, signals to other processes, the Keychain, your SSH agent, and Carl's own API port;
 - passes only an allowlist of environment variables (`PATH`, `HOME`, locale, terminal, proxy and similar). Carl's secrets and keys exported in your shell are dropped; list names the agent should get in `shellEnv` (their values may live in the env files).
 
@@ -157,24 +159,29 @@ Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 }
 ```
 
-MCP servers go in `~/.carl/pi/mcp.json` (the same format as Claude Desktop or Pi). Give them `"exposure": "codemode"` so they stay behind the codemode tool.
+MCP servers go in `~/.carl/mcp.json` (the same format as Claude Desktop). Give them `"exposure": "codemode"` so they stay behind the codemode tool.
 
 ## Commands
 
 ```
-carl gateway            run Telegram, the API, the web app and schedules
-carl doctor             check config, model logins, Telegram and files
+carl gateway            run Telegram, Slack, Discord, the API, the web app and schedules
+carl init               create ~/.carl with a starter carl.json
+carl login [provider]   list model providers, or sign in to one
+carl logout <provider>  remove a provider's stored credentials
+carl doctor             check config, model logins, channels and files
+carl status             the running gateway's status
 carl ask [-c key] text  one turn from the terminal
 carl prompt             the exact system prompt and tools, with token counts
 carl send -t telegram:<chat> text
 carl reflect            run the individuation pass now
 carl schedules          list schedules
+carl app [--install]    open the web app in its own window; --install adds Carl.app (macOS)
 ```
 
 ## Modules
 
 - **UltraTerm:** `"ultraterm": {"home": "~/.hermes"}` makes Carl a drop-in for UltraTerm's UltraBot slot. It writes the status, transcript and usage files UltraTerm reads and serves the routes its panels use. To run it in that slot, install `scripts/ultrabot-gateway.sh` as `~/.hermes/ultrabot-gateway.sh`: UltraTerm then starts Carl from a clean environment as its own child and restarts it if it exits. List the OverSeer and memory servers in `trustedMcp` so they run outside the sandbox (their acting tools still ask first).
-- **Your own extensions:** any Pi extension loads through `extensions`. That covers custom tools, providers, MCP bridges and delegation.
+- **Your own extensions:** any Pi-SDK extension loads through `extensions`. That covers custom tools, providers, MCP bridges and delegation.
 
 ## Development
 
@@ -184,8 +191,8 @@ npm run verify          # typecheck + unit tests
 npm run test:e2e        # real model, fake Telegram: 18 end-to-end steps
 ```
 
-`test/e2e.ts` drives the whole gateway against a fake Telegram Bot API and a temporary home. It uses your real Pi or Claude login, so set `CARL_E2E_MODEL` to choose the model.
+`test/e2e.ts` drives the whole gateway against a fake Telegram Bot API and a temporary home. It uses your real Codex or Claude login, so set `CARL_E2E_MODEL` to choose the model.
 
 ## License
 
-MIT. `vendor/ultracompress` is the UltraCompress Pi adapter (MIT). See `vendor/ultracompress/UPSTREAM.txt`.
+MIT. `vendor/ultracompress` is the UltraCompress adapter for the Pi SDK (MIT). See `vendor/ultracompress/UPSTREAM.txt`.

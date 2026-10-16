@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 import { Brain } from "./brain.ts";
 import { TelegramApi } from "./channels/telegram-api.ts";
 import { chunkMarkdown, htmlToPlain, markdownToTelegramHtml } from "./channels/format.ts";
-import { carlHome, ConfigError, ensureHome, loadConfig, secret } from "./config.ts";
+import { carlHome, ConfigError, ensureHome, loadConfig, mcpFile, secret } from "./config.ts";
 import { Gateway } from "./gateway.ts";
 import { Log } from "./log.ts";
 import { Psyche } from "./psyche.ts";
@@ -14,6 +14,7 @@ import { carlTools } from "./tools.ts";
 import { VERSION } from "./version.ts";
 import { loadPlugins } from "./plugins.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
+import { login, logout } from "./login.ts";
 import { spawnSync } from "node:child_process";
 
 const HELP = `carl ${VERSION}: the minimal bot gateway
@@ -29,6 +30,8 @@ const HELP = `carl ${VERSION}: the minimal bot gateway
   carl schedules                    list schedules
   carl prompt [--full]              the system prompt and tools a new conversation gets, with sizes
   carl app [--install]              open the web app in its own window; --install adds Carl.app (macOS)
+  carl login [provider] [--api-key] list model providers, or sign in to one (Claude: claude auth login)
+  carl logout <provider>            remove a provider's stored credentials
 
 Environment: CARL_HOME (default ~/.carl).`;
 
@@ -65,6 +68,10 @@ async function main(argv: string[]): Promise<number> {
       return prompt(rest);
     case "app":
       return app(rest);
+    case "login":
+      return login(loadConfig(), rest);
+    case "logout":
+      return logout(loadConfig(), rest);
   }
   console.error(`carl: unknown command "${cmd}"\n\n${HELP}`);
   return 64;
@@ -140,7 +147,8 @@ function init(): number {
 Next:
   1. Put TELEGRAM_BOT_TOKEN and CARL_API_KEY (16+ chars) in ${join(home, ".env")} (mode 600).
   2. Add your Telegram user id to telegram.allowFrom and telegram.homeChat in ${file}.
-  3. Sign in to a model provider with Pi (\`pi\` then /login), or point piAgentDir at an existing Pi agent dir.
+  3. Sign in to a model: \`carl login\` lists providers (\`carl login openai-codex\` for GPT through Codex);
+     for Claude, install Claude Code and run \`claude auth login\`.
   4. Edit ${join(home, "psyche", "persona.md")} and self.md, then run \`carl doctor\` and \`carl gateway\`.`);
   return 0;
 }
@@ -214,7 +222,7 @@ async function doctor(): Promise<number> {
         return `Claude Code logged in: ${lines.join(", ")}`;
       }
       const available = brain.listModels().filter((m) => m.startsWith(provider + "/"));
-      if (!available.length) throw new Error(`no credentials for ${provider} in ${c.piAgentDir}/auth.json (sign in with pi /login)`);
+      if (!available.length) throw new Error(`no credentials for ${provider} in ${c.agentDir}/auth.json (sign in with \`carl login ${provider}\`)`);
       return `${provider} signed in`;
     });
   }
@@ -238,7 +246,7 @@ async function doctor(): Promise<number> {
   for (const f of c.contextFiles) await check("context file", () => { if (!existsSync(f)) throw new Error(`${f} is missing`); return f; });
   for (const d of c.skills) await check("skills dir", () => { if (!existsSync(d)) throw new Error(`${d} is missing`); return d; });
   if (c.stt) await check("speech-to-text", () => { if (!existsSync(c.stt![0])) throw new Error(`${c.stt![0]} is missing`); return c.stt!.join(" "); });
-  await check("mcp", () => (existsSync(join(c.home, "pi", "mcp.json")) ? `${join(c.home, "pi", "mcp.json")} (servers via codemode)` : "no mcp.json (no MCP servers)"));
+  await check("mcp", () => (existsSync(mcpFile(c)) ? `${mcpFile(c)} (servers via codemode)` : "no mcp.json (no MCP servers)"));
   await brain.shutdown(); // removes its state/run/<pid> folder
   return failed ? 1 : 0;
 }
