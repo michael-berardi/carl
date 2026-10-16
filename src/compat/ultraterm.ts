@@ -11,7 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { TranscriptEvent } from "../brain.ts";
 import type { Gateway, GatewayPlugin } from "../gateway.ts";
 import { json } from "../server.ts";
-import { VERSION } from "../version.ts";
+import { COMMIT, VERSION } from "../version.ts";
 
 const INTAKE_CONTRACT = "hermes.canonical-intake.v1";
 const MODEL_CONTRACT = "hermes.canonical-model-selection.v1";
@@ -150,7 +150,7 @@ export class UltraTermCompat implements GatewayPlugin {
       },
       updated_at: now,
       code_version: `carl ${VERSION}`,
-      code_sha: VERSION,
+      code_sha: COMMIT,
     };
     const file = join(this.opts.home, "gateway_state.json");
     const tmp = `${file}.carl-${process.pid}`;

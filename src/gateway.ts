@@ -12,7 +12,7 @@ import { type Job, Scheduler } from "./scheduler.ts";
 import { cleanEnv, sandboxArgv } from "./sandbox.ts";
 import { ApiServer } from "./server.ts";
 import { carlTools, type Outbox } from "./tools.ts";
-import { VERSION } from "./version.ts";
+import { COMMIT, VERSION } from "./version.ts";
 
 export const ULTRATERM_LEARNING = "Lessons come from UltraTerm Dream and Nightmare: they read Carl's shadow and decision ledgers with every other agent's work, and approved lessons reach Carl through shared memory. Carl runs no separate individuation pass.";
 
@@ -67,7 +67,7 @@ export class Gateway {
 
   async start(): Promise<void> {
     this.claimPid();
-    this.log.info("carl starting", { version: VERSION, home: this.cfg.home, model: this.cfg.model, pid: process.pid });
+    this.log.info("carl starting", { version: VERSION, commit: COMMIT, home: this.cfg.home, model: this.cfg.model, pid: process.pid });
     await this.brain.init();
     if (this.cfg.telegram.enabled) {
       const token = secret(this.cfg.home, this.cfg.telegram.tokenEnv, this.cfg.envFiles);
@@ -177,6 +177,7 @@ export class Gateway {
     return {
       name: this.cfg.name,
       version: VERSION,
+      commit: COMMIT,
       pid: process.pid,
       startedAt: this.startedAt.toISOString(),
       model: this.cfg.model,
