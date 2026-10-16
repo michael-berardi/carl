@@ -19,7 +19,7 @@ import { spawnSync } from "node:child_process";
 
 const HELP = `carl ${VERSION}: the minimal bot gateway
 
-  carl gateway [--verbose]          run the gateway (Telegram, API, schedules) in the foreground
+  carl gateway [--verbose]          run the gateway (channels, API, webhooks, schedules)
   carl init                         create CARL_HOME (${carlHome()}) with a starter carl.json
   carl status [--json]              the running gateway's status
   carl doctor                       check config, model, credentials and channels
