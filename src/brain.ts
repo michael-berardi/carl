@@ -166,8 +166,10 @@ export class Brain extends EventEmitter {
     for (const p of this.cfg.contextFiles) if (!free.some((w) => (p + "/").startsWith(w))) add(p);
     // A protected folder that holds a working area would lock the agent out of it (denies come after the allows):
     // such folders are left out, and the programs in them are still pinned one by one (pinnedPaths).
+    // Compared as given and resolved: /var and /private/var (or a linked home) name the same folder.
+    const freeReal = writablePaths(this.cfg).map((w) => realOf(w).replace(/\/+$/, "") + "/");
     return [...out].filter((p) => {
-      const inside = free.some((w) => w.startsWith(p.replace(/\/+$/, "") + "/"));
+      const inside = free.some((w) => w.startsWith(p.replace(/\/+$/, "") + "/")) || freeReal.some((w) => w.startsWith(realOf(p).replace(/\/+$/, "") + "/"));
       if (inside) this.log.warn("not protecting a folder that contains a working area; its programs are pinned individually", { path: p });
       return !inside;
     });
@@ -260,6 +262,10 @@ export class Brain extends EventEmitter {
       if (bin && existsSync(ext)) {
         this.ultracompressExt = ext;
         this.log.info("compaction: UltraCompress", { bin });
+        // UltraCompress keeps up to ~25k tokens of the newest turns verbatim; below about 40k there is often nothing
+        // left to condense, it declines every time, and the context grows past the budget.
+        if (this.cfg.contextBudget < 40_000)
+          this.log.warn("contextBudget is below 40k tokens: UltraCompress keeps up to 25k tokens of recent turns verbatim and may find nothing to compact", { contextBudget: this.cfg.contextBudget });
       } else {
         this.log.info("compaction: Pi built-in summary (no ultracompress binary found)");
       }
@@ -614,6 +620,13 @@ export class Brain extends EventEmitter {
 
   private observe(convo: Conversation): void {
     convo.session.subscribe((e: AgentSessionEvent) => {
+      const ev = e as any;
+      if (ev.type === "compaction_start") this.log.info("compaction started", { key: convo.key, reason: ev.reason });
+      if (ev.type === "compaction_end") {
+        const fields = { key: convo.key, reason: ev.reason, aborted: !!ev.aborted, willRetry: !!ev.willRetry, tokensBefore: ev.result?.tokensBefore };
+        if (ev.errorMessage) this.log.error("compaction failed", { ...fields, error: ev.errorMessage });
+        else this.log.info(ev.result ? "compaction finished" : "compaction ended without a result", fields);
+      }
       if (e.type !== "message_end") return;
       const m = e.message as any;
       if (m.role === "assistant") {

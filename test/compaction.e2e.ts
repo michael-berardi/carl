@@ -1,4 +1,4 @@
-// Real compaction: a tiny context budget forces auto-compaction; the fact from before it must survive
+// Real compaction: a small context budget (above UltraCompress's 25k verbatim tail) forces auto-compaction; the fact from before it must survive
 // (through the brief or ultracompress_recall). Model from CARL_E2E_MODEL (default GPT-6.1 Sol).
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -10,7 +10,7 @@ import { Log } from "../src/log.ts";
 import { Psyche } from "../src/psyche.ts";
 
 const home = mkdtempSync(join(process.env.CARL_E2E_DIR ?? tmpdir(), "carl-compaction-"));
-writeFileSync(join(home, "carl.json"), JSON.stringify({ model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol", agentDir: process.env.CARL_E2E_AGENT_DIR ?? join(homedir(), ".pi", "agent"), thinking: "low", contextBudget: 12_000, keepRecentTokens: 2_000, tools: ["read", "bash"], toolResultMaxChars: 40_000, telegram: { enabled: false }, api: { enabled: false } }));
+writeFileSync(join(home, "carl.json"), JSON.stringify({ model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-sol", agentDir: process.env.CARL_E2E_AGENT_DIR ?? join(homedir(), ".pi", "agent"), thinking: "low", contextBudget: 40_000, keepRecentTokens: 2_000, tools: ["read", "bash"], toolResultMaxChars: 40_000, telegram: { enabled: false }, api: { enabled: false } }));
 mkdirSync(join(home, "psyche"), { recursive: true });
 mkdirSync(join(home, "workspace"), { recursive: true });
 const cfg = loadConfig(home);
@@ -25,7 +25,7 @@ const say = async (text: string) => {
   return r;
 };
 await say("Remember this codename for later: AMBER-HERON-7. Reply OK.");
-for (let i = 0; i < 4; i++) await say(`Run: seq ${i * 4000} ${i * 4000 + 2500} | paste -sd, - and reply only with the count of numbers you saw.`);
+for (let i = 0; i < 4; i++) await say(`Run exactly this bash command, unchanged: seq ${i * 20000} ${i * 20000 + 9000} | paste -sd, - . Then reply only with the 100th number it printed.`);
 const file = readdirSync(join(home, "sessions", "cli_compaction")).filter((f) => f.endsWith(".jsonl")).map((f) => join(home, "sessions", "cli_compaction", f))[0];
 const entries = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
 const compactions = entries.filter((e) => e.type === "compaction");
