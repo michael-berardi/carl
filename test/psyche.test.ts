@@ -58,3 +58,11 @@ test("under UltraTerm learning the private lessons layer stays out of the prompt
   p.recordShadow({ kind: "tool_error", conversation: "c", summary: "codemode failed" });
   assert.equal(p.shadowSince().length, 1);
 });
+
+test("a night with no new lessons is a no-op, not an error", () => {
+  const p = new Psyche(home());
+  assert.equal(p.writeIntegrated("- Keep replies short."), 1);
+  assert.equal(p.writeIntegrated("None."), 0);
+  assert.equal(p.writeIntegrated(""), 0);
+  assert.equal(p.read("integrated.md"), "- Keep replies short.");
+});

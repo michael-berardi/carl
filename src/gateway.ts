@@ -266,9 +266,10 @@ export class Gateway {
       { system: "You are Carl reflecting on your own conduct. Be exact and unsparing; cite evidence; never invent incidents." },
     );
     const parts = parseIndividuation(reply);
-    if (!parts.lessons) throw new Error("individuation reply had no Lessons section");
-    this.psyche.writeIntegrated(parts.lessons);
-    this.log.info("individuation complete", { shadow: shadow.length, replies: replies.length });
+    // Finding nothing new is a normal night, not a failed schedule; the existing lessons stay.
+    const written = this.psyche.writeIntegrated(parts.lessons);
+    if (!parts.lessons) this.log.warn("individuation reply had no Lessons section; lessons left unchanged", { replyStart: reply.slice(0, 200) });
+    this.log.info(written ? "individuation complete" : "individuation complete: no new lessons", { shadow: shadow.length, replies: replies.length, lessons: written });
     const notable = [parts.contradictions, parts.proposals].some((s) => s && !/^none( found)?\.?$/i.test(s.trim()));
     if (!notable) return "";
     return `Self vs. behaviour since ${since?.slice(0, 10) ?? "yesterday"} (${shadow.length} shadow entries).\n\n**Contradictions**\n${parts.contradictions}\n\n**Proposals**\n${parts.proposals}`;
@@ -278,7 +279,7 @@ export class Gateway {
     tg.commands.set("schedules", { help: "List schedules", run: async () => "```\n" + this.scheduler.describe() + "\n```" });
     tg.commands.set("reflect", {
       help: "Run the individuation pass now",
-      run: async () => (await this.individuate()) || `Lessons updated; nothing to flag.\n\n${this.psyche.read("integrated.md").slice(0, 2_500)}`,
+      run: async () => (await this.individuate()) || `Nothing to flag. Current lessons:\n\n${this.psyche.read("integrated.md").slice(0, 2_500) || "(none yet)"}`,
     });
     tg.commands.set("shadow", {
       help: "Recent shadow entries",
