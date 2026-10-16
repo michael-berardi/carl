@@ -1,4 +1,5 @@
 // Telegram channel: long polling, allowlist, streamed replies by editing one draft message, media in, commands.
+import { approvalSummary } from "../approval-text.ts";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -501,7 +502,8 @@ export class TelegramChannel {
     // Shown exactly, escaped, with invisible and direction-changing characters made visible; never truncated:
     // a command too long to read in chat is not approvable in chat.
     const visible = visibleControls(command);
-    const html = `<b>Approve?</b> ${escapeHtml(reason)}\n<pre>${escapeHtml(visible)}</pre>`;
+    // One plain sentence first; the exact call follows in a collapsed quote, still complete and never truncated.
+    const html = `<b>Approve?</b> ${escapeHtml(approvalSummary(command, reason))}\n<blockquote expandable><pre>${escapeHtml(visible)}</pre></blockquote>`;
     if (html.length > 4_000) {
       await this.api.sendMessage(chatId, `Refused without asking: a ${reason} request of ${command.length} characters is too long to review here.`).catch(() => {});
       return "denied";
