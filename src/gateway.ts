@@ -14,6 +14,8 @@ import { ApiServer } from "./server.ts";
 import { carlTools, type Outbox } from "./tools.ts";
 import { VERSION } from "./version.ts";
 
+export const ULTRATERM_LEARNING = "Lessons come from UltraTerm Dream and Nightmare: they read Carl's shadow and decision ledgers with every other agent's work, and approved lessons reach Carl through shared memory. Carl runs no separate individuation pass.";
+
 export interface GatewayPlugin {
   name: string;
   start(gw: Gateway): Promise<void> | void;
@@ -42,7 +44,7 @@ export class Gateway {
     this.cfg = cfg;
     ensureHome(cfg);
     this.log = new Log(join(cfg.home, "logs", "carl.log"), opts.verbose);
-    this.psyche = new Psyche(cfg.home);
+    this.psyche = new Psyche(cfg.home, cfg.learning);
     this.psyche.seed();
     this.pidFile = join(cfg.home, "state", "gateway.pid");
     const outbox: Outbox = { send: (target, text) => this.send(target, text) };
@@ -125,7 +127,8 @@ export class Gateway {
     if (this.telegram) await this.telegram.start();
     if (this.slack) await this.slack.start();
     if (this.discord) await this.discord.start();
-    this.scheduler.ensureBuiltin("individuation", "Individuation", "40 5 * * *");
+    if (this.cfg.learning === "carl") this.scheduler.ensureBuiltin("individuation", "Individuation", "40 5 * * *");
+    else this.scheduler.removeBuiltin("individuation"); // UltraTerm Dream and Nightmare own the learning loop
     this.scheduler.start();
     this.writeStatus();
     this.statusTimer = setInterval(() => this.writeStatus(), 15_000);
@@ -243,6 +246,7 @@ export class Gateway {
 
   /** Daily individuation: Self against behaviour; rewrites integrated.md and reports contradictions and proposals. */
   async individuate(): Promise<string> {
+    if (this.cfg.learning === "ultraterm") return ULTRATERM_LEARNING;
     const since = this.psyche.lastIndividuation();
     const shadow = this.psyche.shadowSince(since);
     const decisions = this.psyche.decisions(30);

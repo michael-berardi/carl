@@ -195,7 +195,7 @@ async function doctor(): Promise<number> {
   if (!cfg) return 1;
   const c = cfg;
   const log = new Log(undefined);
-  const brain = new Brain(c, new Psyche(c.home), log, () => []);
+  const brain = new Brain(c, new Psyche(c.home, c.learning), log, () => []);
   await check("model", async () => {
     await brain.init();
     const m = brain.model(c.model);
@@ -261,7 +261,7 @@ async function ask(args: string[]): Promise<number> {
   const cfg = loadConfig();
   ensureHome(cfg);
   const log = new Log(join(cfg.home, "logs", "carl.log"));
-  const psyche = new Psyche(cfg.home);
+  const psyche = new Psyche(cfg.home, cfg.learning);
   psyche.seed();
   const scheduler = new Scheduler(cfg.home, log, { prompt: async () => "", builtin: {}, deliver: async () => {} });
   const brain = new Brain(cfg, psyche, log, () => carlTools(psyche, scheduler, { send: async () => "Not delivered: carl ask has no channels." }));
@@ -329,7 +329,7 @@ async function reflect(): Promise<number> {
 async function prompt(args: string[]): Promise<number> {
   const cfg = loadConfig();
   ensureHome(cfg);
-  const psyche = new Psyche(cfg.home);
+  const psyche = new Psyche(cfg.home, cfg.learning);
   psyche.seed();
   const log = new Log(undefined);
   const scheduler = new Scheduler(cfg.home, log, { prompt: async () => "", builtin: {}, deliver: async () => {} });

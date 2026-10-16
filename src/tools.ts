@@ -48,7 +48,7 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox):
     name: "shadow_note",
     label: "Shadow note",
     description:
-      "Own a failure in the open: record something you got wrong, avoided, or claimed without evidence. It feeds the daily individuation pass that turns failures into lessons. Use it the moment you notice, not to apologise.",
+      `Own a failure in the open: record something you got wrong, avoided, or claimed without evidence. It feeds ${psyche.learning === "ultraterm" ? "UltraTerm Dream and Nightmare, which turn failures into shared lessons and fixes" : "the daily individuation pass that turns failures into lessons"}. Use it the moment you notice, not to apologise.`,
     parameters: Type.Object({
       summary: Type.String({ description: "What went wrong, in one sentence" }),
       evidence: Type.Optional(Type.String({ description: "The concrete evidence (command output, the claim, the correction)" })),

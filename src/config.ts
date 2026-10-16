@@ -67,6 +67,10 @@ export interface CarlConfig {
   idleResetMinutes: number;
   /** UltraTerm compatibility (the UltraBot slot): home UltraTerm reads, and the ut-overseer binary. */
   ultraterm?: { home: string; overseerBin: string };
+  /** Who turns the shadow into lessons: "carl" (the daily individuation pass and psyche/integrated.md) or "ultraterm"
+   *  (UltraTerm Dream and Nightmare read the shadow and decision ledgers; lessons arrive through shared memory).
+   *  Default: "ultraterm" when the UltraTerm module is on, else "carl". */
+  learning: "carl" | "ultraterm";
   /** Claude route through the official Claude Code CLI: binary and login config dirs (first preferred). */
   claude: { enabled: boolean; command?: string; configDirs: string[] };
   /** Inbound webhooks by name (POST /v1/hooks/<name>). */
@@ -203,6 +207,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     ultraterm: raw.ultraterm
       ? { home: abs(str(raw.ultraterm.home, "~/.hermes", "ultraterm.home"), home), overseerBin: abs(str(raw.ultraterm.overseerBin, "~/.ultraterm/bin/ut-overseer", "ultraterm.overseerBin"), home) }
       : undefined,
+    learning: learningMode(raw.learning, !!raw.ultraterm),
     envFiles: strList(raw.envFiles, "envFiles").map((p) => abs(p, home)),
     shellEnv: strList(raw.shellEnv, "shellEnv"),
     agentWritable: strList(raw.agentWritable, "agentWritable").map((p) => abs(p, home)),
@@ -287,4 +292,10 @@ function hooksOf(v: unknown): Record<string, { prompt: string; deliver: string; 
     out[name] = { prompt: h.prompt, deliver: typeof h.deliver === "string" ? h.deliver : "home", secretEnv: typeof h.secretEnv === "string" ? h.secretEnv : undefined };
   }
   return out;
+}
+
+function learningMode(v: unknown, ultraterm: boolean): "carl" | "ultraterm" {
+  if (v === undefined) return ultraterm ? "ultraterm" : "carl";
+  if (v === "carl" || v === "ultraterm") return v;
+  throw new Error(`learning must be "carl" or "ultraterm" (got ${JSON.stringify(v)})`);
 }
