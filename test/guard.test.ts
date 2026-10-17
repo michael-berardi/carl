@@ -96,3 +96,17 @@ test("trusted MCP tools ask first unless they only read", async () => {
   assert.equal(mcpVerdict("mcp__sandboxed__anything", rules).level, "ok", "untrusted servers run in the sandbox instead");
   assert.equal(mcpVerdict("bash", rules).level, "ok");
 });
+
+test("an operator tool runs on the operator's own words only, quoted from their latest message in an attended chat", async () => {
+  const { mcpVerdict } = await import("../src/guard.ts");
+  // Mike 2026-10-17: a relay he asked UltraBot for stopped at an "Approve?" card instead of completing.
+  const rules = (text: string | undefined) => ({ trustedMcp: ["overseer"], operatorTools: [["^overseer/overseer_relay$", "relay on Mike's words"]] as [string, string][], operatorText: () => text });
+  const tool = "mcp__overseer__overseer_relay";
+  const asked = "Please tell slot 1 to check the failing build now";
+  assert.equal(mcpVerdict(tool, rules(asked), { evidence: "tell slot 1 to check the failing build" }).level, "ok");
+  assert.equal(mcpVerdict(tool, rules(asked), { evidence: "TELL   slot 1 to check the failing build" }).level, "ok"); // case and spacing aside
+  assert.equal(mcpVerdict(tool, rules(asked), { evidence: "tell slot 1 to delete everything" }).level, "dangerous");
+  assert.equal(mcpVerdict(tool, rules(asked), { evidence: "slot 1" }).level, "dangerous"); // too short to be his words
+  assert.equal(mcpVerdict(tool, rules(undefined), { evidence: "tell slot 1 to check the failing build" }).level, "dangerous"); // schedule, API
+  assert.equal(mcpVerdict("mcp__overseer__overseer_send", rules(asked), { evidence: "tell slot 1 to check the failing build" }).level, "dangerous");
+});
