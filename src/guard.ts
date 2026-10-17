@@ -32,6 +32,14 @@ export interface GuardRules {
   trustedMcp?: string[];
   /** Extra "server/tool" patterns of trusted servers that run without asking: [regex, reason]. */
   allowTools?: [string, string][];
+  /**
+   * Trusted-server tools that run without asking only on the operator's own words: the run must be the operator's attended chat and the
+   * call's `evidence` must appear verbatim in their latest message (Mike 2026-10-17: a relay he asked for stopped at an "Approve?" card).
+   * Anything else asks as before.
+   */
+  operatorTools?: [string, string][];
+  /** The operator's latest message in this conversation when it is their attended chat; undefined for schedules, the API and webhooks. */
+  operatorText?: () => string | undefined;
 }
 
 /** Remove quoting so `"rm" -rf '~'` reads as `rm -rf ~`. */
@@ -306,7 +314,7 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
           // Trusted MCP servers act outside the sandbox: everything but their read-only tools asks first, also when
           // a codemode script calls them.
           subject = `${event.toolName}\n${JSON.stringify(event.input ?? {}, null, 1)}`;
-          verdict = mcpVerdict(event.toolName, rules);
+          verdict = mcpVerdict(event.toolName, rules, event.input ?? {});
         } else {
           return undefined;
         }
@@ -344,12 +352,25 @@ export const DEFAULT_TRUSTED_READONLY: [string, string][] = [
 /** Pi names MCP tools mcp__<server>__<tool> with everything but [A-Za-z0-9_] turned into "_". */
 const mcpPrefix = (server: string) => `mcp__${server.replace(/[^A-Za-z0-9_]/g, "_")}__`;
 
-export function mcpVerdict(toolName: string, rules: GuardRules): Verdict {
+const squash = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+
+/** True when `evidence` is the operator's own words: non-trivial and verbatim (whitespace and case aside) in their latest message. */
+export function operatorWordsMatch(evidence: unknown, operatorText: string | undefined): boolean {
+  const ev = squash(String(evidence ?? ""));
+  return !!operatorText && ev.length >= 8 && squash(operatorText).includes(ev);
+}
+
+export function mcpVerdict(toolName: string, rules: GuardRules, input?: Record<string, unknown>): Verdict {
   if (!toolName.startsWith("mcp__")) return { level: "ok" };
   const server = (rules.trustedMcp ?? []).find((s) => toolName.startsWith(mcpPrefix(s)));
   if (!server) return { level: "ok" }; // an untrusted server runs inside the sandbox, like the shell
   const tool = toolName.slice(mcpPrefix(server).length);
   for (const [src] of [...DEFAULT_TRUSTED_READONLY, ...(rules.allowTools ?? [])]) if (new RegExp(src).test(`${server}/${tool}`)) return { level: "ok" };
+  for (const [src] of rules.operatorTools ?? []) {
+    if (!new RegExp(src).test(`${server}/${tool}`)) continue;
+    if (operatorWordsMatch(input?.evidence, rules.operatorText?.())) return { level: "ok" };
+    return { level: "dangerous", reason: `${server} ${tool} runs on your own words only, quoted from your message in this chat` };
+  }
   // Unknown names (including Pi's hashed ones) ask: the list says what is safe, not what is dangerous.
   return { level: "dangerous", reason: `${server} ${tool} acts outside the sandbox with your permissions` };
 }

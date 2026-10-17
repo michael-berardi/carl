@@ -91,6 +91,8 @@ interface Conversation {
   compacting?: boolean;
   lastActivity: number;
   source: Inbound["source"];
+  /** The operator's latest message when this is their attended chat (telegram or the local CLI); never set by schedules or the API. */
+  operatorText?: string;
   pending?: Promise<RunResult>;
   /** Set by stop(): an abort the operator asked for is "stopped", not "failed". */
   stopRequested?: boolean;
@@ -411,7 +413,7 @@ export class Brain extends EventEmitter {
     const extensionFactories: InlineExtension[] = [
       shellGuard(this.approver(key), (command, why) =>
         this.psyche.recordShadow({ kind: "tool_error", conversation: key, summary: `blocked: ${why}`, evidence: command.slice(0, 500) }),
-        this.guardRules()),
+        { ...this.guardRules(), operatorText: () => this.conversations.get(key)?.operatorText }),
       resultBudget(join(this.cfg.home, "spill"), this.cfg.toolResultMaxChars),
     ];
     if (this.cfg.mcp && existsSync(mcpFile(this.cfg)) && this.mcpLoader) {
@@ -518,6 +520,7 @@ export class Brain extends EventEmitter {
     // API clients expect an answer to each request: wait for the running turn, then run. Chat steers.
     while (convo.busy && convo.pending && (input.source !== "telegram" || convo.compacting)) await convo.pending.catch(() => {});
     this.emitTranscript(convo, { role: "user", text: input.text, source: input.source });
+    convo.operatorText = input.source === "telegram" || input.source === "cli" ? input.text : undefined;
     if (convo.busy) {
       await convo.session.steer(text, input.images);
       this.log.info("steered into running turn", { key });
