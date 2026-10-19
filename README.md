@@ -53,7 +53,8 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
 ## What you get
 
 - **Telegram, Slack and Discord:**
-  - Replies stream into a draft message as Carl writes them.
+  - Answers, not progress: the chat gets one final reply, with no draft frame and no tool line. Set `telegram.stream` to `true` to watch replies being written instead (Telegram only).
+  - Every message Carl delivers on Telegram is recorded in UltraTerm's UltraBot message log (`~/.ultraterm/logs/ultrabot-messages/hermes.jsonl`) when `ultraterm` is configured, so `utp ultrabot audit` covers a Carl-served chat.
   - A message sent while Carl is working joins the current turn instead of waiting in a queue.
   - `/stop`, `/new`, `/status`, `/model`, `/compact` and `/mirror` work at any time.
   - Voice notes go through any speech-to-text command you configure; photos and files go to the model.

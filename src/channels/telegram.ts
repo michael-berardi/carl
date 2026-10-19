@@ -8,6 +8,7 @@ import { cleanEnv, readNoFollow, sandboxArgv } from "../sandbox.ts";
 import { type Brain, type RunResult, toolsRanAfter } from "../brain.ts";
 import type { CarlConfig } from "../config.ts";
 import type { Log } from "../log.ts";
+import { recordDeliveries } from "../message-log.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
 import { chunkMarkdown, escapeHtml, htmlToPlain, markdownToTelegramHtml, visibleControls } from "./format.ts";
 import { type InlineButton, TelegramApi, TelegramError, type TgCallbackQuery, type TgMessage } from "./telegram-api.ts";
@@ -49,6 +50,9 @@ export class TelegramChannel {
     this.brain = brain;
     this.log = log;
     this.api = new TelegramApi(token, cfg.telegram.apiBase);
+    // Every delivered message (answer, draft frame, edit, deletion) is recorded where `utp ultrabot audit` reads it.
+    // The file belongs to UltraTerm, so it is written only for an installation wired to UltraTerm (or a test switch).
+    recordDeliveries(this.api, !!cfg.ultraterm, (msg, data) => this.log.warn(msg, data));
     this.offsetFile = join(cfg.home, "state", "telegram-offset.json");
     if (existsSync(this.offsetFile)) {
       try { this.offset = JSON.parse(readFileSync(this.offsetFile, "utf8")).offset ?? 0; } catch { this.offset = 0; }

@@ -8,6 +8,7 @@ import { chunkMarkdown, htmlToPlain, markdownToTelegramHtml } from "./channels/f
 import { carlHome, ConfigError, ensureHome, loadConfig, mcpFile, secret } from "./config.ts";
 import { Gateway } from "./gateway.ts";
 import { Log } from "./log.ts";
+import { recordDeliveries } from "./message-log.ts";
 import { Psyche } from "./psyche.ts";
 import { Scheduler } from "./scheduler.ts";
 import { carlTools } from "./tools.ts";
@@ -304,6 +305,8 @@ async function send(args: string[]): Promise<number> {
     const token = secret(cfg.home, cfg.telegram.tokenEnv, cfg.envFiles);
     if (!token) throw new Error(`${cfg.telegram.tokenEnv} is not set`);
     const api = new TelegramApi(token, cfg.telegram.apiBase);
+    // A `carl send` lands in the operator's chat like any other send: record it for `utp ultrabot audit` too.
+    recordDeliveries(api, !!cfg.ultraterm, (msg, data) => console.error(`carl: ${msg} ${JSON.stringify(data ?? {})}`));
     const ids: number[] = [];
     for (const chunk of chunkMarkdown(text)) {
       const html = markdownToTelegramHtml(chunk);

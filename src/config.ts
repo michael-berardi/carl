@@ -11,7 +11,7 @@ export interface TelegramConfig {
   tokenEnv: string;
   /** Chat that receives schedule results and alerts by default. */
   homeChat?: number;
-  /** Stream replies by editing a draft message. */
+  /** Stream replies by editing a draft message. Off by default: the chat shows one final answer and no tool line. */
   stream: boolean;
   /** Bot API base URL (a relay can stand in for api.telegram.org). */
   apiBase: string;
@@ -178,7 +178,9 @@ export function loadConfig(home = carlHome()): CarlConfig {
       }),
       tokenEnv: str(tg.tokenEnv, "TELEGRAM_BOT_TOKEN", "telegram.tokenEnv"),
       homeChat: tg.homeChat === undefined ? undefined : int(tg.homeChat, 0, "telegram.homeChat", Number.MIN_SAFE_INTEGER),
-      stream: tg.stream === undefined ? true : bool(tg.stream, "telegram.stream"),
+      // Answers, not progress: off unless the operator opts in. A draft is only ever shown when this is true, and
+      // the tool line is only rendered inside a draft, so streaming off means one final message and nothing else.
+      stream: tg.stream === undefined ? false : bool(tg.stream, "telegram.stream"),
       apiBase: str(tg.apiBase, "https://api.telegram.org", "telegram.apiBase").replace(/\/+$/, ""),
     },
     discord: {
