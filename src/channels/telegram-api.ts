@@ -55,14 +55,25 @@ const sleep = (ms: number, signal?: AbortSignal) =>
 export class TelegramApi {
   private readonly base: string;
   private readonly fileBase: string;
+  /** Called with every Bot API call Telegram accepted. The Telegram channel uses it to record delivered messages. */
+  onDelivered?: (method: string, body: Record<string, unknown>, result: unknown) => void;
   constructor(token: string, apiBase = "https://api.telegram.org") {
     if (!/^\d+:[\w-]{20,}$/.test(token)) throw new Error("Telegram bot token is malformed (expected <digits>:<secret>)");
     this.base = `${apiBase}/bot${token}`;
     this.fileBase = `${apiBase}/file/bot${token}`;
   }
 
-  /** Call a Bot API method. Retries network errors and 5xx twice and honours 429 retry_after (up to 60 s). */
+  /** Call a Bot API method and report what it delivered. Delivery recording never changes the result. */
   async call<T>(method: string, body: Record<string, unknown> = {}, opts: { signal?: AbortSignal; timeoutMs?: number; retries?: number } = {}): Promise<T> {
+    const result = await this.request<T>(method, body, opts);
+    try {
+      this.onDelivered?.(method, body, result);
+    } catch {}
+    return result;
+  }
+
+  /** Call a Bot API method. Retries network errors and 5xx twice and honours 429 retry_after (up to 60 s). */
+  private async request<T>(method: string, body: Record<string, unknown> = {}, opts: { signal?: AbortSignal; timeoutMs?: number; retries?: number } = {}): Promise<T> {
     const retries = opts.retries ?? 2;
     for (let attempt = 0; ; attempt++) {
       let res: Response;
@@ -154,6 +165,9 @@ export class TelegramApi {
     const res = await fetch(`${this.base}/sendDocument`, { method: "POST", body: form, signal: AbortSignal.timeout(120_000) });
     const json = (await res.json()) as { ok: boolean; result?: TgMessage; error_code?: number; description?: string };
     if (!json.ok) throw new TelegramError("sendDocument", json.error_code ?? res.status, json.description ?? "unknown error");
+    try {
+      this.onDelivered?.("sendDocument", { chat_id: chatId, caption, document: { file_name: fileName } }, json.result);
+    } catch {}
     return json.result!;
   }
 
