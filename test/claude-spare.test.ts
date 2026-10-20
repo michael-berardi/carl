@@ -2,12 +2,35 @@
 // Runs the real Claude Code CLI against a loopback fake upstream; skipped when the CLI is not installed.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { disposeSpares, resolveClaude, spareCount, streamClaude } from "../src/providers/claude-code.ts";
 
 const sse = (o: any) => `event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`;
 
-test("a tool round pre-starts the next call's process; a different request shape does not use it", { skip: !resolveClaude(undefined, process.env) && "claude CLI not installed" }, async () => {
+// This test drives the real CLI, so it needs one that is installed *and* logged in: an expired OAuth session would
+// otherwise fail the suite for a reason that has nothing to do with Carl. `auth status` is a local check (no network,
+// no quota); a CLI too old to answer it keeps the old behaviour and runs the test.
+function claudeSkip(): string | false {
+  const bin = resolveClaude(undefined, process.env);
+  if (!bin) return "claude CLI not installed";
+  let out = "";
+  try {
+    out = execFileSync(bin, ["auth", "status"], { encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch (e) {
+    // A logged-out CLI exits non-zero and still prints its status JSON on stdout.
+    out = String((e as { stdout?: string }).stdout ?? "");
+  }
+  try {
+    const status = JSON.parse(out) as { loggedIn?: boolean };
+    if (status?.loggedIn === false) return "claude CLI is installed but not logged in (run `claude auth login`)";
+  } catch {
+    // No usable `auth status` output: run the test as before rather than hiding a real failure.
+  }
+  return false;
+}
+
+test("a tool round pre-starts the next call's process; a different request shape does not use it", { skip: claudeSkip() }, async () => {
   let n = 0;
   let reqAt = 0;
   const srv = createServer((req, res) => {
