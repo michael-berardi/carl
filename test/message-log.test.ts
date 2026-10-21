@@ -154,11 +154,26 @@ test("the write lock keeps two processes from writing at once and is left behind
   const rows = readFileSync(join(dir, "hermes.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(rows.length, 2, "the row after the stale lock was written");
   // A lock that is held right now is not taken over: the write is skipped, not faked.
+  const warnings: string[] = [];
+  const held = new MessageLog(dir, (msg) => warnings.push(msg));
   writeFileSync(join(dir, "hermes.jsonl.lock"), "held");
-  log.record("sendMessage", { chat_id: 1, text: "while the lock is held" }, { message_id: 4 });
+  held.record("sendMessage", { chat_id: 1, text: "while the lock is held" }, { message_id: 4 });
   const after = readFileSync(join(dir, "hermes.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(after.length, 2, "no row is written while another process holds the lock");
   assert.equal(existsSync(join(dir, "hermes.jsonl.lock")), true, "the lock of the other process is left alone");
+  assert.equal(warnings.length, 1, "a skipped row is reported once");
+});
+
+test("a lock that another process took over during the write is not removed", async (t) => {
+  const dir = scratch(t);
+  const log = new MessageLog(dir);
+  // While the row is written, another process takes the lock over: our release must not remove its lock.
+  (log as any).rotate = () => {
+    writeFileSync(join(dir, "hermes.jsonl.lock"), "another-process");
+  };
+  log.record("sendMessage", { chat_id: 1, text: "hi" }, { message_id: 2 });
+  assert.equal(readFileSync(join(dir, "hermes.jsonl.lock"), "utf8"), "another-process", "the other process keeps its lock");
+  assert.equal(readFileSync(join(dir, "hermes.jsonl"), "utf8").includes('"messageId":2'), true, "the row was still written");
 });
 
 test("a failed append leaves the log exactly as it was", async (t) => {
