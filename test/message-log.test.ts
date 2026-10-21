@@ -2,10 +2,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deliveryRow, MessageLog, recordDeliveries } from "../src/message-log.ts";
+import { loadConfig } from "../src/config.ts";
+import { deliveryRow, MessageLog, messageLogDir, recordDeliveries } from "../src/message-log.ts";
 import { TelegramApi } from "../src/channels/telegram-api.ts";
 
 function scratch(t: any): string {
@@ -70,7 +71,7 @@ test("a log that cannot be written never breaks a send and says so once", async 
   assert.equal(warnings.length, 1, "one line per process, never one per send");
 });
 
-test("recording is off unless the installation is wired to UltraTerm (or a test points it elsewhere)", async (t) => {
+test("recording is off unless the installation is wired to UltraTerm (and the switch only says where)", async (t) => {
   const dir = scratch(t);
   const plain = new TelegramApi("123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz");
   assert.equal(recordDeliveries(plain, false, () => {}), false, "a plain Carl install does not write UltraTerm's log");
@@ -138,4 +139,63 @@ test("a copy or a forward records the message Telegram created, not the source m
   assert.equal(deliveryRow("copyMessage", { chat_id: 1, from_message_id: 7 }, { message_id: 42 })?.messageId, 42);
   assert.equal(deliveryRow("forwardMessage", { chat_id: 1, from_message_id: 7 }, { message_id: 43 })?.messageId, 43);
   assert.equal(deliveryRow("editMessageText", { chat_id: 1, message_id: 7, text: "longer" }, { message_id: 7 })?.messageId, 7);
+});
+
+test("the write lock keeps two processes from writing at once and is left behind only by a crash", async (t) => {
+  const dir = scratch(t);
+  const log = new MessageLog(dir);
+  log.record("sendMessage", { chat_id: 1, text: "first" }, { message_id: 2 });
+  assert.equal(existsSync(join(dir, "hermes.jsonl.lock")), false, "the lock is released after the write");
+  // A lock left behind by a killed process is taken over, not waited on.
+  writeFileSync(join(dir, "hermes.jsonl.lock"), "stale");
+  const old = Date.now() - 60_000;
+  utimesSync(join(dir, "hermes.jsonl.lock"), old / 1000, old / 1000);
+  log.record("sendMessage", { chat_id: 1, text: "after the stale lock" }, { message_id: 3 });
+  const rows = readFileSync(join(dir, "hermes.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(rows.length, 2, "the row after the stale lock was written");
+  // A lock that is held right now is not taken over: the write is skipped, not faked.
+  writeFileSync(join(dir, "hermes.jsonl.lock"), "held");
+  log.record("sendMessage", { chat_id: 1, text: "while the lock is held" }, { message_id: 4 });
+  const after = readFileSync(join(dir, "hermes.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(after.length, 2, "no row is written while another process holds the lock");
+});
+
+test("a failed append leaves the log exactly as it was", async (t) => {
+  const dir = scratch(t);
+  const log = new MessageLog(dir);
+  log.record("sendMessage", { chat_id: 1, text: "first" }, { message_id: 2 });
+  const before = readFileSync(join(dir, "hermes.jsonl"), "utf8");
+  // A log that cannot be written to (a read-only folder) must not leave a half-written line behind.
+  chmodSync(dir, 0o500);
+  try {
+    assert.doesNotThrow(() => log.record("sendMessage", { chat_id: 1, text: "hi" }, { message_id: 3 }));
+    assert.equal(readFileSync(join(dir, "hermes.jsonl"), "utf8"), before, "the log still holds only the row that was delivered");
+  } finally {
+    chmodSync(dir, 0o700);
+  }
+});
+
+test("a test that forgets the switch still cannot write into the operator's real log", { skip: !process.env.NODE_TEST_CONTEXT }, async (t) => {
+  const dir = scratch(t);
+  const previous = process.env.CARL_MESSAGE_LOG_DIR;
+  delete process.env.CARL_MESSAGE_LOG_DIR;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CARL_MESSAGE_LOG_DIR;
+    else process.env.CARL_MESSAGE_LOG_DIR = previous;
+  });
+  const where = messageLogDir();
+  assert.ok(where.includes("carl-message-log-"), `a scratch folder under the temp dir, not the real log: ${where}`);
+  assert.ok(!where.includes(".ultraterm"), "the operator's real log is never the target");
+});
+
+test("a channel that is not wired to UltraTerm records nothing at all", async (t) => {
+  const dir = scratch(t);
+  const home = mkdtempSync(join(tmpdir(), "carl-unwired-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { allowFrom: [4242], homeChat: 4242 } }));
+  const cfg = loadConfig(home);
+  assert.equal(!!cfg.ultraterm, false, "this installation is not wired to UltraTerm");
+  const api = new TelegramApi("123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz");
+  assert.equal(recordDeliveries(api, !!cfg.ultraterm, () => {}), false);
+  assert.equal(api.onDelivered, undefined, "the channel never hooks the logger for a plain install");
 });

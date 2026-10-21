@@ -54,7 +54,7 @@ export class TelegramChannel {
     this.log = log;
     this.api = new TelegramApi(token, cfg.telegram.apiBase);
     // Every delivered message (answer, draft frame, edit, deletion) is recorded where `utp ultrabot audit` reads it.
-    // The file belongs to UltraTerm, so it is written only for an installation wired to UltraTerm (or a test switch).
+    // The file belongs to UltraTerm, so it is written only for an installation wired to UltraTerm.
     recordDeliveries(this.api, !!cfg.ultraterm, (msg, data) => this.log.warn(msg, data));
     this.offsetFile = join(cfg.home, "state", "telegram-offset.json");
     if (existsSync(this.offsetFile)) {
