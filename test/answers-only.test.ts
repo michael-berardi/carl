@@ -2,7 +2,7 @@
 // turns streaming on. The delivered message is also recorded where `utp ultrabot audit` reads it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TelegramChannel } from "../src/channels/telegram.ts";
@@ -22,14 +22,17 @@ interface Turn {
 }
 
 /**
- * One inbound message through the real channel against the fake Bot API. `toolAtMs`/`endAtMs` pace the run so a
- * streaming draft has time to show a tool line (drafts flush at 900 ms and then at most every 1.2 s).
+ * One inbound message through the real channel against the fake Bot API. Every run is paced the same way
+ * (`toolAtMs`/`endAtMs`): the brain writes a line at once, reports a tool at 1 s and answers at 3 s, so a draft has
+ * time to show up (drafts flush at 900 ms and then at most every 1.2 s). Without that pacing a test could not tell
+ * "streaming is off" from "the answer came back too fast to stream".
  */
 async function turn(t: any, opts: { stream?: boolean; toolAtMs?: number; endAtMs?: number }): Promise<Turn> {
   const tg = new FakeTelegram();
   await tg.start();
   const home = mkdtempSync(join(tmpdir(), "carl-answers-only-"));
   const logDir = join(home, "messages");
+  const previousLogDir = process.env.CARL_MESSAGE_LOG_DIR;
   process.env.CARL_MESSAGE_LOG_DIR = logDir;
   mkdirSync(join(home, "state"), { recursive: true });
   const telegram: any = { allowFrom: [OP], homeChat: OP, apiBase: tg.base };
@@ -40,9 +43,9 @@ async function turn(t: any, opts: { stream?: boolean; toolAtMs?: number; endAtMs
       const started = Date.now();
       const until = async (at = 0) => { const wait = at - (Date.now() - started); if (wait > 0) await sleep(wait); };
       h?.onText?.("Half a sentence, still working");
-      await until(opts.toolAtMs ?? 0);
+      await until(opts.toolAtMs ?? 1_000);
       h?.onTool?.("bash", "ls -la");
-      await until(opts.endAtMs ?? 0);
+      await until(opts.endAtMs ?? 3_000);
       return { ok: true, text: ANSWER, aborted: false, toolCalls: 1, model: "test/model" };
     },
     whenRegistered: async () => {},
@@ -56,11 +59,16 @@ async function turn(t: any, opts: { stream?: boolean; toolAtMs?: number; endAtMs
     await channel.stop();
     await tg.stop();
     rmSync(home, { recursive: true, force: true });
-    delete process.env.CARL_MESSAGE_LOG_DIR;
+    if (previousLogDir === undefined) delete process.env.CARL_MESSAGE_LOG_DIR;
+    else process.env.CARL_MESSAGE_LOG_DIR = previousLogDir;
   });
   tg.message(OP, "what is the answer");
   await tg.waitFor(() => tg.texts(OP).some((text) => text.includes("42")), 20_000, "the final answer");
-  const rows = readFileSync(join(logDir, "hermes.jsonl"), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  // The row is written after the call that delivered the answer, so wait for it instead of reading too early.
+  const logFile = join(logDir, "hermes.jsonl");
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && !existsSync(logFile)) await sleep(25);
+  const rows = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
   return {
     texts: tg.texts(OP),
     messages: tg.calls.filter((c) => c.method === "sendMessage" || c.method === "editMessageText").map(({ method, body }) => ({ method, body })),
@@ -79,8 +87,17 @@ test("without telegram.stream, an inbound message gets one final answer and no t
 
 test("telegram.stream false is the same: one answer, no draft frame", async (t) => {
   const answered = await turn(t, { stream: false });
-  assert.equal(answered.messages.length, 1);
+  assert.equal(answered.messages.length, 1, `one message, not a draft plus a reply: ${JSON.stringify(answered.messages)}`);
   assert.ok(!answered.texts[0].includes("⚙") && answered.texts[0].includes("42"));
+});
+
+test("a missing telegram.stream key means answers only: the shipped default", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "carl-default-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { allowFrom: [OP], homeChat: OP } }));
+  assert.equal(loadConfig(home).telegram.stream, false, "a fresh install or a reseeded config gets answers only");
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { allowFrom: [OP], homeChat: OP, stream: true } }));
+  assert.equal(loadConfig(home).telegram.stream, true, "the operator can still turn streaming on");
 });
 
 test("contradiction check: stream true still streams, tool line included (the opt-in keeps working)", async (t) => {

@@ -31,6 +31,9 @@ async function step(name: string, fn: () => Promise<void>) {
 const tg = new FakeTelegram();
 await tg.start();
 const root = mkdtempSync(join(process.env.CARL_E2E_DIR ?? tmpdir(), "carl-e2e-"));
+// The UltraBot message log belongs to UltraTerm: this run records its fake Telegram sends in the scratch folder,
+// never in the operator's real log.
+process.env.CARL_MESSAGE_LOG_DIR = join(root, "messages");
 const home = join(root, "carl");
 const hermes = join(root, "hermes");
 mkdirSync(home, { recursive: true });
