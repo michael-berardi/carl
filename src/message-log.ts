@@ -12,7 +12,7 @@
 // MESSAGE_LOG_MAX_BYTES, MESSAGE_LOG_KEEP). Two Carl processes can share this file: the gateway and `carl send`, so
 // every write (rotation and append) happens under one short exclusive lock; a lock that is held or left behind by a
 // killed process is taken over after a few seconds, and a write that cannot take it is skipped rather than faked.
-import { appendFileSync, chmodSync, closeSync, openSync, readFileSync, renameSync, statSync, truncateSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, openSync, readFileSync, renameSync, statSync, truncateSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { htmlToPlain } from "./channels/format.ts";
@@ -145,7 +145,7 @@ export class MessageLog {
     this.tightenDirectory();
     // One Carl process writes this file at a time: the gateway and `carl send` share it.
     if (!this.takeWriteLock()) {
-      this.problem("message log is locked by another Carl process: this row was skipped");
+      this.problem("message log is busy or not writable: this row was skipped");
       return;
     }
     try {
@@ -163,6 +163,7 @@ export class MessageLog {
         throw e;
       }
       this.tightenFile();
+      this.reported = false; // the log works again, so a later problem is worth one line of its own
     } catch (e) {
       this.problem(`message log write failed: ${(e as Error).message}`);
     } finally {
@@ -182,7 +183,11 @@ export class MessageLog {
         try {
           this.makeOwnerOnly(`${this.file}.${n}`);
           renameSync(`${this.file}.${n}`, `${this.file}.${n + 1}`);
-        } catch {}
+        } catch (e) {
+          // A file that is not there is not an error; any other failure stops the chain, so the next rename
+          // cannot overwrite a file that was never moved.
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        }
       }
       this.makeOwnerOnly(this.file);
       renameSync(this.file, `${this.file}.1`);
@@ -216,44 +221,67 @@ export class MessageLog {
 
   /**
    * The exclusive lock for writing this file. The lock holds a token, so a process only removes its own lock.
-   * A lock left behind by a killed process is taken over after STALE_LOCK_MS: the stale lock is renamed first and
-   * the rename is checked against the file that was seen, so a live lock is never taken away from its owner.
+   * A lock left behind by a killed process is taken over after STALE_LOCK_MS: the stale lock is renamed first, and
+   * the renamed file is checked against the file that was seen (device, inode and age), so a live lock is never
+   * taken away from its owner.
    */
   private takeWriteLock(): boolean {
     const lock = join(this.directory, WRITE_LOCK);
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let fd: number | undefined;
       try {
-        closeSync(openSync(lock, "wx", 0o600));
-        this.token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        try {
-          writeFileSync(lock, this.token, { mode: 0o600 });
-        } catch {}
-        return true;
+        fd = openSync(lock, "wx", 0o600);
       } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST") return false;
-        try {
-          const seen = statSync(lock);
-          if (Date.now() - seen.mtimeMs <= STALE_LOCK_MS) return false;
-          // The rename is atomic: whichever process renames the stale lock owns the takeover.
-          const stale = `${lock}.stale-${process.pid}-${Date.now()}`;
-          renameSync(lock, stale);
-          const moved = statSync(stale);
-          if (moved.ino !== seen.ino || moved.dev !== seen.dev) {
-            // The file that moved is not the one that was seen: it was a live lock, so it goes back.
-            try {
-              renameSync(stale, lock);
-            } catch {}
-            return false;
-          }
-          try {
-            unlinkSync(stale);
-          } catch {}
-        } catch {
-          return false;
-        }
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") continue; // the lock vanished between our open and this attempt
+        if (code !== "EEXIST") return false;
+        if (!this.takeOverStaleLock(lock)) return false;
+        continue;
       }
+      const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      try {
+        writeFileSync(fd, token, { mode: 0o600 });
+        closeSync(fd);
+      } catch {
+        // A lock without a token can never be released safely, so it is removed again.
+        try {
+          closeSync(fd!);
+        } catch {}
+        try {
+          unlinkSync(lock);
+        } catch {}
+        return false;
+      }
+      this.token = token;
+      return true;
     }
     return false;
+  }
+
+  /** Takes over a lock that was left behind by a killed process, but never a live one. */
+  private takeOverStaleLock(lock: string): boolean {
+    try {
+      const seen = statSync(lock);
+      if (Date.now() - seen.mtimeMs <= STALE_LOCK_MS) return false; // a live writer holds it
+      const stale = `${lock}.stale-${process.pid}-${Date.now()}`;
+      renameSync(lock, stale);
+      const moved = statSync(stale);
+      const live = Date.now() - moved.mtimeMs <= STALE_LOCK_MS;
+      if (live || moved.ino !== seen.ino || moved.dev !== seen.dev) {
+        // Not the stale lock that was seen: it belongs to a live writer, so it goes back.
+        try {
+          if (!existsSync(lock)) renameSync(stale, lock);
+        } catch {}
+        return false;
+      }
+      try {
+        unlinkSync(stale);
+      } catch {}
+      return true;
+    } catch (e) {
+      // The lock is gone: the next attempt can take it.
+      return (e as NodeJS.ErrnoException).code === "ENOENT";
+    }
   }
 
   private releaseWriteLock(): void {
