@@ -1,4 +1,7 @@
-// Telegram channel: long polling, allowlist, streamed replies by editing one draft message, media in, commands.
+// Telegram channel: long polling, allowlist, media in, commands, and replies that are answers by default.
+// A reply is one final message. Streaming (one draft message edited as the answer grows, with the tool line inside
+// it) is opt-in: telegram.stream must be true. Approval cards and a long answer split by Telegram's size limit are
+// separate messages either way.
 import { approvalSummary } from "../approval-text.ts";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

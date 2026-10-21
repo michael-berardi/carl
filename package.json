@@ -41,10 +41,10 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
+    "test": "CARL_MESSAGE_LOG_DIR=\"$(mktemp -d)\" node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm test",
-    "test:e2e": "node --experimental-strip-types --no-warnings test/e2e.ts"
+    "test:e2e": "CARL_MESSAGE_LOG_DIR=\"$(mktemp -d)\" node --experimental-strip-types --no-warnings test/e2e.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.0.4"
