@@ -158,6 +158,7 @@ test("the write lock keeps two processes from writing at once and is left behind
   log.record("sendMessage", { chat_id: 1, text: "while the lock is held" }, { message_id: 4 });
   const after = readFileSync(join(dir, "hermes.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(after.length, 2, "no row is written while another process holds the lock");
+  assert.equal(existsSync(join(dir, "hermes.jsonl.lock")), true, "the lock of the other process is left alone");
 });
 
 test("a failed append leaves the log exactly as it was", async (t) => {
@@ -165,7 +166,21 @@ test("a failed append leaves the log exactly as it was", async (t) => {
   const log = new MessageLog(dir);
   log.record("sendMessage", { chat_id: 1, text: "first" }, { message_id: 2 });
   const before = readFileSync(join(dir, "hermes.jsonl"), "utf8");
-  // A log that cannot be written to (a read-only folder) must not leave a half-written line behind.
+  // The file cannot be appended to (read-only file, writable folder): the append fails and the rollback runs.
+  chmodSync(join(dir, "hermes.jsonl"), 0o400);
+  try {
+    assert.doesNotThrow(() => log.record("sendMessage", { chat_id: 1, text: "hi" }, { message_id: 3 }));
+    assert.equal(readFileSync(join(dir, "hermes.jsonl"), "utf8"), before, "the log still holds only the row that was delivered");
+  } finally {
+    chmodSync(join(dir, "hermes.jsonl"), 0o600);
+  }
+});
+
+test("a folder that cannot be written to leaves the log untouched", async (t) => {
+  const dir = scratch(t);
+  const log = new MessageLog(dir);
+  log.record("sendMessage", { chat_id: 1, text: "first" }, { message_id: 2 });
+  const before = readFileSync(join(dir, "hermes.jsonl"), "utf8");
   chmodSync(dir, 0o500);
   try {
     assert.doesNotThrow(() => log.record("sendMessage", { chat_id: 1, text: "hi" }, { message_id: 3 }));

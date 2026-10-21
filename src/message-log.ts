@@ -12,7 +12,7 @@
 // MESSAGE_LOG_MAX_BYTES, MESSAGE_LOG_KEEP). Two Carl processes can share this file: the gateway and `carl send`, so
 // every write (rotation and append) happens under one short exclusive lock; a lock that is held or left behind by a
 // killed process is taken over after a few seconds, and a write that cannot take it is skipped rather than faked.
-import { appendFileSync, chmodSync, closeSync, openSync, renameSync, statSync, truncateSync, unlinkSync, mkdirSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, openSync, readFileSync, renameSync, statSync, truncateSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { htmlToPlain } from "./channels/format.ts";
@@ -116,6 +116,8 @@ export class MessageLog {
   private readonly directory: string;
   private readonly warn: Warn;
   private reported = false;
+  /** The token in the lock file, so a process only ever removes its own lock. */
+  private token?: string;
 
   constructor(directory = messageLogDir(), warn: Warn = () => {}) {
     this.directory = directory;
@@ -142,7 +144,10 @@ export class MessageLog {
     }
     this.tightenDirectory();
     // One Carl process writes this file at a time: the gateway and `carl send` share it.
-    if (!this.takeWriteLock()) return;
+    if (!this.takeWriteLock()) {
+      this.problem("message log is locked by another Carl process: this row was skipped");
+      return;
+    }
     try {
       this.rotate();
       const before = statSync(this.file, { throwIfNoEntry: false })?.size ?? 0;
@@ -150,9 +155,10 @@ export class MessageLog {
         appendFileSync(this.file, JSON.stringify(row) + "\n", { mode: 0o600 });
       } catch (e) {
         // A half-written line would be a broken row, so the file goes back to what it was before this append.
-        // No other Carl process can be writing here, so this cannot remove someone else's row.
+        // No other Carl process can be writing here, so this cannot remove someone else's row, and the file is
+        // only shortened when it is longer than it was: a file someone else replaced is left alone.
         try {
-          truncateSync(this.file, before);
+          if ((statSync(this.file).size ?? 0) > before) truncateSync(this.file, before);
         } catch {}
         throw e;
       }
@@ -170,9 +176,8 @@ export class MessageLog {
     const size = statSync(this.file, { throwIfNoEntry: false })?.size ?? 0;
     if (size < MAX_BYTES) return;
     try {
-      try {
-        unlinkSync(`${this.file}.${KEEP}`);
-      } catch {}
+      // A rename replaces the file it moves over, so the oldest one is dropped by the shift itself: nothing is
+      // removed before the chain can finish, and a failed rotation cannot erode the history.
       for (let n = KEEP - 1; n >= 1; n--) {
         try {
           this.makeOwnerOnly(`${this.file}.${n}`);
@@ -210,22 +215,36 @@ export class MessageLog {
   }
 
   /**
-   * The exclusive lock for writing this file. A lock left behind by a killed process is taken over after
-   * STALE_LOCK_MS; the takeover renames the stale lock first, so only one process can claim it.
+   * The exclusive lock for writing this file. The lock holds a token, so a process only removes its own lock.
+   * A lock left behind by a killed process is taken over after STALE_LOCK_MS: the stale lock is renamed first and
+   * the rename is checked against the file that was seen, so a live lock is never taken away from its owner.
    */
   private takeWriteLock(): boolean {
     const lock = join(this.directory, WRITE_LOCK);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         closeSync(openSync(lock, "wx", 0o600));
+        this.token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        try {
+          writeFileSync(lock, this.token, { mode: 0o600 });
+        } catch {}
         return true;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") return false;
         try {
-          if (Date.now() - statSync(lock).mtimeMs <= STALE_LOCK_MS) return false;
+          const seen = statSync(lock);
+          if (Date.now() - seen.mtimeMs <= STALE_LOCK_MS) return false;
           // The rename is atomic: whichever process renames the stale lock owns the takeover.
           const stale = `${lock}.stale-${process.pid}-${Date.now()}`;
           renameSync(lock, stale);
+          const moved = statSync(stale);
+          if (moved.ino !== seen.ino || moved.dev !== seen.dev) {
+            // The file that moved is not the one that was seen: it was a live lock, so it goes back.
+            try {
+              renameSync(stale, lock);
+            } catch {}
+            return false;
+          }
           try {
             unlinkSync(stale);
           } catch {}
@@ -238,9 +257,12 @@ export class MessageLog {
   }
 
   private releaseWriteLock(): void {
+    const lock = join(this.directory, WRITE_LOCK);
     try {
-      unlinkSync(join(this.directory, WRITE_LOCK));
+      // Only our own lock is removed: a lock that another process took over stays theirs.
+      if (this.token && readFileSync(lock, "utf8") === this.token) unlinkSync(lock);
     } catch {}
+    this.token = undefined;
   }
 
   private problem(message: string): void {
