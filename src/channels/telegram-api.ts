@@ -166,7 +166,7 @@ export class TelegramApi {
     const json = (await res.json()) as { ok: boolean; result?: TgMessage; error_code?: number; description?: string };
     if (!json.ok) throw new TelegramError("sendDocument", json.error_code ?? res.status, json.description ?? "unknown error");
     try {
-      this.onDelivered?.("sendDocument", { chat_id: chatId, caption, document: { file_name: fileName } }, json.result);
+      this.onDelivered?.("sendDocument", { chat_id: chatId, caption: caption?.slice(0, 1024), document: { file_name: fileName } }, json.result);
     } catch {}
     return json.result!;
   }

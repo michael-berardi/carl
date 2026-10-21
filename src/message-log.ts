@@ -10,17 +10,17 @@
 //
 // The directory and the 10 MiB rotation with five kept files match the installed `utp` writer (MESSAGE_LOG_DIR,
 // MESSAGE_LOG_MAX_BYTES, MESSAGE_LOG_KEEP). Two Carl processes can share this file: the gateway and `carl send`, so
-// appends are O_APPEND (one line at a time) and rotation takes a short exclusive lock; a lock that is held or left
-// behind by a killed process only means the next write rotates later.
+// every write (rotation and append) happens under one short exclusive lock; a lock that is held or left behind by a
+// killed process is taken over after a few seconds, and a write that cannot take it is skipped rather than faked.
 import { appendFileSync, chmodSync, closeSync, openSync, renameSync, statSync, truncateSync, unlinkSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { htmlToPlain } from "./channels/format.ts";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const KEEP = 5;
-/** The lock file that keeps two Carl processes from rotating the same file at the same time. */
-const ROTATE_LOCK = "hermes.jsonl.rotate.lock";
+/** The lock file that keeps two Carl processes from writing the same file at the same time. */
+const WRITE_LOCK = "hermes.jsonl.lock";
 /** A lock older than this was left behind by a killed process and may be taken over. */
 const STALE_LOCK_MS = 5_000;
 /** Bot API methods that put a message in a chat (or change/remove one). Everything else (typing, polls) is not a message. */
@@ -48,10 +48,14 @@ export type Warn = (msg: string, data?: Record<string, unknown>) => void;
 /**
  * Where the log lives. CARL_MESSAGE_LOG_DIR is a test switch: it points the writer at a scratch folder so tests never
  * touch the operator's real UltraTerm logs on this machine. It says where rows go, not whether they are written.
+ * A test that forgets the switch still cannot write into the real log: under Node's test runner the rows go to a
+ * scratch folder instead.
  */
 export function messageLogDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.CARL_MESSAGE_LOG_DIR?.trim();
-  return override ? override : join(homedir(), ".ultraterm", "logs", "ultrabot-messages");
+  if (override) return override;
+  if (env.NODE_TEST_CONTEXT) return join(tmpdir(), `carl-message-log-${process.pid}`);
+  return join(homedir(), ".ultraterm", "logs", "ultrabot-messages");
 }
 
 function numericChat(value: unknown): string | undefined {
@@ -133,30 +137,38 @@ export class MessageLog {
     if (!row) return;
     try {
       mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-      this.rotate();
     } catch (e) {
-      this.problem(`message log write failed: ${(e as Error).message}`);
-      return;
+      return this.problem(`message log write failed: ${(e as Error).message}`);
     }
-    const before = statSync(this.file, { throwIfNoEntry: false })?.size ?? 0;
+    this.tightenDirectory();
+    // One Carl process writes this file at a time: the gateway and `carl send` share it.
+    if (!this.takeWriteLock()) return;
     try {
-      appendFileSync(this.file, JSON.stringify(row) + "\n", { mode: 0o600 });
-      // The mode above only applies when the file is created, and the log outlives the process that created it.
-      chmodSync(this.file, 0o600);
-    } catch (e) {
-      // A half-written line would be a broken row, so the file goes back to what it was before this append.
+      this.rotate();
+      const before = statSync(this.file, { throwIfNoEntry: false })?.size ?? 0;
       try {
-        truncateSync(this.file, before);
-      } catch {}
+        appendFileSync(this.file, JSON.stringify(row) + "\n", { mode: 0o600 });
+      } catch (e) {
+        // A half-written line would be a broken row, so the file goes back to what it was before this append.
+        // No other Carl process can be writing here, so this cannot remove someone else's row.
+        try {
+          truncateSync(this.file, before);
+        } catch {}
+        throw e;
+      }
+      this.tightenFile();
+    } catch (e) {
       this.problem(`message log write failed: ${(e as Error).message}`);
+    } finally {
+      this.releaseWriteLock();
     }
   }
 
   /** hermes.jsonl becomes hermes.jsonl.1, .1 becomes .2 and so on; what was .5 is dropped, matching `utp`. */
   private rotate(): void {
+    // The size is read here, under the lock: a file that was already rotated by the other process is left alone.
     const size = statSync(this.file, { throwIfNoEntry: false })?.size ?? 0;
     if (size < MAX_BYTES) return;
-    if (!this.takeRotationLock()) return; // another process is rotating: the row is still appended
     try {
       try {
         unlinkSync(`${this.file}.${KEEP}`);
@@ -171,10 +183,6 @@ export class MessageLog {
       renameSync(this.file, `${this.file}.1`);
     } catch {
       // A failed rotation leaves the rows where they are; the next write tries again.
-    } finally {
-      try {
-        unlinkSync(join(this.directory, ROTATE_LOCK));
-      } catch {}
     }
   }
 
@@ -185,9 +193,28 @@ export class MessageLog {
     } catch {}
   }
 
-  /** An exclusive lock for the rotation, so the gateway and `carl send` never rotate the same file together. */
-  private takeRotationLock(): boolean {
-    const lock = join(this.directory, ROTATE_LOCK);
+  /** The log file is owner-only, also when it already existed with looser permissions. */
+  private tightenFile(): void {
+    try {
+      const info = statSync(this.file);
+      if (info.mode & 0o077) chmodSync(this.file, 0o600);
+    } catch {}
+  }
+
+  /** The log folder is owner-only, also when it already existed with looser permissions. */
+  private tightenDirectory(): void {
+    try {
+      const info = statSync(this.directory);
+      if (info.mode & 0o077) chmodSync(this.directory, 0o700);
+    } catch {}
+  }
+
+  /**
+   * The exclusive lock for writing this file. A lock left behind by a killed process is taken over after
+   * STALE_LOCK_MS; the takeover renames the stale lock first, so only one process can claim it.
+   */
+  private takeWriteLock(): boolean {
+    const lock = join(this.directory, WRITE_LOCK);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         closeSync(openSync(lock, "wx", 0o600));
@@ -195,17 +222,25 @@ export class MessageLog {
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") return false;
         try {
-          if (Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS) {
-            unlinkSync(lock);
-            continue;
-          }
+          if (Date.now() - statSync(lock).mtimeMs <= STALE_LOCK_MS) return false;
+          // The rename is atomic: whichever process renames the stale lock owns the takeover.
+          const stale = `${lock}.stale-${process.pid}-${Date.now()}`;
+          renameSync(lock, stale);
+          try {
+            unlinkSync(stale);
+          } catch {}
         } catch {
           return false;
         }
-        return false;
       }
     }
     return false;
+  }
+
+  private releaseWriteLock(): void {
+    try {
+      unlinkSync(join(this.directory, WRITE_LOCK));
+    } catch {}
   }
 
   private problem(message: string): void {
