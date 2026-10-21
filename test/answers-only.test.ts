@@ -27,7 +27,7 @@ interface Turn {
  * time to show up (drafts flush at 900 ms and then at most every 1.2 s). Without that pacing a test could not tell
  * "streaming is off" from "the answer came back too fast to stream".
  */
-async function turn(t: any, opts: { stream?: boolean; toolAtMs?: number; endAtMs?: number }): Promise<Turn> {
+async function turn(t: any, opts: { stream?: boolean; toolAtMs?: number; endAtMs?: number; ultraterm?: boolean }): Promise<Turn> {
   const tg = new FakeTelegram();
   await tg.start();
   const home = mkdtempSync(join(tmpdir(), "carl-answers-only-"));
@@ -37,7 +37,10 @@ async function turn(t: any, opts: { stream?: boolean; toolAtMs?: number; endAtMs
   mkdirSync(join(home, "state"), { recursive: true });
   const telegram: any = { allowFrom: [OP], homeChat: OP, apiBase: tg.base };
   if (opts.stream !== undefined) telegram.stream = opts.stream;
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram, api: { enabled: false }, ultraterm: { home: join(home, "ultraterm") } }));
+  const config: any = { telegram, api: { enabled: false } };
+  // An installation that is not wired to UltraTerm must not write into UltraTerm's log at all.
+  if (opts.ultraterm !== false) config.ultraterm = { home: join(home, "ultraterm") };
+  writeFileSync(join(home, "carl.json"), JSON.stringify(config));
   const brain: any = {
     ask: async (_k: string, _i: any, h: any) => {
       const started = Date.now();
@@ -68,7 +71,9 @@ async function turn(t: any, opts: { stream?: boolean; toolAtMs?: number; endAtMs
   const logFile = join(logDir, "hermes.jsonl");
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline && !existsSync(logFile)) await sleep(25);
-  const rows = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const rows = existsSync(logFile)
+    ? readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    : [];
   return {
     texts: tg.texts(OP),
     messages: tg.calls.filter((c) => c.method === "sendMessage" || c.method === "editMessageText").map(({ method, body }) => ({ method, body })),
@@ -125,6 +130,12 @@ test("the delivered answer is recorded for `utp ultrabot audit` as one plain-tex
   assert.ok(row.ts && !Number.isNaN(Date.parse(row.ts)), "a timestamp the audit can order");
   assert.ok(row.text.includes("42") && row.text.includes("Hello <Mike>"), "the text the chat shows");
   assert.ok(!row.text.includes("<b>") && !row.text.includes("**"), "HTML and markdown turned back into plain text");
+});
+
+test("an installation that is not wired to UltraTerm writes no log at all", async (t) => {
+  const answered = await turn(t, { ultraterm: false });
+  assert.equal(answered.messages.length, 1, "the answer is still delivered");
+  assert.equal(answered.rows.length, 0, "no row is written for an installation that is not wired to UltraTerm");
 });
 
 test("a streamed reply's draft frames are recorded too, so an edited answer is visible to the audit", async (t) => {
