@@ -714,7 +714,9 @@ export class Brain extends EventEmitter {
       return { status: "not-resumable", reason: (e as Error).message };
     }
     const inspection = inspectTurn(convo.session.messages as any[], text);
-    if (!inspection) return { status: "not-resumable", reason: "the interrupted message is not in the transcript" };
+    // The message is not in the transcript: the turn never reached the model, so nothing of it ran and it can be
+    // run again from the start.
+    if (!inspection) return { status: "restart", turn: this.nextTurn(convo) };
     if (inspection.state === "nothing") return { status: "restart", turn: inspection.turn };
     if (inspection.state === "answered") return { status: "answered", text: inspection.finalText, turn: inspection.turn };
     for (const call of inspection.pending) {
