@@ -212,6 +212,9 @@ export class TelegramChannel {
       const key = `telegram:dm:${e.chatId}`;
       // At most once: a message that was already picked up after one restart is reported after the next.
       if (!e.resumed && e.chatId > 0 && textOnly && Number.isInteger(messageId)) {
+        // At most one automatic pickup: from here on the message counts as resumed, so a second restart reports it
+        // instead of picking it up again.
+        this.markInflight(id, { chatId: e.chatId, threadId: e.threadId, text: e.text, resumed: true });
         // The draft shows the answer while the resumed turn runs; it is only created when there is something to show.
         let draft: Draft | undefined;
         const newDraft = (): Draft => (draft ??= new Draft(this.api, e.chatId, messageId, e.threadId, this.cfg.telegram.stream));

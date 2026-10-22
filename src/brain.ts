@@ -616,9 +616,13 @@ export class Brain extends EventEmitter {
     });
     let thrown: Error | undefined;
     try {
-      if (opts.start) await opts.start();
-      // Never run Pi extension /commands from message text: a schedule or webhook prompt is data, not a command.
-      else await convo.session.prompt(text, { images, source: "rpc", expandPromptTemplates: false } as any);
+      if (opts.start) {
+        // A resumed turn continues the recorded transcript instead of asking the model a new question.
+        await opts.start();
+      } else {
+        // Never run Pi extension /commands from message text: a schedule or webhook prompt is data, not a command.
+        await convo.session.prompt(text, { images, source: "rpc", expandPromptTemplates: false } as any);
+      }
     } catch (e) {
       thrown = e as Error;
     } finally {
@@ -686,7 +690,7 @@ export class Brain extends EventEmitter {
         if (said) { answer = said; at = mm.timestamp ?? 0; }
       }
       // Only a request that ran a tool is worth refusing: a repeated question costs nothing.
-      if (!ranTool || !answer) return undefined;
+      if (!ranTool || !answer) continue;
       if (at && Date.now() - at > withinMs) return undefined;
       return { text: answer, at };
     }
