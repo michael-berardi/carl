@@ -1,5 +1,5 @@
 // Schedules: one JSON file, a 20-second tick, one catch-up run after downtime (never a burst).
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { nextRun, parseSchedule } from "./cron.ts";
@@ -36,9 +36,25 @@ export interface Job {
   lastStatus?: "ok" | "error" | "running";
   lastError?: string;
   nextRunAt?: number;
+  /** The pid of the command that is running now. It leads its own process group, so a restart can stop it. */
+  runPid?: number;
+  /** When the running job started, so a restart can tell an old process group from a new one. */
+  runStartedAt?: number;
+  /** What kind of run is going on, so an interrupted run is reported in the right words. */
+  runKind?: "command" | "agent" | "builtin";
 }
 
 export type JobRunner = (job: Job) => Promise<string>;
+
+/** A run that a restart cut short. */
+interface InterruptedRun {
+  job: Job;
+  kind: "command" | "agent" | "builtin";
+  /** True when the command was still running when Carl came back (and was stopped). */
+  wasRunning: boolean;
+  /** When the run started, so the notice about it is sent once. */
+  startedAt: number;
+}
 
 export class Scheduler {
   private jobs: Job[] = [];
@@ -49,24 +65,26 @@ export class Scheduler {
   /** Agent and built-in runs are cut off after this long. */
   static readonly RUN_TIMEOUT_MS = 30 * 60_000;
   private readonly file: string;
+  /** The runs a restart cut short, reported once the channels are up. */
+  private readonly interrupted: InterruptedRun[] = [];
 
   private readonly log: Log;
   private readonly runners: {
-    prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string) => Promise<void>;
+    prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string, id?: string) => Promise<void>;
     commandSandbox?: () => { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string };
   };
   constructor(home: string, log: Log, runners: {
-    prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string) => Promise<void>;
+    prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string, id?: string) => Promise<void>;
     /** How command jobs run: wrap the argv (the shell sandbox) and the environment they get. */
     commandSandbox?: () => { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string };
-  }) {
+  }, opts: { recover?: boolean } = {}) {
     this.log = log;
     this.runners = runners;
     this.file = join(home, "schedules.json");
-    this.load();
+    this.load(!!opts.recover);
   }
 
-  private load(): void {
+  private load(recover: boolean): void {
     if (!existsSync(this.file)) return;
     try {
       const raw = JSON.parse(readFileSync(this.file, "utf8"));
@@ -74,11 +92,24 @@ export class Scheduler {
     } catch (e) {
       throw new Error(`${this.file} is not valid JSON: ${(e as Error).message}`);
     }
+    let changed = false;
     for (const job of this.jobs) {
       const interrupted = job.lastStatus === "running";
       if (interrupted) {
+        // The run is on disk as running: it was cut short by a restart. Its command is stopped, so nothing finishes
+        // unobserved, and the operator is told what happened.
+        const kind = job.runKind ?? (job.command ? "command" : job.builtin ? "builtin" : "agent");
+        const wasRunning = recover && job.runPid !== undefined && this.stopRunGroup(job.runPid, job.runStartedAt ?? Date.now());
+        if (recover) {
+          this.interrupted.push({ job, kind, wasRunning, startedAt: job.runStartedAt ?? job.lastRunAt ?? Date.now() });
+          this.log.warn("a scheduled run was interrupted by a restart", { id: job.id, name: job.name, kind, wasRunning });
+        }
         job.lastStatus = "error";
         job.lastError = "interrupted by a restart";
+        delete job.runPid;
+        delete job.runStartedAt;
+        delete job.runKind;
+        changed = true;
       }
       try {
         // An interrupted run waits for its next slot instead of firing again the moment Carl starts.
@@ -89,6 +120,31 @@ export class Scheduler {
         this.log.error("schedule disabled: bad timing", { id: job.id, error: job.lastError });
       }
     }
+    // The file said "running" for a run that is over: say so on disk, so nothing else reads a stale state.
+    if (changed && recover) {
+      try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); }
+    }
+  }
+
+  /**
+   * Stop the process group of a command that a restart cut short. Returns true when the group was still alive.
+   * A pid that was recycled by the system is left alone: it did not start before our run did.
+   */
+  private stopRunGroup(pgid: number, startedAt: number): boolean {
+    try {
+      process.kill(-pgid, 0);
+    } catch {
+      return false; // the group is gone: the command did not finish on its own
+    }
+    const born = processStart(pgid);
+    if (born !== undefined && born > startedAt + 5_000) {
+      this.log.warn("not stopping a process group that started after the interrupted run", { pgid, born, startedAt });
+      return false;
+    }
+    try { process.kill(-pgid, "SIGTERM"); } catch {}
+    const killer = setTimeout(() => { try { process.kill(-pgid, "SIGKILL"); } catch {} }, 2_000);
+    killer.unref();
+    return true;
   }
 
   private save(): void {
@@ -111,6 +167,26 @@ export class Scheduler {
     this.timer = setInterval(() => void this.tick(), 20_000);
     this.timer.unref();
     void this.tick();
+    void this.reportInterrupted();
+  }
+
+  /**
+   * Tell the operator about the runs a restart cut short. One message each, and never the same one twice: the
+   * delivery id is the run itself, so a restart during the notice does not send it again.
+   */
+  private async reportInterrupted(): Promise<void> {
+    for (const run of this.interrupted.splice(0)) {
+      const text = run.kind === "command"
+        ? run.wasRunning
+          ? "The run was interrupted by a restart. Its command was still running and has been stopped, so it may have applied part of its side effect. The next slot runs as normal."
+          : "The run was interrupted by a restart. Its command was no longer running, so whatever it did is already done. The next slot runs as normal."
+        : "The run was interrupted by a restart. It did not finish and is not repeated; the next slot runs as normal.";
+      try {
+        await this.runners.deliver(run.job, text, `schedule:${run.job.id}:interrupted:${run.startedAt}`);
+      } catch (e) {
+        this.log.error("cannot report an interrupted run", { id: run.job.id, error: (e as Error).message });
+      }
+    }
   }
 
   stop(): void {
@@ -218,6 +294,8 @@ export class Scheduler {
     try {
       job.lastStatus = "running";
       job.lastRunAt = Date.now();
+      job.runStartedAt = job.lastRunAt;
+      job.runKind = job.builtin ? "builtin" : job.command ? "command" : "agent";
       this.save();
       this.log.info("schedule started", { id: job.id, name: job.name });
       const timed = <T>(p: Promise<T>) =>
@@ -229,7 +307,13 @@ export class Scheduler {
       } else if (job.command) {
         const sandbox = this.runners.commandSandbox?.();
         output = await runCommand(job.command, Math.min(Math.max(job.timeoutMinutes ?? 10, 1), 240) * 60_000, this.children,
-          sandbox && job.unsandboxed === true ? { ...sandbox, wrap: (argv) => argv } : sandbox);
+          sandbox && job.unsandboxed === true ? { ...sandbox, wrap: (argv) => argv } : sandbox,
+          (pid) => {
+            // The command leads its own process group. The pid is on disk before the command can finish, so a
+            // restart can stop the group instead of leaving an orphan that completes unobserved.
+            job.runPid = pid;
+            try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); }
+          });
       } else if (job.prompt) {
         output = await timed(this.runners.prompt(job));
       } else {
@@ -244,6 +328,9 @@ export class Scheduler {
       this.log.error("schedule failed", { id: job.id, error: job.lastError });
     } finally {
       this.running.delete(job.id);
+      delete job.runPid;
+      delete job.runStartedAt;
+      delete job.runKind;
       try {
         job.nextRunAt = this.next(job, Date.now());
       } catch {
@@ -254,7 +341,7 @@ export class Scheduler {
     }
     const skip = job.deliver === "none" || (job.onlyIfOutput && job.lastStatus === "ok" && !output.trim());
     if (!skip && output.trim()) {
-      await this.runners.deliver(job, output).catch((e) => {
+      await this.runners.deliver(job, output, `schedule:${job.id}:run:${job.lastRunAt}`).catch((e) => {
         job.lastError = `ran, but delivery failed: ${(e as Error).message}`.slice(0, 500);
         this.log.error("schedule delivery failed", { id: job.id, error: (e as Error).message });
         try { this.save(); } catch {}
@@ -263,12 +350,22 @@ export class Scheduler {
   }
 }
 
-export function runCommand(command: string, timeoutMs: number, groups?: Set<number>, sandbox?: { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string }): Promise<string> {
+export function runCommand(
+  command: string,
+  timeoutMs: number,
+  groups?: Set<number>,
+  sandbox?: { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string },
+  onStart?: (pid: number) => void,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!sandbox) return reject(new Error("command schedules run only in the gateway, where they run inside the shell sandbox"));
     const argv = sandbox.wrap(["/bin/bash", "-lc", command]);
+    // detached: the command leads its own process group, so Carl can stop the whole group and not leave orphans.
     const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], detached: true, env: sandbox.env, cwd: sandbox.cwd });
-    if (child.pid) groups?.add(child.pid);
+    if (child.pid) {
+      groups?.add(child.pid);
+      onStart?.(child.pid);
+    }
     child.on("exit", () => child.pid && groups?.delete(child.pid));
     let out = "";
     const cap = (b: Buffer) => { if (out.length < 200_000) out += b.toString(); };
@@ -285,4 +382,16 @@ export function runCommand(command: string, timeoutMs: number, groups?: Set<numb
       else reject(new Error(`exit ${code}: ${out.trim().slice(-400)}`));
     });
   });
+}
+
+/** When a process started, in epoch ms, or undefined when the system will not say. */
+export function processStart(pid: number): number | undefined {
+  try {
+    const out = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000 }).trim();
+    if (!out) return undefined;
+    const at = Date.parse(out);
+    return Number.isNaN(at) ? undefined : at;
+  } catch {
+    return undefined;
+  }
 }

@@ -24,6 +24,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { type CarlConfig, mcpFile } from "./config.ts";
+import { inspectTurn, interruptedToolResult, contentText, type TurnInspection } from "./durable.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
@@ -40,6 +41,11 @@ export interface Inbound {
   source: "telegram" | "api" | "schedule" | "cli";
   /** Extra instruction for this message only (e.g. mirror mode). Sent as a hidden preface. */
   preface?: string;
+  /**
+   * The turn this reply belongs to, when the caller knows it: a message that is picked up again after a restart
+   * keeps the turn number of the message it continues, so its reply carries the same delivery id.
+   */
+  turn?: number;
 }
 
 export interface ReplySink {
@@ -55,12 +61,28 @@ export interface ReplySink {
   onDone?(result: RunResult): void;
 }
 
+/** What a resume of an interrupted turn did. */
+export interface ResumeOutcome {
+  /** "resumed": the turn was continued and the model answered. "answered": the transcript already held the answer. */
+  status: "resumed" | "answered" | "restart" | "not-resumable" | "failed";
+  /** The answer to deliver, when there is one. */
+  text?: string;
+  /** The turn the interrupted message belongs to. */
+  turn?: number;
+  /** The tool calls whose effect is unknown. */
+  uncertain?: { id: string; name: string }[];
+  /** Why the turn could not be resumed. */
+  reason?: string;
+}
+
 export interface RunResult {
   text: string;
   ok: boolean;
   error?: string;
   aborted: boolean;
   toolCalls: number;
+  /** The turn this run belongs to: the count of user messages in the conversation, this one included. */
+  turn?: number;
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
   model: string;
   ms: number;
@@ -528,7 +550,7 @@ export class Brain extends EventEmitter {
     }
     convo.busy = true;
     convo.source = input.source;
-    const run = this.run(convo, text, input.images, sink).finally(() => {
+    const run = this.run(convo, text, input.images, sink, { turn: input.turn }).finally(() => {
       convo.busy = false;
       convo.lastActivity = Date.now();
       convo.pending = undefined;
@@ -537,8 +559,21 @@ export class Brain extends EventEmitter {
     return run;
   }
 
-  private async run(convo: Conversation, text: string, images: ImageContent[] | undefined, sink: ReplySink): Promise<RunResult> {
+  /** The turn a new run would be: the count of user messages in the transcript, this one included. */
+  private nextTurn(convo: Conversation): number {
+    return convo.session.messages.filter((m: any) => m.role === "user").length + 1;
+  }
+
+  private async run(
+    convo: Conversation,
+    text: string,
+    images: ImageContent[] | undefined,
+    sink: ReplySink,
+    opts: { turn?: number; start?: () => Promise<void> } = {},
+  ): Promise<RunResult> {
     const started = Date.now();
+    // The turn is counted before the prompt: the user message of this run is not in the transcript yet.
+    const turn = opts.turn ?? this.nextTurn(convo);
     convo.stopRequested = false;
     convo.runId = (convo.runId ?? 0) + 1;
     sink.onRunStart?.(convo.runId);
@@ -581,8 +616,9 @@ export class Brain extends EventEmitter {
     });
     let thrown: Error | undefined;
     try {
+      if (opts.start) await opts.start();
       // Never run Pi extension /commands from message text: a schedule or webhook prompt is data, not a command.
-      await convo.session.prompt(text, { images, source: "rpc", expandPromptTemplates: false } as any);
+      else await convo.session.prompt(text, { images, source: "rpc", expandPromptTemplates: false } as any);
     } catch (e) {
       thrown = e as Error;
     } finally {
@@ -608,6 +644,7 @@ export class Brain extends EventEmitter {
       error,
       aborted,
       toolCalls,
+      turn,
       usage,
       // The physical model that answered (a router selection names the model it routed to).
       model: lastAssistant?.provider ? `${lastAssistant.provider}/${lastAssistant.model}` : this.modelRef(convo),
@@ -623,6 +660,79 @@ export class Brain extends EventEmitter {
   private modelRef(convo: Conversation): string {
     const m = convo.session.model;
     return m ? `${m.provider}/${m.id}` : this.cfg.model;
+  }
+
+  /**
+   * The answer of a recent turn in this conversation that carried the very same request. A request Carl already
+   * carried out is not carried out again: the operator is told what happened instead.
+   */
+  async recentDuplicate(key: string, text: string, withinMs = 15 * 60_000): Promise<{ text: string; at: number } | undefined> {
+    const needle = text.trim();
+    if (!needle) return undefined;
+    const convo = await this.get(key, "telegram");
+    const messages = convo.session.messages as any[];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== "user" || contentText(m).trim() !== needle) continue;
+      let answer = "";
+      let at = 0;
+      let ranTool = false;
+      for (let j = i + 1; j < messages.length; j++) {
+        const mm = messages[j];
+        if (mm.role === "user") break; // the next turn starts here
+        if (mm.role !== "assistant") continue;
+        if ((mm.content ?? []).some((c: any) => c.type === "toolCall")) ranTool = true;
+        const said = assistantText(mm);
+        if (said) { answer = said; at = mm.timestamp ?? 0; }
+      }
+      // Only a request that ran a tool is worth refusing: a repeated question costs nothing.
+      if (!ranTool || !answer) return undefined;
+      if (at && Date.now() - at > withinMs) return undefined;
+      return { text: answer, at };
+    }
+    return undefined;
+  }
+
+  /**
+   * Continue a turn that a restart cut short. A recorded tool call is never run again: the calls that have a result
+   * keep it, and the calls that have none get an honest result written for them, so the model can finish the turn
+   * instead of being told a fake failure.
+   */
+  async resumeTurn(
+    key: string,
+    text: string,
+    opts: { sink?: ReplySink; onPlan?: (plan: TurnInspection) => Promise<void> | void } = {},
+  ): Promise<ResumeOutcome> {
+    let convo: Conversation;
+    try {
+      convo = await this.get(key, "telegram");
+    } catch (e) {
+      return { status: "not-resumable", reason: (e as Error).message };
+    }
+    const inspection = inspectTurn(convo.session.messages as any[], text);
+    if (!inspection) return { status: "not-resumable", reason: "the interrupted message is not in the transcript" };
+    if (inspection.state === "nothing") return { status: "restart", turn: inspection.turn };
+    if (inspection.state === "answered") return { status: "answered", text: inspection.finalText, turn: inspection.turn };
+    for (const call of inspection.pending) {
+      const message = interruptedToolResult(call);
+      // The transcript is the record: the honest result is written there before the model is asked again.
+      convo.session.sessionManager.appendMessage(message);
+      convo.session.messages.push(message);
+      this.log.info("wrote an honest result for a tool call a restart cut short", { key, tool: call.name, call: call.id });
+    }
+    await opts.onPlan?.(inspection);
+    const result = await this.run(convo, "", undefined, opts.sink ?? {}, {
+      turn: inspection.turn,
+      // Continue the recorded turn: the model answers from the transcript, no recorded tool runs again.
+      start: () => convo.session.agent.continue(),
+    });
+    if (!result.ok && !result.text) return { status: "failed", reason: result.error, turn: inspection.turn };
+    return {
+      status: "resumed",
+      text: result.text,
+      turn: inspection.turn,
+      uncertain: inspection.pending.map((c) => ({ id: c.id, name: c.name })),
+    };
   }
 
   private observe(convo: Conversation): void {
@@ -727,6 +837,13 @@ export class Brain extends EventEmitter {
       tokens: stats.tokens,
       context: ctx ? { tokens: ctx.tokens, budget: Math.min(this.cfg.contextBudget, ctx.contextWindow) } : undefined,
     };
+  }
+
+  /** The turn the conversation is in: the count of user messages in its transcript. */
+  currentTurn(key: string): number {
+    const convo = this.conversations.get(key);
+    if (!convo) return 0;
+    return convo.session.messages.filter((m: any) => m.role === "user").length;
   }
 
   /** Resolves once a message for this conversation has reached a session (busy), or after 5 s. */
