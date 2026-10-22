@@ -24,7 +24,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { type CarlConfig, mcpFile } from "./config.ts";
-import { inspectTurn, interruptedToolResult, contentText, INTERRUPTED_TOOL_RESULT, type TurnInspection } from "./durable.ts";
+import { inspectTurn, interruptedToolResult, contentText, isInterruptedResult, type TurnInspection } from "./durable.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
@@ -687,7 +687,8 @@ export class Brain extends EventEmitter {
         if (mm.role === "user") break; // the next turn starts here
         // Only a turn a restart cut short counts: its tool may already have acted, so a verbatim resend must not
         // run it again. A request that finished normally can be repeated on purpose ("check the queue" twice).
-        if (mm.role === "toolResult" && contentText(mm).includes(INTERRUPTED_TOOL_RESULT)) ranTool = true;
+        // The mark is a field on the result, not a phrase in the text the model may word differently.
+        if (isInterruptedResult(mm)) ranTool = true;
         if (mm.role !== "assistant") continue;
         const said = assistantText(mm);
         if (said) { answer = said; at = mm.timestamp ?? 0; }
@@ -696,6 +697,16 @@ export class Brain extends EventEmitter {
       if (!ranTool || !answer) continue;
       if (at && Date.now() - at > withinMs) return undefined;
       return { text: answer, at };
+    }
+    // The context may no longer hold the message (a compaction summarised it away): the raw transcript still has it.
+    const raw = scanRawTurn(this.cfg.home, key, needle);
+    if (raw.found && raw.cutShort) {
+      // A tool call followed the message and never came back: the side effect may already have happened.
+      if (raw.at && Date.now() - raw.at > withinMs) return undefined;
+      return {
+        text: raw.answer ?? "the tool call it started may already have taken effect; I did not run it again",
+        at: raw.at,
+      };
     }
     return undefined;
   }
@@ -717,9 +728,25 @@ export class Brain extends EventEmitter {
       return { status: "not-resumable", reason: (e as Error).message };
     }
     const inspection = inspectTurn(convo.session.messages as any[], text);
-    // The message is not in the transcript: the turn never reached the model, so nothing of it ran and it can be
-    // run again from the start.
-    if (!inspection) return { status: "restart", turn: this.nextTurn(convo) };
+    if (!inspection) {
+      // The context does not hold the message. Either the turn never reached the model (nothing of it ran, so it
+      // can be run again from the start), or a compaction summarised it away - and the raw transcript still has it.
+      const raw = scanRawTurn(this.cfg.home, key, text);
+      if (raw.found && raw.toolRan) {
+        // A tool ran after this message: its side effect may already have happened. The turn is reported, never
+        // run again.
+        this.log.info("the message left the context, but a tool ran after it: reporting it instead of running it again", {
+          key, cutShort: raw.cutShort, answered: !!raw.answer,
+        });
+        if (raw.answer) return { status: "answered", text: raw.answer, turn: raw.turn };
+        return {
+          status: "not-resumable",
+          reason: "the context was compacted after this message and a tool ran after it: it is reported, not run again",
+          turn: raw.turn,
+        };
+      }
+      return { status: "restart", turn: this.nextTurn(convo) };
+    }
     if (inspection.state === "nothing") return { status: "restart", turn: inspection.turn };
     if (inspection.state === "answered") return { status: "answered", text: inspection.finalText, turn: inspection.turn };
     for (const call of inspection.pending) {
@@ -730,11 +757,24 @@ export class Brain extends EventEmitter {
       this.log.info("wrote an honest result for a tool call a restart cut short", { key, tool: call.name, call: call.id });
     }
     await opts.onPlan?.(inspection);
-    const result = await this.run(convo, "", undefined, opts.sink ?? {}, {
-      turn: inspection.turn,
-      // Continue the recorded turn: the model answers from the transcript, no recorded tool runs again.
-      start: () => convo.session.agent.continue(),
-    });
+    // The conversation is busy for the whole resume: a message that arrives meanwhile waits for it instead of
+    // racing it (and a verbatim resend is answered, not run again).
+    convo.busy = true;
+    convo.lastActivity = Date.now();
+    let result: RunResult;
+    try {
+      const run = this.run(convo, "", undefined, opts.sink ?? {}, {
+        turn: inspection.turn,
+        // Continue the recorded turn: the model answers from the transcript, no recorded tool runs again.
+        start: () => convo.session.agent.continue(),
+      });
+      convo.pending = run;
+      result = await run;
+    } finally {
+      convo.busy = false;
+      convo.pending = undefined;
+      convo.lastActivity = Date.now();
+    }
     if (!result.ok && !result.text) return { status: "failed", reason: result.error, turn: inspection.turn };
     return {
       status: "resumed",
@@ -966,18 +1006,81 @@ export class Brain extends EventEmitter {
  * message never reached the transcript (the turn can be rerun without repeating any action).
  */
 export function toolsRanAfter(home: string, key: string, text: string): boolean {
+  return scanRawTurn(home, key, text).toolRan;
+}
+
+/** What the raw transcript (not the compacted context) says about a message. */
+export interface RawTurn {
+  /** The message is in the raw transcript. */
+  found: boolean;
+  /** The turn the message belongs to: the count of user messages up to and including it. */
+  turn: number;
+  /** A tool call followed the message. */
+  toolRan: boolean;
+  /** A tool call followed the message and never came back: the turn was cut short. */
+  cutShort: boolean;
+  /** The answer the turn produced, when it produced one. */
+  answer?: string;
+  /** When the turn's last message was written. */
+  at: number;
+}
+
+/**
+ * Read the raw session transcript of a conversation and say what the turn around the operator's message did.
+ * The context of a live session may have been compacted and no longer hold the message; the transcript on disk
+ * always does, so it is the place to look before running a message again.
+ */
+export function scanRawTurn(home: string, key: string, text: string): RawTurn {
+  const out: RawTurn = { found: false, turn: 0, toolRan: false, cutShort: false, at: 0 };
   const dir = sessionDir(home, key);
-  if (!existsSync(dir)) return false;
+  if (!existsSync(dir)) return out;
+  const needle = text.trim();
+  if (!needle) return out;
   const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl")).sort();
-  if (!files.length) return false;
-  const needle = text.slice(0, 200);
-  const messages = readFileSync(join(dir, files[files.length - 1]), "utf8").split("\n").filter(Boolean)
-    .map((line) => { try { return JSON.parse(line).message; } catch { return undefined; } }).filter(Boolean) as any[];
-  const contentText = (m: any) => typeof m.content === "string" ? m.content : (m.content ?? []).map((c: any) => c.text ?? "").join("\n");
-  let at = -1;
-  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user" && contentText(messages[i]).includes(needle)) { at = i; break; }
-  if (at < 0) return false;
-  return messages.slice(at + 1).some((m) => m.role === "toolResult" || (m.role === "assistant" && (m.content ?? []).some?.((c: any) => c.type === "toolCall")));
+  for (const file of files) {
+    let entries: any[];
+    try {
+      entries = readFileSync(join(dir, file), "utf8").split("\n").filter(Boolean)
+        .map((l) => { try { return JSON.parse(l); } catch { return undefined; } })
+        .filter((e): e is any => !!e);
+    } catch {
+      continue; // a transcript that cannot be read says nothing
+    }
+    const messages = entries.map((e) => e.message).filter((m: any) => !!m);
+    let users = 0;
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role === "user") users++;
+      if (m.role !== "user") continue;
+      const t = contentText(m).trim();
+      // The in-flight journal keeps a shortened text, so a prefix of the message counts as the same message.
+      if (t !== needle && !t.startsWith(needle)) continue;
+      const issued = new Set<string>();
+      const answered = new Set<string>();
+      let answer = "";
+      let at = 0;
+      for (let j = i + 1; j < messages.length; j++) {
+        const mm = messages[j];
+        if (mm.role === "user") break; // the next turn starts here
+        if (mm.role === "assistant") {
+          for (const c of mm.content ?? []) if (c?.type === "toolCall" && c.id) issued.add(c.id);
+          const said = assistantText(mm);
+          if (said) { answer = said; at = mm.timestamp ?? at; }
+        } else if (mm.role === "toolResult") {
+          if (mm.toolCallId) answered.add(mm.toolCallId);
+        }
+      }
+      const pending = [...issued].filter((id) => !answered.has(id));
+      const entryAt = Date.parse(entries[i]?.timestamp ?? "");
+      out.found = true;
+      out.turn = users;
+      out.toolRan = issued.size > 0;
+      out.cutShort = pending.length > 0;
+      out.answer = answer || undefined;
+      out.at = at || (Number.isNaN(entryAt) ? 0 : entryAt);
+    }
+  }
+  return out;
 }
 
 export function sessionDir(home: string, key: string): string {

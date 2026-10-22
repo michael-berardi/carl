@@ -183,6 +183,18 @@ export class TelegramChannel {
     void next.finally(() => { if (this.chains.get(key) === next) this.chains.delete(key); });
   }
 
+  /**
+   * Run a step in the chat's own queue: the next message of that chat waits until the step is done. A resume of an
+   * interrupted turn is such a step, so the messages that arrive while Carl was down never run beside it.
+   */
+  private chainStep(key: string, step: () => Promise<void>): Promise<void> {
+    const prev = this.chains.get(key) ?? Promise.resolve();
+    const next = prev.then(step).catch((e) => this.log.error("a chat step failed", { key, error: (e as Error).message }));
+    this.chains.set(key, next);
+    void next.finally(() => { if (this.chains.get(key) === next) this.chains.delete(key); });
+    return next;
+  }
+
   // ---- In-flight journal: a restart mid-turn is reported to the operator instead of silently dropped. ----
 
   private readonly inflightFile = () => join(this.cfg.home, "state", "inflight.json");
@@ -215,43 +227,60 @@ export class TelegramChannel {
         // At most one automatic pickup: from here on the message counts as resumed, so a second restart reports it
         // instead of picking it up again.
         this.markInflight(id, { chatId: e.chatId, threadId: e.threadId, text: e.text, resumed: true });
-        // The draft shows the answer while the resumed turn runs; it is only created when there is something to show.
-        let draft: Draft | undefined;
-        const newDraft = (): Draft => (draft ??= new Draft(this.api, e.chatId, messageId, e.threadId, this.cfg.telegram.stream));
-        const outcome = await this.brain.resumeTurn(key, e.text, {
-          sink: {
-            onText: (t) => newDraft().update(t),
-            onTool: (n, d) => newDraft().tool(n, d),
-          },
-          onPlan: async (plan) => {
-            const uncertain = plan.pending.map((c) => c.name);
-            const what = uncertain.length
-              ? `\n\nThe ${uncertain.map((n) => `\`${n}\``).join(" and ")} call may or may not have taken effect; I did not run it again.`
-              : "";
-            await this.sendNotice(e.chatId, key, messageId, plan.turn, e.threadId, `I restarted while working on this, so I am picking it up again from where it stopped:\n\n> ${excerpt.replace(/\n/g, " ")}${what}`);
-          },
-        }).catch((err) => ({ status: "not-resumable" as const, reason: (err as Error).message }));
-        if (outcome.status === "restart") {
-          // Nothing had run yet: the turn is picked up again from the start and nothing can be repeated.
-          this.log.info("resuming a message interrupted by a restart", { chat: e.chatId, message: messageId });
-          await this.sendNotice(e.chatId, key, messageId, outcome.turn ?? 0, e.threadId, `I restarted while answering this, so I am picking it up again:\n\n> ${excerpt.replace(/\n/g, " ")}`);
-          this.markInflight(id);
-          this.resumedTurns.set(id, outcome.turn ?? 0);
-          this.enqueueMessage({ message_id: messageId, date: Math.floor(Date.now() / 1000), chat: { id: e.chatId, type: "private" }, from: { id: e.chatId, is_bot: false, first_name: "" }, text: e.text } as TgMessage);
-          this.markInflight(id, { chatId: e.chatId, threadId: e.threadId, text: e.text, resumed: true });
-          continue;
-        }
-        if (outcome.status === "resumed" || outcome.status === "answered") {
-          await this.deliverResumed(key, messageId, outcome, e, draft);
-          this.markInflight(id);
-          continue;
-        }
-        if (outcome.status === "failed") {
-          this.log.warn("a resumed turn did not finish", { chat: e.chatId, message: messageId, error: outcome.reason });
-        }
+        // The resume runs in the chat's own queue, and the queue only moves on when the answer is out: a message
+        // that arrived while Carl was down waits for the resumed turn instead of racing its side effect.
+        await this.chainStep(key, () => this.resumeInterrupted(id, e, messageId, key, excerpt));
+        continue;
       }
-      await this.sendNotice(e.chatId, key, messageId, 0, e.threadId, `I restarted while working on this, so it did not finish:\n\n> ${excerpt.replace(/\n/g, " ")}\n\nSend it again if it still matters.`);
+      await this.sendNotice(e.chatId, key, messageId, e.threadId, `I restarted while working on this, so it did not finish:\n\n> ${excerpt.replace(/\n/g, " ")}\n\nSend it again if it still matters.`, "unfinished");
       this.markInflight(id);
+    }
+  }
+
+  /**
+   * Pick an interrupted message up again: continue the turn it was in, or run it from the start when nothing of it
+   * ran. The answer is delivered before this returns, so the chat's queue only moves on when the reply is out.
+   */
+  private async resumeInterrupted(
+    id: string,
+    e: { chatId: number; threadId?: number; text: string },
+    messageId: number,
+    key: string,
+    excerpt: string,
+  ): Promise<void> {
+    // The draft shows the answer while the resumed turn runs; it is only created when there is something to show.
+    let draft: Draft | undefined;
+    const newDraft = (): Draft => (draft ??= new Draft(this.api, e.chatId, messageId, e.threadId, this.cfg.telegram.stream));
+    const outcome = await this.brain.resumeTurn(key, e.text, {
+      sink: {
+        onText: (t) => newDraft().update(t),
+        onTool: (n, d) => newDraft().tool(n, d),
+      },
+      onPlan: async (plan) => {
+        const uncertain = plan.pending.map((c) => c.name);
+        const what = uncertain.length
+          ? `\n\nThe ${uncertain.map((n) => `\`${n}\``).join(" and ")} call may or may not have taken effect; I did not run it again.`
+          : "";
+        await this.sendNotice(e.chatId, key, messageId, e.threadId, `I restarted while working on this, so I am picking it up again from where it stopped:\n\n> ${excerpt.replace(/\n/g, " ")}${what}`, "resumed");
+      },
+    }).catch((err) => ({ status: "not-resumable" as const, reason: (err as Error).message }));
+    if (outcome.status === "restart") {
+      // Nothing had run yet: the turn is picked up again from the start and nothing can be repeated.
+      this.log.info("resuming a message interrupted by a restart", { chat: e.chatId, message: messageId });
+      await this.sendNotice(e.chatId, key, messageId, e.threadId, `I restarted while answering this, so I am picking it up again:\n\n> ${excerpt.replace(/\n/g, " ")}`, "pickup");
+      this.markInflight(id);
+      this.resumedTurns.set(id, outcome.turn ?? 0);
+      this.enqueueMessage({ message_id: messageId, date: Math.floor(Date.now() / 1000), chat: { id: e.chatId, type: "private" }, from: { id: e.chatId, is_bot: false, first_name: "" }, text: e.text } as TgMessage);
+      this.markInflight(id, { chatId: e.chatId, threadId: e.threadId, text: e.text, resumed: true });
+      return;
+    }
+    if (outcome.status === "resumed" || outcome.status === "answered") {
+      await this.deliverResumed(key, messageId, outcome, e, draft);
+      this.markInflight(id);
+      return;
+    }
+    if (outcome.status === "failed") {
+      this.log.warn("a resumed turn did not finish", { chat: e.chatId, message: messageId, error: outcome.reason });
     }
   }
 
@@ -266,18 +295,24 @@ export class TelegramChannel {
     e: { chatId: number; threadId?: number; text: string },
     draft: Draft | undefined,
   ): Promise<void> {
-    const turn = outcome.turn ?? 0;
     const answer = outcome.text?.trim();
     if (!answer) {
       // The turn owes an answer but the model gave none: say so instead of pretending it worked.
-      await this.sendNotice(e.chatId, key, messageId, turn, e.threadId, "I restarted while working on this and picked the turn up again, but it did not produce an answer.");
+      await this.sendNotice(e.chatId, key, messageId, e.threadId, "I restarted while working on this and picked the turn up again, but it did not produce an answer.", "no-answer");
       return;
     }
-    const id = deliveryId(key, messageId, turn);
+    const id = deliveryId(key, messageId);
     const state = this.ledger.begin(id, { chatId: e.chatId, preview: answer });
     if (state !== "new") {
       this.log.info(state === "sent" ? "the answer was already delivered; not sending it again" : "the answer delivery was never confirmed; not sending it again", { id });
-      await this.sendNotice(e.chatId, key, messageId, turn, e.threadId, "I restarted while working on this; the answer had already gone out before the restart.");
+      // An unconfirmed send may or may not have gone out: say that, not that it did.
+      await this.sendNotice(
+        e.chatId, key, messageId, e.threadId,
+        state === "sent"
+          ? "I restarted while working on this; the answer had already gone out before the restart."
+          : "I restarted while working on this; the answer may already have gone out before the restart, so I did not send it again.",
+        state === "sent" ? "gone-out" : "maybe-gone-out",
+      );
       return;
     }
     try {
@@ -292,8 +327,8 @@ export class TelegramChannel {
   }
 
   /** Tell the operator what happened to an interrupted message. The notice goes out once, like every reply. */
-  private async sendNotice(chatId: number, key: string, messageId: number, turn: number, threadId: number | undefined, text: string): Promise<void> {
-    const id = deliveryId(key, messageId, turn, "notice");
+  private async sendNotice(chatId: number, key: string, messageId: number, threadId: number | undefined, text: string, part = "notice"): Promise<void> {
+    const id = deliveryId(key, messageId, part);
     const state = this.ledger.begin(id, { chatId, preview: text });
     if (state !== "new") return;
     try {
@@ -366,7 +401,7 @@ export class TelegramChannel {
 
   /** A short reply that goes out once, like every other reply. */
   private async sendReply(chatId: number, m: TgMessage, key: string, text: string): Promise<void> {
-    const id = deliveryId(key, m.message_id, this.brain.currentTurn(key) + 1);
+    const id = deliveryId(key, m.message_id);
     const state = this.ledger.begin(id, { chatId, preview: text });
     if (state !== "new") return;
     try {
@@ -418,10 +453,12 @@ export class TelegramChannel {
     if (benched && result.ok && result.model !== this.cfg.model) {
       final += `\n\n_(${result.model.split("/").pop()} answered: ${this.cfg.model.split("/").pop()} is at its usage limit until ${new Date(benched[1]).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})_`;
     }
-    await this.deliverFinal(draft, chatId, threadId, final, deliveryId(key, m.message_id, result.turn ?? 0));
+    await this.deliverFinal(draft, chatId, threadId, final, deliveryId(key, m.message_id));
   }
 
-  // ---- Durable delivery: a final reply that fails to send is kept and retried until Telegram takes it. ----
+  // ---- Durable delivery: a final reply that fails to send is kept and retried until Telegram takes it. The outbox
+  // is a retry queue, not an exactly-once channel: a chunk whose ledger record has been pruned can still go out
+  // twice. ----
 
   private readonly outboxFile = () => join(this.cfg.home, "state", "outbox.json");
   private outboxTimer?: NodeJS.Timeout;
@@ -497,7 +534,8 @@ export class TelegramChannel {
       }
       try {
         while (item.chunks.length) {
-          // Every chunk has its own delivery id: a crash between the send and the persist cannot resend it.
+          // Every chunk has its own delivery id: while the ledger still knows the chunk, a crash between the send
+          // and the persist cannot resend it. Once the record is pruned from the ledger, the chunk may go out again.
           const chunkId = item.baseId ? `${item.baseId}#${item.sentCount ?? 0}` : undefined;
           if (chunkId) {
             const state = this.ledger.begin(chunkId, { chatId: item.chatId, preview: item.chunks[0] });
@@ -662,24 +700,35 @@ export class TelegramChannel {
       await this.api.sendMessage(chatId, `Refused without asking: a ${reason} request of ${command.length} characters is too long to review here.`).catch(() => {});
       return "denied";
     }
-    let msg: TgMessage | undefined;
+    let cardMessageId: number | undefined;
     if (stable) {
+      const existing = this.ledger.get(stable);
       const state = this.ledger.begin(stable, { chatId, preview: command });
-      if (state === "new") {
-        msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
-        this.ledger.sent(stable, [msg.message_id]);
-      } else {
+      if (state === "sent" && existing?.messageIds?.length) {
         // The card is already in the chat (P-1416): the operator answers that one, no second card goes out.
         this.log.info("the approval card is already in the chat; not sending a second one", { id: stable });
+        cardMessageId = existing.messageIds[0];
+      } else {
+        // "new", or a card whose send was never confirmed: it may never have reached the chat, so the approval is
+        // asked again instead of being blocked for good. A card that did reach the chat loses its buttons below.
+        const msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
+        cardMessageId = msg.message_id;
+        this.ledger.sent(stable, [msg.message_id]);
+        // A card from an earlier, unconfirmed attempt must not stay live next to the new one.
+        for (const old of existing?.messageIds ?? []) {
+          await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: old, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
+        }
       }
     } else {
-      msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
+      const msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
+      cardMessageId = msg.message_id;
     }
     const answer = await this.waitForApproval(id);
     if (stable) this.ledger.resolve(stable);
     const mark = answer === "approved" ? "✅ approved" : answer === "denied" ? "⛔ denied" : "⌛ expired (not run)";
-    if (msg) await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: msg.message_id, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
-    await this.api.sendMessage(chatId, mark, { replyTo: msg?.message_id, silent: true }).catch(() => {});
+    // The settled card keeps no live buttons: a card that was answered must not be answerable again.
+    if (cardMessageId) await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: cardMessageId, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
+    await this.api.sendMessage(chatId, mark, { replyTo: cardMessageId, silent: true }).catch(() => {});
     return answer;
   }
 

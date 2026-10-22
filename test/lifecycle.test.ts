@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, existsSync, readFileSync, utimesSync, writeFile
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Scheduler } from "../src/scheduler.ts";
+import { Scheduler, mayStopGroup } from "../src/scheduler.ts";
+import { Gateway } from "../src/gateway.ts";
 import { Log } from "../src/log.ts";
 import { sweepCallFolders } from "../src/providers/claude-code.ts";
 import { ConfigError, loadConfig } from "../src/config.ts";
@@ -102,12 +103,15 @@ test("a run a restart cut short is reported once, and its command is stopped ins
 
   // A plain command (carl schedules) must not touch the running job.
   const cli = new Scheduler(home, new Log(join(home, "log")), runners as never);
-  assert.equal(cli.get("j-run").lastStatus, "error");
+  assert.equal(cli.get("j-run").lastStatus, "running", "the in-memory state is left alone too");
   assert.equal(JSON.parse(readFileSync(join(home, "schedules.json"), "utf8")).jobs[0].lastStatus, "running", "the file is left alone");
   assert.ok(process.kill(-pid, 0) === undefined || true); // the group is still there
 
   // The gateway comes back: it stops the command and tells the operator.
-  const gw = new Scheduler(home, new Log(join(home, "log")), runners as never, { recover: true });
+  const gw = new Scheduler(home, new Log(join(home, "log")), runners as never);
+  assert.equal(gw.recovered, false, "nothing is recovered until the gateway asks for it");
+  gw.recover();
+  assert.equal(gw.recovered, true);
   const onDisk = JSON.parse(readFileSync(join(home, "schedules.json"), "utf8")).jobs[0];
   assert.equal(onDisk.lastStatus, "error", "the interrupted run is marked on disk");
   assert.equal(onDisk.lastError, "interrupted by a restart");
@@ -125,9 +129,81 @@ test("a run a restart cut short is reported once, and its command is stopped ins
   assert.ok(delivered[0].id, "the notice has a delivery id, so a second restart does not repeat it");
 
   // A second restart has nothing to report: the run is not "running" any more.
-  const again = new Scheduler(home, new Log(join(home, "log")), runners as never, { recover: true });
+  const again = new Scheduler(home, new Log(join(home, "log")), runners as never);
+  again.recover();
   again.start();
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(delivered.length, 1, "the notice is not repeated");
   gw.stop();
+});
+
+test("a process group is only stopped when it is provably the one the interrupted run started", () => {
+  assert.equal(mayStopGroup(Date.now() - 1_000, Date.now()), true, "the group started before the run did");
+  assert.equal(mayStopGroup(Date.now() + 60_000, Date.now()), false, "a recycled pid is left alone");
+  assert.equal(mayStopGroup(undefined, Date.now()), false, "an unknown start time fails closed: nothing is killed");
+});
+
+test("a second gateway never signals the running gateway's command nor rewrites its schedules", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "carl-gw-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, "state"), { recursive: true });
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { enabled: false }, api: { enabled: false } }));
+  // A command that is running in its own process group, like a command schedule of the live gateway.
+  const child = spawn("/bin/sleep", ["30"], { detached: true, stdio: "ignore" });
+  await new Promise((r) => setTimeout(r, 200));
+  const pid = child.pid!;
+  t.after(() => { try { process.kill(-pid, "SIGKILL"); } catch {} });
+  writeFileSync(join(home, "schedules.json"), JSON.stringify({
+    jobs: [{
+      id: "j-run", name: "marker job", when: "every 1m", command: "sleep 30", deliver: "home", enabled: true,
+      createdAt: new Date().toISOString(), lastStatus: "running", lastRunAt: Date.now() - 5_000,
+      runStartedAt: Date.now() - 5_000, runPid: pid, runKind: "command",
+    }],
+  }, null, 2));
+  const onDisk = () => JSON.parse(readFileSync(join(home, "schedules.json"), "utf8")).jobs[0];
+  const groupAlive = () => { try { process.kill(-pid, 0); return true; } catch { return false; } };
+
+  // A live gateway holds the pid: its command line has to look like Carl's.
+  const live = spawn(process.execPath, ["-e", "setTimeout(() => {}, 600000)", "main.ts", "gateway"], { stdio: "ignore" });
+  await new Promise((r) => setTimeout(r, 300));
+  t.after(() => { try { live.kill("SIGKILL"); } catch {} });
+  writeFileSync(join(home, "state", "gateway.pid"), String(live.pid));
+
+  // Building a gateway is what `carl reflect` does: it must not touch the running gateway's work.
+  const gw = new Gateway(loadConfig(home));
+  assert.equal(onDisk().lastStatus, "running", "the schedules of the live gateway are left alone");
+  assert.equal(groupAlive(), true, "the command of the live gateway is left alone");
+  assert.equal(gw.scheduler.recovered, false, "no recovery before the pid is claimed");
+
+  // And starting it fails: another gateway owns the pid, so it never recovers the schedules either.
+  await assert.rejects(() => gw.start(), /another Carl gateway/);
+  assert.equal(onDisk().lastStatus, "running", "the schedules are still left alone");
+  assert.equal(groupAlive(), true, "the command is still left alone");
+  assert.equal(gw.scheduler.recovered, false, "no recovery without the pid");
+});
+
+test("the gateway that owns the pid recovers the run a restart cut short", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "carl-gw-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, "state"), { recursive: true });
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { enabled: false }, api: { enabled: false } }));
+  const child = spawn("/bin/sleep", ["30"], { detached: true, stdio: "ignore" });
+  await new Promise((r) => setTimeout(r, 200));
+  const pid = child.pid!;
+  t.after(() => { try { process.kill(-pid, "SIGKILL"); } catch {} });
+  writeFileSync(join(home, "schedules.json"), JSON.stringify({
+    jobs: [{
+      id: "j-run", name: "marker job", when: "every 1m", command: "sleep 30", deliver: "home", enabled: true,
+      createdAt: new Date().toISOString(), lastStatus: "running", lastRunAt: Date.now() - 5_000,
+      runStartedAt: Date.now() - 5_000, runPid: pid, runKind: "command",
+    }],
+  }, null, 2));
+  const gw = new Gateway(loadConfig(home));
+  // The model layer is not needed for this: the recovery happens right after the pid is claimed.
+  (gw.brain as any).init = async () => { throw new Error("stop here"); };
+  await assert.rejects(() => gw.start(), /stop here/);
+  assert.equal(gw.scheduler.recovered, true, "the recovery ran once the pid was claimed");
+  const onDisk = JSON.parse(readFileSync(join(home, "schedules.json"), "utf8")).jobs[0];
+  assert.equal(onDisk.lastStatus, "error", "the interrupted run is marked on disk");
+  assert.equal(onDisk.runPid, undefined, "the run is over");
 });

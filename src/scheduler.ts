@@ -77,14 +77,14 @@ export class Scheduler {
     prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string, id?: string) => Promise<void>;
     /** How command jobs run: wrap the argv (the shell sandbox) and the environment they get. */
     commandSandbox?: () => { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string };
-  }, opts: { recover?: boolean } = {}) {
+  }) {
     this.log = log;
     this.runners = runners;
     this.file = join(home, "schedules.json");
-    this.load(!!opts.recover);
+    this.load();
   }
 
-  private load(recover: boolean): void {
+  private load(): void {
     if (!existsSync(this.file)) return;
     try {
       const raw = JSON.parse(readFileSync(this.file, "utf8"));
@@ -92,58 +92,97 @@ export class Scheduler {
     } catch (e) {
       throw new Error(`${this.file} is not valid JSON: ${(e as Error).message}`);
     }
-    let changed = false;
     for (const job of this.jobs) {
-      const interrupted = job.lastStatus === "running";
-      if (interrupted) {
-        // The run is on disk as running: it was cut short by a restart. Its command is stopped, so nothing finishes
-        // unobserved, and the operator is told what happened.
-        const kind = job.runKind ?? (job.command ? "command" : job.builtin ? "builtin" : "agent");
-        const wasRunning = recover && job.runPid !== undefined && this.stopRunGroup(job.runPid, job.runStartedAt ?? Date.now());
-        if (recover) {
-          this.interrupted.push({ job, kind, wasRunning, startedAt: job.runStartedAt ?? job.lastRunAt ?? Date.now() });
-          this.log.warn("a scheduled run was interrupted by a restart", { id: job.id, name: job.name, kind, wasRunning });
-        }
-        job.lastStatus = "error";
-        job.lastError = "interrupted by a restart";
-        delete job.runPid;
-        delete job.runStartedAt;
-        delete job.runKind;
-        changed = true;
-      }
+      if (job.nextRunAt !== undefined) continue;
       try {
-        // An interrupted run waits for its next slot instead of firing again the moment Carl starts.
-        if (job.nextRunAt === undefined || interrupted) job.nextRunAt = this.next(job, Date.now());
+        job.nextRunAt = this.next(job, Date.now());
       } catch (e) {
         job.enabled = false;
         job.lastError = (e as Error).message;
         this.log.error("schedule disabled: bad timing", { id: job.id, error: job.lastError });
       }
     }
+  }
+
+  /**
+   * Recover from a restart: stop the command groups of the runs that were cut short, mark them on disk and report
+   * them once. Only the gateway that owns the pid may do this: a second gateway, or a plain command such as
+   * `carl reflect`, must never stop the running gateway's command or rewrite its schedules.
+   */
+  recover(): void {
+    let changed = false;
+    for (const job of this.jobs) {
+      if (job.lastStatus !== "running") continue;      // The run is on disk as running: it was cut short by a restart. Its command is stopped, so nothing finishes
+      // unobserved, and the operator is told what happened.
+      const kind = job.runKind ?? (job.command ? "command" : job.builtin ? "builtin" : "agent");
+      const wasRunning = job.runPid !== undefined && this.stopRunGroup(job.runPid, job.runStartedAt ?? Date.now());
+      this.interrupted.push({ job, kind, wasRunning, startedAt: job.runStartedAt ?? job.lastRunAt ?? Date.now() });
+      this.log.warn("a scheduled run was interrupted by a restart", { id: job.id, name: job.name, kind, wasRunning });
+      job.lastStatus = "error";
+      job.lastError = "interrupted by a restart";
+      delete job.runPid;
+      delete job.runStartedAt;
+      delete job.runKind;
+      try {
+        // An interrupted run waits for its next slot instead of firing again the moment Carl starts.
+        job.nextRunAt = this.next(job, Date.now());
+      } catch (e) {
+        job.enabled = false;
+        job.lastError = (e as Error).message;
+        this.log.error("schedule disabled: bad timing", { id: job.id, error: job.lastError });
+      }
+      changed = true;
+    }
     // The file said "running" for a run that is over: say so on disk, so nothing else reads a stale state.
-    if (changed && recover) {
+    if (changed) {
+      this.didRecover = true;
       try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); }
     }
   }
 
+  /** True when a restart was recovered from: the interrupted runs were stopped and marked. */
+  get recovered(): boolean {
+    return this.didRecover;
+  }
+  private didRecover = false;
+
   /**
    * Stop the process group of a command that a restart cut short. Returns true when the group was still alive.
-   * A pid that was recycled by the system is left alone: it did not start before our run did.
+   * A pid that was recycled by the system is left alone: it did not start before our run did. When the system will
+   * not say when the process started, nothing is killed at all: an unknown process is never assumed to be ours.
    */
   private stopRunGroup(pgid: number, startedAt: number): boolean {
+    if (!this.groupIsOurs(pgid, startedAt)) return false;
+    try { process.kill(-pgid, "SIGTERM"); } catch {}
+    const killer = setTimeout(() => {
+      // The group may have been recycled in the meantime, so it is looked at again before the kill.
+      if (!this.groupIsOurs(pgid, startedAt)) {
+        this.log.warn("the interrupted run's process group is gone or was recycled; not killing it", { pgid });
+        return;
+      }
+      try { process.kill(-pgid, "SIGKILL"); } catch {}
+    }, 2_000);
+    killer.unref();
+    return true;
+  }
+
+  /** True when the process group is still the one the interrupted run started. */
+  private groupIsOurs(pgid: number, startedAt: number): boolean {
     try {
       process.kill(-pgid, 0);
     } catch {
       return false; // the group is gone: the command did not finish on its own
     }
     const born = processStart(pgid);
-    if (born !== undefined && born > startedAt + 5_000) {
-      this.log.warn("not stopping a process group that started after the interrupted run", { pgid, born, startedAt });
+    if (!mayStopGroup(born, startedAt)) {
+      if (born === undefined) {
+        // The system will not say when the process started: fail closed, never kill what may be another process.
+        this.log.warn("not stopping a process group whose start time could not be read", { pgid });
+      } else {
+        this.log.warn("not stopping a process group that started after the interrupted run", { pgid, born, startedAt });
+      }
       return false;
     }
-    try { process.kill(-pgid, "SIGTERM"); } catch {}
-    const killer = setTimeout(() => { try { process.kill(-pgid, "SIGKILL"); } catch {} }, 2_000);
-    killer.unref();
     return true;
   }
 
@@ -387,11 +426,25 @@ export function runCommand(
 /** When a process started, in epoch ms, or undefined when the system will not say. */
 export function processStart(pid: number): number | undefined {
   try {
-    const out = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000 }).trim();
+    // LC_ALL=C: the start time is parsed in a fixed format, whatever the machine's locale says.
+    const out = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 2_000,
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+    }).trim();
     if (!out) return undefined;
     const at = Date.parse(out);
     return Number.isNaN(at) ? undefined : at;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Whether a recorded process group may be stopped: it must be the group the interrupted run started. An unknown
+ * start time means no: an unknown process is never assumed to be ours.
+ */
+export function mayStopGroup(born: number | undefined, startedAt: number): boolean {
+  if (born === undefined) return false;
+  return born <= startedAt + 5_000;
 }
