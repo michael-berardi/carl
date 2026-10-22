@@ -97,3 +97,17 @@ test("a tool call without a result gets an honest result, not a fake failure", (
   assert.match(message.content[0].text, /do not repeat it without checking/);
   assert.notEqual(message.content[0].text, "No result provided", "the model is not told a lie");
 });
+
+test("a verbatim resend is refused only after a tool call a restart cut short", async () => {
+  const { INTERRUPTED_TOOL_RESULT } = await import("../src/durable.ts");
+  const user = { role: "user", content: [{ type: "text", text: "restart the scraper" }], timestamp: 1 };
+  const call = { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }], timestamp: 2 };
+  const answer = { role: "assistant", content: [{ type: "text", text: "Done." }], timestamp: Date.now() };
+  const finished = [user, call, { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "ok" }] }, answer];
+  const cut = [user, call, { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT }] }, answer];
+  const { Brain } = await import("../src/brain.ts");
+  const probe = (messages: any[]) => (Brain.prototype as any).recentDuplicate.call(
+    { get: async () => ({ session: { messages } }) }, "telegram:dm:1", "restart the scraper");
+  assert.equal(await probe(finished), undefined, "a request that finished normally can be repeated on purpose");
+  assert.equal((await probe(cut))?.text, "Done.", "a resend after an interrupted tool call is answered, not run again");
+});

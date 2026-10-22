@@ -24,7 +24,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { type CarlConfig, mcpFile } from "./config.ts";
-import { inspectTurn, interruptedToolResult, contentText, type TurnInspection } from "./durable.ts";
+import { inspectTurn, interruptedToolResult, contentText, INTERRUPTED_TOOL_RESULT, type TurnInspection } from "./durable.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
@@ -667,8 +667,9 @@ export class Brain extends EventEmitter {
   }
 
   /**
-   * The answer of a recent turn in this conversation that carried the very same request. A request Carl already
-   * carried out is not carried out again: the operator is told what happened instead.
+   * The answer of a recent turn that carried the very same request and that a restart cut short in the middle of a
+   * tool call. Its effect may already have landed, so a verbatim resend is answered instead of run again. A request
+   * that finished normally is never refused: the operator may repeat it on purpose.
    */
   async recentDuplicate(key: string, text: string, withinMs = 15 * 60_000): Promise<{ text: string; at: number } | undefined> {
     const needle = text.trim();
@@ -684,12 +685,14 @@ export class Brain extends EventEmitter {
       for (let j = i + 1; j < messages.length; j++) {
         const mm = messages[j];
         if (mm.role === "user") break; // the next turn starts here
+        // Only a turn a restart cut short counts: its tool may already have acted, so a verbatim resend must not
+        // run it again. A request that finished normally can be repeated on purpose ("check the queue" twice).
+        if (mm.role === "toolResult" && contentText(mm).includes(INTERRUPTED_TOOL_RESULT)) ranTool = true;
         if (mm.role !== "assistant") continue;
-        if ((mm.content ?? []).some((c: any) => c.type === "toolCall")) ranTool = true;
         const said = assistantText(mm);
         if (said) { answer = said; at = mm.timestamp ?? 0; }
       }
-      // Only a request that ran a tool is worth refusing: a repeated question costs nothing.
+      // Only an interrupted tool call is worth refusing: a repeated question or a finished request costs nothing.
       if (!ranTool || !answer) continue;
       if (at && Date.now() - at > withinMs) return undefined;
       return { text: answer, at };
