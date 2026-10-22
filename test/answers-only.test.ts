@@ -55,6 +55,8 @@ async function turn(t: any, opts: { stream?: boolean; toolAtMs?: number; endAtMs
     status: () => ({}),
     routerState: new Map(),
     shellSandbox: undefined,
+    currentTurn: () => 1,
+    recentDuplicate: async () => undefined,
   };
   const channel = new TelegramChannel(loadConfig(home), TOKEN, brain, new Log(undefined));
   await channel.start();

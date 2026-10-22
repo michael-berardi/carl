@@ -6,9 +6,10 @@ import { approvalSummary } from "../approval-text.ts";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { cleanEnv, readNoFollow, sandboxArgv } from "../sandbox.ts";
-import { type Brain, type RunResult, toolsRanAfter } from "../brain.ts";
+import { type Brain, type ResumeOutcome, type RunResult } from "../brain.ts";
+import { DeliveryLedger, deliveryId } from "../durable.ts";
 import type { CarlConfig } from "../config.ts";
 import type { Log } from "../log.ts";
 import { recordDeliveries } from "../message-log.ts";
@@ -16,7 +17,7 @@ import { MIRROR_INSTRUCTION } from "../psyche.ts";
 import { chunkMarkdown, escapeHtml, htmlToPlain, markdownToTelegramHtml, visibleControls } from "./format.ts";
 import { type InlineButton, TelegramApi, TelegramError, type TgCallbackQuery, type TgMessage } from "./telegram-api.ts";
 
-interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string }
+interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string; /** The delivery id the chunks belong to, so a retry after a crash never sends one twice. */ baseId?: string; /** How many chunks of this reply already went out. */ sentCount?: number }
 
 export type CommandHandler = (args: string, chatId: number, key: string) => Promise<string>;
 
@@ -48,10 +49,13 @@ export class TelegramChannel {
   private readonly cfg: CarlConfig;
   private readonly brain: Brain;
   private readonly log: Log;
-  constructor(cfg: CarlConfig, token: string, brain: Brain, log: Log) {
+  /** What was already delivered, so a restart never sends the same reply twice. */
+  private readonly ledger: DeliveryLedger;
+  constructor(cfg: CarlConfig, token: string, brain: Brain, log: Log, ledger?: DeliveryLedger) {
     this.cfg = cfg;
     this.brain = brain;
     this.log = log;
+    this.ledger = ledger ?? new DeliveryLedger(cfg.home);
     this.api = new TelegramApi(token, cfg.telegram.apiBase);
     // Every delivered message (answer, draft frame, edit, deletion) is recorded where `utp ultrabot audit` reads it.
     // The file belongs to UltraTerm, so it is written only for an installation wired to UltraTerm.
@@ -151,6 +155,8 @@ export class TelegramChannel {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly handlers = new Set<Promise<void>>();
   private graceOver = false;
+  /** The turn a message picked up again after a restart belongs to, so its reply keeps the same delivery id. */
+  private readonly resumedTurns = new Map<string, number>();
 
   /** Messages of one chat are prepared (downloads, speech-to-text) and handed to the brain in arrival order. */
   private enqueueMessage(m: TgMessage): void {
@@ -198,23 +204,101 @@ export class TelegramChannel {
     const left = this.readInflight();
     for (const [id, e] of Object.entries(left)) {
       const excerpt = e.text.length > 160 ? e.text.slice(0, 160) + "…" : e.text;
-      // A plain text message in a DM whose turn had not run any tool is simply picked up again: nothing can be
-      // repeated. Anything else (a tool may have acted, a voice note or file, a group) is reported instead.
+      // A plain text message in a DM can be picked up again: a turn that ran no tool is simply run again, and a turn
+      // whose tool already ran is continued from the transcript. Anything else (a voice note, a file, a group) is
+      // reported instead.
       const messageId = Number(id.split(":")[1]);
       const textOnly = e.text.length < 500 && e.text !== "(voice note)" && e.text !== "(attachment)";
+      const key = `telegram:dm:${e.chatId}`;
       // At most once: a message that was already picked up after one restart is reported after the next.
-      if (!e.resumed && e.chatId > 0 && textOnly && Number.isInteger(messageId) && !toolsRanAfter(this.cfg.home, `telegram:dm:${e.chatId}`, e.text)) {
-        this.log.info("resuming a message interrupted by a restart", { chat: e.chatId, message: messageId });
-        await this.sendMarkdown(e.chatId, `I restarted while answering this, so I am picking it up again:\n\n> ${excerpt.replace(/\n/g, " ")}`, { threadId: e.threadId })
-          .catch((err) => this.log.warn("cannot announce a resumed message", { error: (err as Error).message }));
-        this.markInflight(id);
-        this.enqueueMessage({ message_id: messageId, date: Math.floor(Date.now() / 1000), chat: { id: e.chatId, type: "private" }, from: { id: e.chatId, is_bot: false, first_name: "" }, text: e.text } as TgMessage);
-        this.markInflight(id, { chatId: e.chatId, threadId: e.threadId, text: e.text, resumed: true });
-        continue;
+      if (!e.resumed && e.chatId > 0 && textOnly && Number.isInteger(messageId)) {
+        // The draft shows the answer while the resumed turn runs; it is only created when there is something to show.
+        let draft: Draft | undefined;
+        const newDraft = (): Draft => (draft ??= new Draft(this.api, e.chatId, messageId, e.threadId, this.cfg.telegram.stream));
+        const outcome = await this.brain.resumeTurn(key, e.text, {
+          sink: {
+            onText: (t) => newDraft().update(t),
+            onTool: (n, d) => newDraft().tool(n, d),
+          },
+          onPlan: async (plan) => {
+            const uncertain = plan.pending.map((c) => c.name);
+            const what = uncertain.length
+              ? `\n\nThe ${uncertain.map((n) => `\`${n}\``).join(" and ")} call may or may not have taken effect; I did not run it again.`
+              : "";
+            await this.sendNotice(e.chatId, key, messageId, plan.turn, e.threadId, `I restarted while working on this, so I am picking it up again from where it stopped:\n\n> ${excerpt.replace(/\n/g, " ")}${what}`);
+          },
+        }).catch((err) => ({ status: "not-resumable" as const, reason: (err as Error).message }));
+        if (outcome.status === "restart") {
+          // Nothing had run yet: the turn is picked up again from the start and nothing can be repeated.
+          this.log.info("resuming a message interrupted by a restart", { chat: e.chatId, message: messageId });
+          await this.sendNotice(e.chatId, key, messageId, outcome.turn ?? 0, e.threadId, `I restarted while answering this, so I am picking it up again:\n\n> ${excerpt.replace(/\n/g, " ")}`);
+          this.markInflight(id);
+          this.resumedTurns.set(id, outcome.turn ?? 0);
+          this.enqueueMessage({ message_id: messageId, date: Math.floor(Date.now() / 1000), chat: { id: e.chatId, type: "private" }, from: { id: e.chatId, is_bot: false, first_name: "" }, text: e.text } as TgMessage);
+          this.markInflight(id, { chatId: e.chatId, threadId: e.threadId, text: e.text, resumed: true });
+          continue;
+        }
+        if (outcome.status === "resumed" || outcome.status === "answered") {
+          await this.deliverResumed(key, messageId, outcome, e, draft);
+          this.markInflight(id);
+          continue;
+        }
+        if (outcome.status === "failed") {
+          this.log.warn("a resumed turn did not finish", { chat: e.chatId, message: messageId, error: outcome.reason });
+        }
       }
-      await this.sendMarkdown(e.chatId, `I restarted while working on this, so it did not finish:\n\n> ${excerpt.replace(/\n/g, " ")}\n\nSend it again if it still matters.`, { threadId: e.threadId })
-        .catch((err) => this.log.warn("cannot report an interrupted message", { error: (err as Error).message }));
+      await this.sendNotice(e.chatId, key, messageId, 0, e.threadId, `I restarted while working on this, so it did not finish:\n\n> ${excerpt.replace(/\n/g, " ")}\n\nSend it again if it still matters.`);
       this.markInflight(id);
+    }
+  }
+
+  /**
+   * Deliver the answer of a turn that a restart cut short. The answer goes out once: its delivery id is the one the
+   * interrupted turn would have used, so an answer that already reached the operator is never sent again.
+   */
+  private async deliverResumed(
+    key: string,
+    messageId: number,
+    outcome: ResumeOutcome,
+    e: { chatId: number; threadId?: number; text: string },
+    draft: Draft | undefined,
+  ): Promise<void> {
+    const turn = outcome.turn ?? 0;
+    const answer = outcome.text?.trim();
+    if (!answer) {
+      // The turn owes an answer but the model gave none: say so instead of pretending it worked.
+      await this.sendNotice(e.chatId, key, messageId, turn, e.threadId, "I restarted while working on this and picked the turn up again, but it did not produce an answer.");
+      return;
+    }
+    const id = deliveryId(key, messageId, turn);
+    const state = this.ledger.begin(id, { chatId: e.chatId, preview: answer });
+    if (state !== "new") {
+      this.log.info(state === "sent" ? "the answer was already delivered; not sending it again" : "the answer delivery was never confirmed; not sending it again", { id });
+      await this.sendNotice(e.chatId, key, messageId, turn, e.threadId, "I restarted while working on this; the answer had already gone out before the restart.");
+      return;
+    }
+    try {
+      if (draft) await draft.finish(answer);
+      else await this.sendMarkdown(e.chatId, answer, { threadId: e.threadId });
+      this.ledger.sent(id);
+    } catch (err) {
+      this.ledger.drop(id);
+      this.log.error("reply delivery failed; queued for retry", { chatId: e.chatId, error: (err as Error).message });
+      this.enqueue(e.chatId, [answer], e.threadId, (err as Error).message, id);
+    }
+  }
+
+  /** Tell the operator what happened to an interrupted message. The notice goes out once, like every reply. */
+  private async sendNotice(chatId: number, key: string, messageId: number, turn: number, threadId: number | undefined, text: string): Promise<void> {
+    const id = deliveryId(key, messageId, turn, "notice");
+    const state = this.ledger.begin(id, { chatId, preview: text });
+    if (state !== "new") return;
+    try {
+      await this.sendMarkdown(chatId, text, { threadId });
+      this.ledger.sent(id);
+    } catch (e) {
+      this.ledger.drop(id);
+      this.log.warn("cannot announce an interrupted message", { error: (e as Error).message });
     }
   }
 
@@ -264,7 +348,32 @@ export class TelegramChannel {
     if (m.reply_to_message?.text) notes.unshift(`[replying to: "${m.reply_to_message.text.slice(0, 400)}"]`);
     const body = [...notes, text].filter(Boolean).join("\n");
     if (!body && !images.length) return handed();
-    await this.converse(m, key, { text: body || "(image)", images: images.length ? images : undefined, source: "telegram" }, handed);
+    // A request Carl already carried out is not carried out again: the operator is told what happened instead.
+    const done = await this.brain.recentDuplicate(key, body).catch(() => undefined);
+    if (done) {
+      this.log.info("not repeating a request that was already carried out", { key });
+      await this.sendReply(m.chat.id, m, key, `I already did that a moment ago, so I did not do it again:\n\n${done.text}`.trim());
+      return handed();
+    }
+    // A message picked up again after a restart keeps the turn it continues, so its reply has the same delivery id.
+    const turn = this.resumedTurns.get(`${m.chat.id}:${m.message_id}`);
+    this.resumedTurns.delete(`${m.chat.id}:${m.message_id}`);
+    await this.converse(m, key, { text: body || "(image)", images: images.length ? images : undefined, source: "telegram", turn }, handed);
+  }
+
+  /** A short reply that goes out once, like every other reply. */
+  private async sendReply(chatId: number, m: TgMessage, key: string, text: string): Promise<void> {
+    const id = deliveryId(key, m.message_id, this.brain.currentTurn(key) + 1);
+    const state = this.ledger.begin(id, { chatId, preview: text });
+    if (state !== "new") return;
+    try {
+      await this.sendMarkdown(chatId, text, { threadId: m.message_thread_id });
+      this.ledger.sent(id);
+    } catch (e) {
+      this.ledger.drop(id);
+      this.log.error("reply delivery failed; queued for retry", { chatId, error: (e as Error).message });
+      this.enqueue(chatId, [text], m.message_thread_id, (e as Error).message, id);
+    }
   }
 
   private async converse(m: TgMessage, key: string, input: Parameters<Brain["ask"]>[1], handed: () => void = () => {}): Promise<void> {
@@ -306,7 +415,7 @@ export class TelegramChannel {
     if (benched && result.ok && result.model !== this.cfg.model) {
       final += `\n\n_(${result.model.split("/").pop()} answered: ${this.cfg.model.split("/").pop()} is at its usage limit until ${new Date(benched[1]).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})_`;
     }
-    await this.deliverFinal(draft, chatId, threadId, final);
+    await this.deliverFinal(draft, chatId, threadId, final, deliveryId(key, m.message_id, result.turn ?? 0));
   }
 
   // ---- Durable delivery: a final reply that fails to send is kept and retried until Telegram takes it. ----
@@ -314,13 +423,23 @@ export class TelegramChannel {
   private readonly outboxFile = () => join(this.cfg.home, "state", "outbox.json");
   private outboxTimer?: NodeJS.Timeout;
 
-  private async deliverFinal(draft: Draft, chatId: number, threadId: number | undefined, markdown: string): Promise<void> {
+  private async deliverFinal(draft: Draft, chatId: number, threadId: number | undefined, markdown: string, id?: string): Promise<void> {
+    // The delivery id is claimed before the send: a crash between the send and the record cannot send it twice.
+    if (id) {
+      const state = this.ledger.begin(id, { chatId, preview: markdown });
+      if (state !== "new") {
+        this.log.info(state === "sent" ? "the reply was already delivered; not sending it again" : "the reply delivery was never confirmed; not sending it again", { id });
+        return;
+      }
+    }
     try {
       await draft.finish(markdown);
+      if (id) this.ledger.sent(id);
     } catch (e) {
+      if (id) this.ledger.drop(id);
       // Only what did not go out is queued: chunks Telegram already took are not sent twice.
       this.log.error("reply delivery failed; queued for retry", { chatId, error: (e as Error).message, chunksSent: draft.chunksSent });
-      this.enqueue(chatId, chunkMarkdown(markdown).slice(draft.chunksSent), threadId, (e as Error).message);
+      this.enqueue(chatId, chunkMarkdown(markdown).slice(draft.chunksSent), threadId, (e as Error).message, id);
     }
   }
 
@@ -346,9 +465,9 @@ export class TelegramChannel {
   }
 
   /** Queue Markdown chunks for delivery; used for failed replies and failed scheduled deliveries. */
-  enqueue(chatId: number, chunks: string[], threadId?: number, lastError?: string): void {
+  enqueue(chatId: number, chunks: string[], threadId?: number, lastError?: string, baseId?: string): void {
     if (!chunks.length) return;
-    this.loadOutbox().push({ id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, chatId, threadId, chunks, firstAt: Date.now(), attempts: 1, lastError });
+    this.loadOutbox().push({ id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, chatId, threadId, chunks, firstAt: Date.now(), attempts: 1, lastError, baseId, sentCount: 0 });
     this.saveOutbox();
     this.scheduleOutbox();
   }
@@ -375,8 +494,26 @@ export class TelegramChannel {
       }
       try {
         while (item.chunks.length) {
-          await this.sendMarkdown(item.chatId, item.chunks[0], { threadId: item.threadId });
+          // Every chunk has its own delivery id: a crash between the send and the persist cannot resend it.
+          const chunkId = item.baseId ? `${item.baseId}#${item.sentCount ?? 0}` : undefined;
+          if (chunkId) {
+            const state = this.ledger.begin(chunkId, { chatId: item.chatId, preview: item.chunks[0] });
+            if (state !== "new") {
+              item.chunks.shift();
+              item.sentCount = (item.sentCount ?? 0) + 1;
+              this.saveOutbox();
+              continue;
+            }
+          }
+          try {
+            await this.sendMarkdown(item.chatId, item.chunks[0], { threadId: item.threadId });
+          } catch (e) {
+            if (chunkId) this.ledger.drop(chunkId);
+            throw e;
+          }
+          if (chunkId) this.ledger.sent(chunkId);
           item.chunks.shift(); // persisted below, so a crash resends at most this one chunk
+          item.sentCount = (item.sentCount ?? 0) + 1;
           this.saveOutbox();
         }
         queue.splice(queue.indexOf(item), 1);
@@ -493,10 +630,17 @@ export class TelegramChannel {
   }
 
   private readonly approvals = new Map<string, (answer: "approved" | "denied") => void>();
+  /** The question each card id is waiting for, so the same card is never asked about twice. */
+  private readonly approvalPromises = new Map<string, Promise<"approved" | "denied" | "timeout">>();
 
-  /** Ask the operator to approve a dangerous command with buttons. Fails closed after 5 minutes. */
-  async requestApproval(chatId: number, command: string, reason: string): Promise<"approved" | "denied" | "timeout"> {
-    const id = Math.random().toString(36).slice(2, 10);
+  /**
+   * Ask the operator to approve a dangerous command with buttons. Fails closed after 5 minutes.
+   * With a stable id the card goes out once: a proposal that is asked about again (after a restart, say) keeps the
+   * card that is already in the chat instead of putting a second one there.
+   */
+  async requestApproval(chatId: number, command: string, reason: string, stable?: string): Promise<"approved" | "denied" | "timeout"> {
+    // The callback data of a card is short (Telegram allows 64 bytes), so a stable id is hashed into it.
+    const id = stable ? createHash("sha256").update(stable).digest("hex").slice(0, 12) : Math.random().toString(36).slice(2, 10);
     if (!this.callbacks.has("ca")) {
       this.callbacks.set("ca", async (q, data) => {
         const [, reqId, choice] = data.split(":");
@@ -515,15 +659,37 @@ export class TelegramChannel {
       await this.api.sendMessage(chatId, `Refused without asking: a ${reason} request of ${command.length} characters is too long to review here.`).catch(() => {});
       return "denied";
     }
-    const msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
-    const answer = await new Promise<"approved" | "denied" | "timeout">((resolve) => {
-      const timer = setTimeout(() => { this.approvals.delete(id); resolve("timeout"); }, 300_000);
-      this.approvals.set(id, (a) => { clearTimeout(timer); this.approvals.delete(id); resolve(a); });
-    });
+    let msg: TgMessage | undefined;
+    if (stable) {
+      const state = this.ledger.begin(stable, { chatId, preview: command });
+      if (state === "new") {
+        msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
+        this.ledger.sent(stable, [msg.message_id]);
+      } else {
+        // The card is already in the chat (P-1416): the operator answers that one, no second card goes out.
+        this.log.info("the approval card is already in the chat; not sending a second one", { id: stable });
+      }
+    } else {
+      msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
+    }
+    const answer = await this.waitForApproval(id);
+    if (stable) this.ledger.resolve(stable);
     const mark = answer === "approved" ? "✅ approved" : answer === "denied" ? "⛔ denied" : "⌛ expired (not run)";
-    await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: msg.message_id, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
-    await this.api.sendMessage(chatId, mark, { replyTo: msg.message_id, silent: true }).catch(() => {});
+    if (msg) await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: msg.message_id, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
+    await this.api.sendMessage(chatId, mark, { replyTo: msg?.message_id, silent: true }).catch(() => {});
     return answer;
+  }
+
+  /** Wait for the operator's answer on a card. The same card id is always the same question. */
+  private waitForApproval(id: string): Promise<"approved" | "denied" | "timeout"> {
+    const existing = this.approvalPromises.get(id);
+    if (existing) return existing;
+    const promise = new Promise<"approved" | "denied" | "timeout">((resolve) => {
+      const timer = setTimeout(() => { this.approvals.delete(id); this.approvalPromises.delete(id); resolve("timeout"); }, 300_000);
+      this.approvals.set(id, (a) => { clearTimeout(timer); this.approvals.delete(id); this.approvalPromises.delete(id); resolve(a); });
+    });
+    this.approvalPromises.set(id, promise);
+    return promise;
   }
 
   /** Send Markdown as Telegram HTML, chunked; falls back to plain text when Telegram rejects the HTML. */

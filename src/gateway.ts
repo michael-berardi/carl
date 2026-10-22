@@ -1,11 +1,13 @@
 // The gateway process: wires config, psyche, brain, channels, API and schedules; owns status and shutdown.
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assistantText, Brain, listSessionFiles } from "./brain.ts";
 import { chunkMarkdown } from "./channels/format.ts";
 import { TelegramChannel } from "./channels/telegram.ts";
 import { type CarlConfig, ensureHome, secret } from "./config.ts";
+import { DeliveryLedger } from "./durable.ts";
 import { Log } from "./log.ts";
 import { individuationPrompt, parseIndividuation, Psyche, readJsonl } from "./psyche.ts";
 import { type Job, Scheduler } from "./scheduler.ts";
@@ -40,6 +42,8 @@ export class Gateway {
   exitCode = 0;
 
   readonly cfg: CarlConfig;
+  /** What was already delivered, so a restart never sends the same reply twice. */
+  readonly ledger: DeliveryLedger;
   constructor(cfg: CarlConfig, opts: { verbose?: boolean } = {}) {
     this.cfg = cfg;
     ensureHome(cfg);
@@ -47,16 +51,17 @@ export class Gateway {
     this.psyche = new Psyche(cfg.home, cfg.learning);
     this.psyche.seed();
     this.pidFile = join(cfg.home, "state", "gateway.pid");
+    this.ledger = new DeliveryLedger(cfg.home);
     const outbox: Outbox = { send: (target, text) => this.send(target, text) };
     this.scheduler = new Scheduler(cfg.home, this.log, {
       prompt: (job) => this.runPromptJob(job),
       builtin: { individuation: () => this.individuate() },
-      deliver: async (job, text) => {
-        await this.send(job.deliver, `**${job.name}**\n\n${text}`);
+      deliver: async (job, text, id) => {
+        await this.send(job.deliver, `**${job.name}**\n\n${text}`, id);
       },
       // Command jobs run under the shell sandbox too: the scripts and tools they call are ones the agent can change.
       commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg), cwd: cfg.workspace }),
-    });
+    }, { recover: true });
     this.brain = new Brain(cfg, this.psyche, this.log, () => carlTools(this.psyche, this.scheduler, outbox), { shared: true });
   }
 
@@ -72,7 +77,7 @@ export class Gateway {
     if (this.cfg.telegram.enabled) {
       const token = secret(this.cfg.home, this.cfg.telegram.tokenEnv, this.cfg.envFiles);
       if (!token) throw new Error(`telegram is enabled but ${this.cfg.telegram.tokenEnv} is not set (environment or ${join(this.cfg.home, ".env")})`);
-      this.telegram = new TelegramChannel(this.cfg, token, this.brain, this.log);
+      this.telegram = new TelegramChannel(this.cfg, token, this.brain, this.log, this.ledger);
       this.telegram.onStatus = () => this.writeStatus();
       this.registerCommands(this.telegram);
       const tg = this.telegram;
@@ -83,7 +88,9 @@ export class Gateway {
         // Approval cards go only to the operator's own chats: a group conversation asks in the home DM.
         const target = this.cfg.telegram.allowFrom.includes(chat) || chat === this.cfg.telegram.homeChat ? chat : this.cfg.telegram.homeChat;
         if (!target) return "unattended";
-        return tg.requestApproval(target, target === chat ? command : `${command}\n\n(from the group conversation ${chat})`, reason);
+        // The card id is stable, so one proposal never gets two live cards (P-1416).
+        const stable = `approval:${key}:${this.brain.currentTurn(key)}:${createHash("sha256").update(command).digest("hex").slice(0, 12)}`;
+        return tg.requestApproval(target, target === chat ? command : `${command}\n\n(from the group conversation ${chat})`, reason, stable);
       };
     }
     if (this.cfg.slack.enabled) {
@@ -208,8 +215,8 @@ export class Gateway {
   /** Hook for compatibility writers (UltraTerm's gateway_state.json). */
   emitStatus?: (status: Record<string, unknown>) => void;
 
-  /** Deliver Markdown to "home", "none" or a chat id. */
-  async send(target: string, text: string): Promise<string> {
+  /** Deliver Markdown to "home", "none" or a chat id. With an id the delivery goes out once, even across a restart. */
+  async send(target: string, text: string, id?: string): Promise<string> {
     if (target === "none") return "Not delivered (target none).";
     if (target.startsWith("discord:")) {
       if (!this.discord) throw new Error("discord is not enabled");
@@ -225,11 +232,17 @@ export class Gateway {
     const chatId = target === "home" ? this.cfg.telegram.homeChat : Number(target);
     if (!chatId || !Number.isSafeInteger(chatId)) throw new Error(target === "home" ? "telegram.homeChat is not configured" : `bad chat id "${target}"`);
     if (!this.cfg.telegram.allowFrom.includes(chatId) && chatId !== this.cfg.telegram.homeChat) throw new Error(`chat ${chatId} is not the home chat or an allowed user`);
+    if (id) {
+      const state = this.ledger.begin(id, { chatId, preview: text });
+      if (state !== "new") return state === "sent" ? "Already delivered." : "The delivery was never confirmed; not sending it again.";
+    }
     try {
       const sent = await this.telegram.sendMarkdown(chatId, text);
+      if (id) this.ledger.sent(id, sent.map((m) => m.message_id));
       return `Delivered (${sent.length} message${sent.length === 1 ? "" : "s"}).`;
     } catch (e) {
-      this.telegram.enqueue(chatId, chunkMarkdown(text), undefined, (e as Error).message);
+      if (id) this.ledger.drop(id);
+      this.telegram.enqueue(chatId, chunkMarkdown(text), undefined, (e as Error).message, id);
       return `Telegram refused it for now (${(e as Error).message}); queued and retried every 30 s.`;
     }
   }

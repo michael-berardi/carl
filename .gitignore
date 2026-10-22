@@ -3,3 +3,4 @@ node_modules/
 .carl-test-*/
 .steak-pi/
 COMMIT
+node_modules
