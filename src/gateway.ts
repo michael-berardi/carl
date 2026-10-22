@@ -51,7 +51,7 @@ export class Gateway {
     this.psyche = new Psyche(cfg.home, cfg.learning);
     this.psyche.seed();
     this.pidFile = join(cfg.home, "state", "gateway.pid");
-    this.ledger = new DeliveryLedger(cfg.home);
+    this.ledger = new DeliveryLedger(cfg.home, this.log);
     const outbox: Outbox = { send: (target, text) => this.send(target, text) };
     this.scheduler = new Scheduler(cfg.home, this.log, {
       prompt: (job) => this.runPromptJob(job),
@@ -61,7 +61,7 @@ export class Gateway {
       },
       // Command jobs run under the shell sandbox too: the scripts and tools they call are ones the agent can change.
       commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg), cwd: cfg.workspace }),
-    }, { recover: true });
+    });
     this.brain = new Brain(cfg, this.psyche, this.log, () => carlTools(this.psyche, this.scheduler, outbox), { shared: true });
   }
 
@@ -72,6 +72,9 @@ export class Gateway {
 
   async start(): Promise<void> {
     this.claimPid();
+    // The recovery of an interrupted run happens only after the pid is claimed: a second gateway (or a plain command
+    // such as `carl reflect`) must never stop the running gateway's command or rewrite its schedules.
+    this.scheduler.recover();
     this.log.info("carl starting", { version: VERSION, commit: COMMIT, home: this.cfg.home, model: this.cfg.model, pid: process.pid });
     await this.brain.init();
     if (this.cfg.telegram.enabled) {
