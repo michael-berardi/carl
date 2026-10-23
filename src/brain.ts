@@ -201,6 +201,7 @@ export class Brain extends EventEmitter {
       secretPaths: secretFiles(this.cfg),
       cwd: this.cfg.workspace,
       noExec: this.sandboxProfile ? NO_EXEC : [],
+      sandboxed: !!this.sandboxProfile,
       trustedMcp: this.cfg.trustedMcp,
       sandboxProfile: this.sandboxProfile,
     };

@@ -110,3 +110,17 @@ test("an operator tool runs on the operator's own words only, quoted from their 
   assert.equal(mcpVerdict(tool, rules(undefined), { evidence: "tell slot 1 to check the failing build" }).level, "dangerous"); // schedule, API
   assert.equal(mcpVerdict("mcp__overseer__overseer_send", rules(asked), { evidence: "tell slot 1 to check the failing build" }).level, "dangerous");
 });
+
+test("under the kernel sandbox, interpreter code from a flag or stdin runs without a card", () => {
+  const sandboxed = { sandboxed: true };
+  for (const c of ["python3 -I -c \"import json;print(1)\"", "python3 -c 'import os'", "node -p '1+1'", "perl -e 'print 1'", "python3 - <<'PY'\nprint(1)\nPY", "cat x | python3"]) {
+    assert.equal(level(c, sandboxed), "ok", c);
+    assert.equal(level(c), "dangerous", `${c} still asks without the sandbox`);
+  }
+  // What the kernel cannot judge still asks or refuses, sandboxed or not.
+  assert.equal(level("osascript -e 'tell app \"Finder\" to quit'", sandboxed), "dangerous");
+  assert.equal(level("sudo ls", sandboxed), "hardline");
+  assert.equal(level("git push origin feature", sandboxed), "dangerous");
+  assert.equal(level("eval \"$(base64 -d <<<x)\"", sandboxed), "dangerous");
+  assert.equal(level("bash -c 'rm -rf ~'", sandboxed), "dangerous");
+});

@@ -28,6 +28,11 @@ export interface GuardRules {
   cwd?: string;
   /** Programs the kernel sandbox refuses to run: refused up front instead of asking for an approval that cannot help. */
   noExec?: string[];
+  /**
+   * True when shell commands run under the kernel sandbox. Code an interpreter reads from a flag or stdin cannot do more than the
+   * sandbox allows, so it no longer asks (Mike 2026-10-23: a read-only `python3 -c` stopped at an "Approve?" card).
+   */
+  sandboxed?: boolean;
   /** MCP servers that run outside the sandbox: their tools ask first unless they match a read-only pattern. */
   trustedMcp?: string[];
   /** Extra "server/tool" patterns of trusted servers that run without asking: [regex, reason]. */
@@ -150,7 +155,7 @@ function gitSub(args: string): { sub: string; rest: string } {
   return { sub: words[i] ?? "", rest: words.slice(i + 1).join(" ") };
 }
 
-function judgeSegment(s: { verb: string; args: string; text: string }): Verdict {
+function judgeSegment(s: { verb: string; args: string; text: string }, sandboxed = false): Verdict {
   const { verb, args } = s;
   const words = args.split(/\s+/).filter(Boolean);
   const flags = words.filter((w) => w.startsWith("-")).join(" ");
@@ -192,7 +197,7 @@ function judgeSegment(s: { verb: string; args: string; text: string }): Verdict 
   if (verb === "eval" || verb === "source" || verb === ".") return { level: "dangerous", reason: `${verb} runs code the guard cannot see` };
   if (/^(ba|z|k|da|fi)?sh$/.test(verb) && /(^|\s)-[a-zA-Z]*c(\s|$)/.test(args)) return { level: "dangerous", reason: `${verb} -c runs code the guard cannot see` };
   // A shell or interpreter with no script file reads its code from stdin (a pipe or heredoc): unseen code.
-  if (/^((ba|z|k|da|fi)?sh|python[0-9.]*|node|perl|ruby|php|osascript|deno|bun)$/.test(verb)) {
+  if (!sandboxed && /^((ba|z|k|da|fi)?sh|python[0-9.]*|node|perl|ruby|php|osascript|deno|bun)$/.test(verb)) {
     const words = args.split(/\s+/).filter(Boolean);
     const script = words.find((w) => !w.startsWith("-") || w === "-");
     if (!script || script === "-" || /^\/dev\/stdin$/.test(script)) return { level: "dangerous", reason: `${verb} reading code from stdin` };
@@ -202,7 +207,7 @@ function judgeSegment(s: { verb: string; args: string; text: string }): Verdict 
     php: /(^|\s)-[a-zA-Z]*r/, osascript: /(^|\s)-e/, bun: /(^|\s)(-e|--eval|-p|--print)/, deno: /(^|\s)eval\b/,
   };
   const interp = verb.replace(/[0-9.]+$/, "");
-  if (inline[interp]?.test(args)) return { level: "dangerous", reason: `${verb} with inline code` };
+  if (inline[interp]?.test(args) && !(sandboxed && interp !== "osascript")) return { level: "dangerous", reason: `${verb} with inline code` };
   if (verb.startsWith("$")) return { level: "dangerous", reason: "a variable used as the command" };
   if (verb === "base64" && /(^|\s)(-d|--decode|-D)(\s|$)/.test(args)) return { level: "dangerous", reason: "decoding hidden content" };
   // Publishing, deploys, production data, billing.
@@ -232,7 +237,7 @@ export function classifyCommand(command: string, extra: GuardRules = {}): Verdic
   const blocked = new Set((extra.noExec ?? []).flatMap((p) => [p, basename(p)]));
   for (const seg of segments(command)) {
     if (blocked.has(seg.verb)) return { level: "hardline", reason: `${seg.verb} is blocked by the shell sandbox (it hands work to processes outside it)` };
-    const v = judgeSegment(seg);
+    const v = judgeSegment(seg, !!extra.sandboxed);
     if (v.level === "hardline") return v;
     if (v.level === "dangerous" && worst.level === "ok") worst = v;
   }
