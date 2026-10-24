@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { Brain } from "./brain.ts";
 import { TelegramApi } from "./channels/telegram-api.ts";
-import { chunkMarkdown, htmlToPlain, markdownToTelegramHtml } from "./channels/format.ts";
+import { chunkMarkdown, markdownToTelegramHtml } from "./channels/format.ts";
 import { carlHome, ConfigError, ensureHome, loadConfig, mcpFile, secret } from "./config.ts";
 import { Gateway } from "./gateway.ts";
 import { Log } from "./log.ts";
-import { recordDeliveries } from "./message-log.ts";
+import { recordDeliveries, sendLogOrigin } from "./message-log.ts";
 import { Psyche } from "./psyche.ts";
 import { Scheduler } from "./scheduler.ts";
 import { carlTools } from "./tools.ts";
@@ -306,11 +306,11 @@ async function send(args: string[]): Promise<number> {
     if (!token) throw new Error(`${cfg.telegram.tokenEnv} is not set`);
     const api = new TelegramApi(token, cfg.telegram.apiBase);
     // A `carl send` lands in the operator's chat like any other send: record it for `utp ultrabot audit` too.
-    recordDeliveries(api, !!cfg.ultraterm, (msg, data) => console.error(`carl: ${msg} ${JSON.stringify(data ?? {})}`));
+    recordDeliveries(api, !!cfg.ultraterm, (msg, data) => console.error(`carl: ${msg} ${JSON.stringify(data ?? {})}`), sendLogOrigin(process.env, (msg) => console.error(`carl: ${msg}`)));
     const ids: number[] = [];
     for (const chunk of chunkMarkdown(text)) {
       const html = markdownToTelegramHtml(chunk);
-      const sent = await api.sendMessage(Number(m[1]), html, { parseMode: "HTML" }).catch((e) => api.sendMessage(Number(m[1]), htmlToPlain(html).slice(0, 4096)).catch(() => { throw e; }));
+      const sent = await api.sendHtmlMessage(Number(m[1]), html);
       ids.push(sent.message_id);
     }
     return out({ success: true, message_id: ids[0], message_ids: ids }, 0);

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { assistantText, Brain, listSessionFiles } from "./brain.ts";
 import { chunkMarkdown } from "./channels/format.ts";
 import { TelegramChannel } from "./channels/telegram.ts";
+import { TelegramError } from "./channels/telegram-api.ts";
 import { type CarlConfig, ensureHome, secret } from "./config.ts";
 import { Log } from "./log.ts";
 import { individuationPrompt, parseIndividuation, Psyche, readJsonl } from "./psyche.ts";
@@ -229,7 +230,8 @@ export class Gateway {
       const sent = await this.telegram.sendMarkdown(chatId, text);
       return `Delivered (${sent.length} message${sent.length === 1 ? "" : "s"}).`;
     } catch (e) {
-      this.telegram.enqueue(chatId, chunkMarkdown(text), undefined, (e as Error).message);
+      this.telegram.enqueue(chatId, chunkMarkdown(text), undefined, e);
+      if (e instanceof TelegramError && e.status === "unknown") return `Telegram outcome unknown (request ${e.requestId}); held for reconciliation, not retried.`;
       return `Telegram refused it for now (${(e as Error).message}); queued and retried every 30 s.`;
     }
   }

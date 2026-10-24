@@ -54,12 +54,12 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
 
 - **Telegram, Slack and Discord:**
   - Answers, not progress: the chat gets one final reply, with no draft frame and no tool line. Set `telegram.stream` to `true` to watch replies being written instead (Telegram only).
-  - Every message Carl delivers on Telegram is recorded in UltraTerm's UltraBot message log (`~/.ultraterm/logs/ultrabot-messages/hermes.jsonl`) when `ultraterm` is configured, so `utp ultrabot audit` covers a Carl-served chat.
+  - Telegram message attempts (delivered, refused or unknown) are recorded in UltraTerm's UltraBot message log when `ultraterm` is configured; secrets are masked before persistence. See [Telegram delivery and audit safety](docs/TELEGRAM-DELIVERY.md).
   - A message sent while Carl is working joins the current turn instead of waiting in a queue.
   - `/stop`, `/new`, `/status`, `/model`, `/compact` and `/mirror` work at any time.
   - Voice notes go through any speech-to-text command you configure; photos and files go to the model.
   - Slack connects over Socket Mode (no public URL needed). Discord connects over its Gateway.
-  - Replies that fail to send are retried for 24 hours. If Carl restarts mid-reply, it picks the message up again when its answer had not run any tool yet, and otherwise tells you which message was interrupted (it never repeats an action on its own).
+  - Replies Telegram explicitly refuses are retried for 24 hours; ambiguous deliveries are held for reconciliation, never automatically replayed. If Carl restarts mid-reply, it picks the message up again when its answer had not run any tool yet, and otherwise tells you which message was interrupted (it never repeats an action on its own).
 - **Web app:**
   - Chat with any conversation, including the Telegram one.
   - Manage schedules.
