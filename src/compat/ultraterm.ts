@@ -526,7 +526,9 @@ function readdirSafe(dir: string): string[] {
 
 function run(bin: string, args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string; error?: string }> {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    // This trusted control-plane child must inherit the gateway's UltraBot authority from its launcher.
+    // Do not use the agent-command cleanEnv here or manufacture identity credentials in Carl.
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: process.env });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (b) => (stdout += b));

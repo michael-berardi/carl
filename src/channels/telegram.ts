@@ -16,7 +16,7 @@ import { MIRROR_INSTRUCTION } from "../psyche.ts";
 import { chunkMarkdown, escapeHtml, htmlToPlain, markdownToTelegramHtml, visibleControls } from "./format.ts";
 import { type InlineButton, TelegramApi, TelegramError, type TgCallbackQuery, type TgMessage } from "./telegram-api.ts";
 
-interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string }
+interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string; status?: "unknown"; requestId?: string; unknownNoticeAttempted?: boolean; editMessageId?: number }
 
 export type CommandHandler = (args: string, chatId: number, key: string) => Promise<string>;
 
@@ -26,6 +26,9 @@ export interface ChannelStatus {
   updatedAt: string;
   lastUpdateAt?: string;
 }
+
+// Own-draft edits/deletes are idempotent; only a mutation that can create another message needs replay authorization.
+const unknownSend = (error: unknown) => error instanceof TelegramError && error.status === "unknown" && !/^(?:edit|delete)/.test(error.method);
 
 const EDIT_INTERVAL_MS = 1_200;
 const FIRST_DRAFT_MS = 900;
@@ -76,6 +79,7 @@ export class TelegramChannel {
       ["new", "Start a fresh conversation"],
       ["stop", "Stop the current run"],
       ["status", "Model, context and run state"],
+      ["outbox", "List held replies; resend or discard by ID"],
       ["model", "Show or switch the model"],
       ["compact", "Compact this conversation now"],
       ["mirror", "Reflect a decision back honestly"],
@@ -309,7 +313,7 @@ export class TelegramChannel {
     await this.deliverFinal(draft, chatId, threadId, final);
   }
 
-  // ---- Durable delivery: a final reply that fails to send is kept and retried until Telegram takes it. ----
+  // ---- Durable delivery: explicit refusals may retry; unknown outcomes are held for reconciliation. ----
 
   private readonly outboxFile = () => join(this.cfg.home, "state", "outbox.json");
   private outboxTimer?: NodeJS.Timeout;
@@ -319,8 +323,9 @@ export class TelegramChannel {
       await draft.finish(markdown);
     } catch (e) {
       // Only what did not go out is queued: chunks Telegram already took are not sent twice.
-      this.log.error("reply delivery failed; queued for retry", { chatId, error: (e as Error).message, chunksSent: draft.chunksSent });
-      this.enqueue(chatId, chunkMarkdown(markdown).slice(draft.chunksSent), threadId, (e as Error).message);
+      const unknown = unknownSend(e);
+      this.log.error(unknown ? "reply outcome unknown; held for reconciliation" : "reply delivery failed; queued for retry", { chatId, error: (e as Error).message, chunksSent: draft.chunksSent });
+      this.enqueue(chatId, chunkMarkdown(markdown).slice(draft.chunksSent), threadId, e, draft.pendingEditId);
     }
   }
 
@@ -335,22 +340,41 @@ export class TelegramChannel {
     return this.outbox!;
   }
 
-  private saveOutbox(): void {
+  private saveOutbox(): boolean {
     const file = this.outboxFile();
     try {
       writeFileSync(`${file}.tmp`, JSON.stringify(this.loadOutbox()), { mode: 0o600 });
       renameSync(`${file}.tmp`, file);
+      return true;
     } catch (e) {
       this.log.error("cannot persist the outbox", { error: (e as Error).message });
+      return false;
     }
   }
 
   /** Queue Markdown chunks for delivery; used for failed replies and failed scheduled deliveries. */
-  enqueue(chatId: number, chunks: string[], threadId?: number, lastError?: string): void {
+  enqueue(chatId: number, chunks: string[], threadId?: number, error?: unknown, editMessageId?: number): void {
     if (!chunks.length) return;
-    this.loadOutbox().push({ id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, chatId, threadId, chunks, firstAt: Date.now(), attempts: 1, lastError });
+    const unknown = unknownSend(error);
+    const lastError = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+    const item: OutboxItem = { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, chatId, threadId, chunks, firstAt: Date.now(), attempts: 1, lastError, status: unknown ? "unknown" : undefined, requestId: unknown && error instanceof TelegramError ? error.requestId : undefined, editMessageId };
+    this.loadOutbox().push(item);
     this.saveOutbox();
-    this.scheduleOutbox();
+    if (unknown) void this.noticeHeld(item);
+    else this.scheduleOutbox();
+  }
+
+  /** Persist the attempt before sending: even a notice with a lost response is not replayed after a restart. */
+  private async noticeHeld(item: OutboxItem): Promise<void> {
+    if (item.unknownNoticeAttempted) return;
+    item.unknownNoticeAttempted = true;
+    if (!this.saveOutbox()) { item.unknownNoticeAttempted = undefined; return; }
+    await this.api.sendMessage(item.chatId, `A reply's delivery is unknown. I will not resend it automatically. Check the chat first: resending could duplicate it.\nHeld reply: ${item.id}\n/outbox resend ${item.id}\n/outbox discard ${item.id}`, { threadId: item.threadId })
+      .catch((e) => this.log.warn("cannot announce a held reply; visible in /status and /outbox", { chatId: item.chatId, error: (e as Error).message }));
+  }
+
+  private heldReplies(chatId: number, threadId?: number): OutboxItem[] {
+    return this.loadOutbox().filter((item) => item.status === "unknown" && item.chatId === chatId && item.threadId === threadId);
   }
 
   private scheduleOutbox(): void {
@@ -368,6 +392,7 @@ export class TelegramChannel {
   private async flushPass(): Promise<void> {
     const queue = this.loadOutbox();
     for (const item of [...queue]) {
+      if (item.status === "unknown") { await this.noticeHeld(item); continue; } // an ambiguous receipt must be reconciled before replay, even after restart
       if (Date.now() - item.firstAt > 24 * 3_600_000) {
         this.log.error("undeliverable reply dropped after 24 h", { chatId: item.chatId, attempts: item.attempts, error: item.lastError });
         queue.splice(queue.indexOf(item), 1);
@@ -375,7 +400,16 @@ export class TelegramChannel {
       }
       try {
         while (item.chunks.length) {
-          await this.sendMarkdown(item.chatId, item.chunks[0], { threadId: item.threadId });
+          if (item.editMessageId !== undefined) {
+            const html = markdownToTelegramHtml(item.chunks[0]);
+            try { await this.api.editMessageText(item.chatId, item.editMessageId, html, { parseMode: "HTML" }); }
+            catch (e) {
+              if (e instanceof TelegramError && e.status === "failed" && /not modified/i.test(e.description)) { /* already applied */ }
+              else if (e instanceof TelegramError && e.status === "failed" && e.code === 400) await this.api.editMessageText(item.chatId, item.editMessageId, htmlToPlain(html).slice(0, 4096));
+              else throw e;
+            }
+            item.editMessageId = undefined;
+          } else await this.sendMarkdown(item.chatId, item.chunks[0], { threadId: item.threadId });
           item.chunks.shift(); // persisted below, so a crash resends at most this one chunk
           this.saveOutbox();
         }
@@ -384,10 +418,17 @@ export class TelegramChannel {
       } catch (e) {
         item.attempts++;
         item.lastError = (e as Error).message;
+        if (unknownSend(e) && e instanceof TelegramError) {
+          item.status = "unknown";
+          item.requestId = e.requestId;
+          this.log.error("queued reply outcome unknown; held for reconciliation", { chatId: item.chatId, requestId: e.requestId });
+          this.saveOutbox();
+          await this.noticeHeld(item);
+        }
       }
     }
     this.saveOutbox();
-    if (queue.length) this.scheduleOutbox();
+    if (queue.some((item) => item.status !== "unknown")) this.scheduleOutbox();
   }
 
   private async command(name: string, args: string, m: TgMessage, key: string): Promise<boolean> {
@@ -396,7 +437,7 @@ export class TelegramChannel {
       case "start":
       case "help": {
         const extra = [...this.commands.entries()].map(([c, v]) => `/${c} ${v.help}`).join("\n");
-        await reply(`${this.cfg.name} is listening.\n/new fresh conversation\n/stop stop the run\n/status state\n/model [provider/model]\n/compact\n/mirror <decision or dilemma>${extra ? "\n" + extra : ""}`);
+        await reply(`${this.cfg.name} is listening.\n/new fresh conversation\n/stop stop the run\n/status state\n/outbox [resend|discard] <id>\n/model [provider/model]\n/compact\n/mirror <decision or dilemma>${extra ? "\n" + extra : ""}`);
         return true;
       }
       case "new":
@@ -409,7 +450,38 @@ export class TelegramChannel {
         return true;
       case "status": {
         const s = await this.brain.status(key);
-        await reply("```\n" + JSON.stringify(s, null, 1).slice(0, 3_500) + "\n```");
+        const held = this.heldReplies(m.chat.id, m.message_thread_id);
+        await reply("```\n" + JSON.stringify(s, null, 1).slice(0, 3_000) + "\n```\n" + `${held.length} replies with unknown delivery${held.length ? `: ${held.slice(0, 10).map((item) => item.id).join(", ")}\n/outbox lists all; check the chat before resend/discard.` : "."}`);
+        return true;
+      }
+      case "outbox": {
+        const [action, id, ...extra] = args.split(/\s+/);
+        if (!args || action === "list") {
+          const held = this.heldReplies(m.chat.id, m.message_thread_id);
+          await reply(held.length ? `Replies with unknown delivery (resending may duplicate):\n${held.map((item) => `${item.id}: /outbox resend ${item.id} or /outbox discard ${item.id}`).join("\n")}` : "No replies with unknown delivery in this chat/topic.");
+          return true;
+        }
+        if (!["resend", "discard"].includes(action) || !id || extra.length) {
+          await reply("Use /outbox, /outbox resend <id>, or /outbox discard <id>. Check the chat first: resending may duplicate a delivered reply.");
+          return true;
+        }
+        // Wait for a current pass before authorizing replay; commands cannot race a send already in flight.
+        await this.flushing;
+        const item = this.heldReplies(m.chat.id, m.message_thread_id).find((entry) => entry.id === id);
+        if (!item) { await reply("No held reply with that ID in this chat/topic."); return true; }
+        if (action === "discard") {
+          this.loadOutbox().splice(this.loadOutbox().indexOf(item), 1);
+          this.saveOutbox();
+          await reply(`Discarded held reply ${id}; nothing was resent.`);
+        } else {
+          item.status = undefined;
+          item.unknownNoticeAttempted = undefined;
+          item.firstAt = Date.now(); // explicit replay gets a fresh bounded retry window, even after a long hold
+          item.attempts = 0;
+          this.saveOutbox(); // explicit authorization survives restart before the retry
+          await this.flushOutbox();
+          await reply(item.status === "unknown" ? `Reply ${id} is held again: delivery is unknown.` : this.loadOutbox().includes(item) ? `Reply ${id} is queued for retry.` : item.chunks.length ? `Reply ${id} was dropped as undeliverable; it was not resent.` : `Resent held reply ${id}.`);
+        }
         return true;
       }
       case "model":
@@ -537,7 +609,7 @@ export class TelegramChannel {
       try {
         sent.push(await this.api.sendMessage(chatId, html, { ...opts, parseMode: "HTML" }));
       } catch (e) {
-        if (!(e instanceof TelegramError) || e.code !== 400) throw e;
+        if (!(e instanceof TelegramError) || e.code !== 400 || e.status !== "failed") throw e;
         sent.push(await this.api.sendMessage(chatId, htmlToPlain(html).slice(0, 4096), opts));
       }
     }
@@ -556,8 +628,11 @@ class Draft {
   private readonly started = Date.now();
   private chain: Promise<unknown> = Promise.resolve();
   private finished = false;
+  private unknownError?: TelegramError;
   /** Final-reply chunks Telegram accepted (for partial-failure recovery). */
   chunksSent = 0;
+  /** If an idempotent final edit needs a durable retry, preserve its own-draft target instead of creating a copy. */
+  pendingEditId?: number;
 
   private readonly api: TelegramApi;
   private readonly chatId: number;
@@ -594,11 +669,14 @@ class Draft {
     const wait = Math.max(since < FIRST_DRAFT_MS ? FIRST_DRAFT_MS - since : 0, EDIT_INTERVAL_MS - (Date.now() - this.lastEdit), 0);
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.chain = this.chain.then(() => this.flush()).catch(() => {});
+      this.chain = this.chain.then(() => this.flush()).catch((e) => {
+        if (unknownSend(e) && e instanceof TelegramError) this.unknownError = e;
+      });
     }, wait);
   }
 
   private async flush(): Promise<void> {
+    if (this.unknownError) throw this.unknownError;
     if (this.finished) return;
     const text = this.render();
     if (!text.trim() || text === this.shown) return;
@@ -609,7 +687,7 @@ class Draft {
       this.messageId = m.message_id;
     } else {
       await this.api.editMessageText(this.chatId, this.messageId, text).catch((e) => {
-        if (!(e instanceof TelegramError && /not modified/i.test(e.description))) throw e;
+        if (!(e instanceof TelegramError && e.status === "failed" && /not modified/i.test(e.description))) throw e;
       });
     }
     this.shown = text;
@@ -620,26 +698,34 @@ class Draft {
     this.timer = undefined;
     await this.chain.catch(() => {});
     this.finished = true;
+    if (this.unknownError) throw this.unknownError;
     // Telegram does not notify on edits. After a long run, replace the silent draft so the reply pings.
     if (this.messageId !== undefined && Date.now() - this.started > 15_000) {
-      await this.api.deleteMessage(this.chatId, this.messageId).catch(() => {});
+      await this.api.deleteMessage(this.chatId, this.messageId).catch(() => {}); // best-effort own-draft cleanup, not an unknown final send
       this.messageId = undefined;
     }
     const chunks = chunkMarkdown(markdown);
     for (let i = 0; i < chunks.length; i++) {
       const html = markdownToTelegramHtml(chunks[i]);
       const editable = i === 0 && this.messageId !== undefined;
-      const send = async (text: string, parseMode?: "HTML") =>
-        editable
-          ? this.api.editMessageText(this.chatId, this.messageId!, text, { parseMode })
-          : this.api.sendMessage(this.chatId, text, { parseMode, replyTo: i === 0 ? this.replyTo : undefined, threadId: this.threadId });
+      this.pendingEditId = editable ? this.messageId : undefined;
+      const send = async (text: string, parseMode?: "HTML") => {
+        if (!editable) return this.api.sendMessage(this.chatId, text, { parseMode, replyTo: i === 0 ? this.replyTo : undefined, threadId: this.threadId });
+        try { return await this.api.editMessageText(this.chatId, this.messageId!, text, { parseMode }); }
+        catch (e) {
+          if (!(e instanceof TelegramError) || e.status !== "unknown") throw e;
+          // One bounded retry is safe only for the same text on our own known draft ID.
+          return this.api.editMessageText(this.chatId, this.messageId!, text, { parseMode });
+        }
+      };
       try {
         await send(html, "HTML");
       } catch (e) {
-        if (e instanceof TelegramError && /not modified/i.test(e.description)) { this.chunksSent++; continue; }
-        if (!(e instanceof TelegramError) || e.code !== 400) throw e;
+        if (e instanceof TelegramError && e.status === "failed" && /not modified/i.test(e.description)) { this.pendingEditId = undefined; this.chunksSent++; continue; }
+        if (!(e instanceof TelegramError) || e.code !== 400 || e.status !== "failed") throw e;
         await send(htmlToPlain(html).slice(0, 4096));
       }
+      this.pendingEditId = undefined;
       this.chunksSent++;
     }
   }
