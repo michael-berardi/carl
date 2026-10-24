@@ -1,7 +1,6 @@
 // The UltraTerm message-log row `utp ultrabot audit` reads for the gateway's sends (hermes.jsonl).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,8 +9,10 @@ import { deliveryRow, MessageLog, messageLogDir, recordDeliveries } from "../src
 import { TelegramApi } from "../src/channels/telegram-api.ts";
 
 function scratch(t: any): string {
-  const dir = mkdtempSync(join(tmpdir(), "carl-message-log-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const root = mkdtempSync(join(tmpdir(), "carl-message-log-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, "messages");
+  mkdirSync(dir, { mode: 0o700 });
   return dir;
 }
 
@@ -85,15 +86,10 @@ test("recording is off unless the installation is wired to UltraTerm (and the sw
   assert.equal(readFileSync(join(dir, "hermes.jsonl"), "utf8").includes('"messageId":6'), true, "the wired API writes rows");
 });
 
-test("a send Telegram did not accept is not recorded", async (t) => {
+test("a send Telegram refused is recorded as failed, never delivered", async (t) => {
   const dir = scratch(t);
-  const server = createServer((req, res) => {
-    res.writeHead(400, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: chat not found" }));
-  });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  t.after(() => new Promise<void>((r) => server.close(() => r())));
-  const api = new TelegramApi("123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz", `http://127.0.0.1:${(server.address() as any).port}`);
+  t.mock.method(globalThis, "fetch", async () => Response.json({ ok: false, error_code: 400, description: "Bad Request: chat not found" }, { status: 400 }));
+  const api = new TelegramApi("123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz");
   const previous = process.env.CARL_MESSAGE_LOG_DIR;
   process.env.CARL_MESSAGE_LOG_DIR = dir;
   t.after(() => {
@@ -102,7 +98,12 @@ test("a send Telegram did not accept is not recorded", async (t) => {
   });
   recordDeliveries(api, true, () => {});
   await assert.rejects(() => api.call("sendMessage", { chat_id: 1, text: "hi" }));
-  assert.equal(existsSync(join(dir, "hermes.jsonl")), false, "a failed send is not a delivered message");
+  const row = JSON.parse(readFileSync(join(dir, "hermes.jsonl"), "utf8"));
+  assert.equal(row.status, "failed", "a failed send is not a delivered message");
+  assert.equal(row.ok, false);
+  assert.equal(row.messageId, null);
+  assert.match(row.error, /chat not found/);
+  assert.equal(row.text, "hi", "the failed attempt is visible to the audit");
 });
 
 test("the log folder is owner-only and the file stays owner-only when it already existed", async (t) => {
