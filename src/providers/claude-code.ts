@@ -124,13 +124,32 @@ export function signatureTag(configDir: string | undefined, model: string): stri
   return `carl1:${(h >>> 0).toString(36)}:`;
 }
 
-export function buildFrames(context: TranscriptContext, dropThinking = false, sigTag = ""): { system: string; frames: Frame[]; tools: { name: string; description: string; inputSchema: any }[] } {
+/**
+ * The API caps tool names at 64 characters and Carl adds an 11-character prefix, so a tool name can use 50.
+ * Longer or non-ASCII names (MCP servers prefix theirs, e.g. mcp__overseer__overseer_coordinator_note_disposition)
+ * get a stable alias: a readable head plus a hash of the full name. Replies are mapped back to the real name.
+ */
+export const MAX_TOOL_NAME = 50;
+export function wireToolName(name: string): string {
+  if (/^[A-Za-z0-9_-]{1,50}$/.test(name)) return name;
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, 8);
+  const head = name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, MAX_TOOL_NAME - hash.length - 1) || "tool";
+  return `${head}_${hash}`;
+}
+
+export function buildFrames(context: TranscriptContext, dropThinking = false, sigTag = ""): { system: string; frames: Frame[]; tools: { name: string; description: string; inputSchema: any }[]; toolNames: Map<string, string> } {
   const system = getCurrentSystemPrompt(context.messages);
+  const toolNames = new Map<string, string>(); // wire name -> real name
+  const wireOf = new Map<string, string>(); // real name -> wire name
   const tools = getCurrentTools(context.messages).map((t) => {
-    if (!/^[A-Za-z0-9_-]{1,50}$/.test(t.name)) throw new ClaudeCodeError(`tool name "${t.name}" is not a 1-50 character ASCII identifier, which the Claude route requires`);
-    return { name: t.name, description: t.description, inputSchema: normalizeSchema(t.parameters) };
+    const wire = wireToolName(t.name);
+    const clash = toolNames.get(wire);
+    if (clash !== undefined && clash !== t.name) throw new ClaudeCodeError(`tool names "${clash}" and "${t.name}" map to the same Claude tool name "${wire}"; rename one of them`);
+    toolNames.set(wire, t.name);
+    wireOf.set(t.name, wire);
+    return { name: wire, description: t.description, inputSchema: normalizeSchema(t.parameters) };
   });
-  const offered = new Set(tools.map((t) => t.name));
+  const offered = wireOf;
   const frames: Frame[] = [];
   const push = (role: "user" | "assistant", content: Block[]) => {
     if (!content.length) return;
@@ -158,7 +177,7 @@ export function buildFrames(context: TranscriptContext, dropThinking = false, si
           content.push({ type: "text", text: c.text });
         } else if (c.type === "toolCall" && answered.has(safeId(c.id))) {
           called.add(safeId(c.id));
-          content.push({ type: "tool_use", id: safeId(c.id), name: offered.has(c.name) ? PREFIX + c.name : c.name, input: c.arguments ?? {} });
+          content.push({ type: "tool_use", id: safeId(c.id), name: offered.has(c.name) ? PREFIX + offered.get(c.name) : c.name, input: c.arguments ?? {} });
         }
       }
       // A reply that is only signed thinking cannot end an assistant turn; keep at least visible text.
@@ -172,7 +191,7 @@ export function buildFrames(context: TranscriptContext, dropThinking = false, si
   }
   const last = frames[frames.length - 1];
   if (!last || last.type !== "user") throw new ClaudeCodeError("the conversation must end with a user message or tool results (assistant prefill is not supported)");
-  return { system, frames, tools };
+  return { system, frames, tools, toolNames };
 }
 
 /** Anthropic rejects null branches in unions; drop them anywhere in the schema (handlers re-validate inputs). */
@@ -795,7 +814,8 @@ async function attemptOnce(
 ): Promise<void> {
   const signal = options?.signal;
   const sigTag = signatureTag(configDir, model.id);
-  const { system, frames, tools } = buildFrames(context, dropThinking, sigTag);
+  const { system, frames, tools, toolNames } = buildFrames(context, dropThinking, sigTag);
+  const realName = (wire: unknown) => { const n = String(wire).replace(PREFIX, ""); return toolNames.get(n) ?? n; };
   const env: NodeJS.ProcessEnv = { ...process.env };
   // The Claude route is the subscription login. API keys or other backends in the environment would silently
   // turn it into paid API use; they are removed for the child, and the removal is logged by name.
@@ -935,7 +955,7 @@ async function attemptOnce(
           stream.push({ type: "thinking_start", contentIndex: idx, partial: { ...partial } });
         } else if (b.type === "tool_use") {
           prewarm(); // a tool round means another call follows: start its process while the tools run
-          partial.content.push({ type: "toolCall", id: b.id, name: String(b.name).replace(PREFIX, ""), arguments: {} });
+          partial.content.push({ type: "toolCall", id: b.id, name: realName(b.name), arguments: {} });
           stream.push({ type: "toolcall_start", contentIndex: idx, partial: { ...partial } });
         } else {
           indexMap.delete(ev.index);
@@ -994,7 +1014,7 @@ async function attemptOnce(
       if (b.type === "text") content.push({ type: "text", text: b.text ?? "" });
       else if (b.type === "thinking") content.push({ type: "thinking", thinking: b.thinking ?? "", thinkingSignature: b.signature ? sigTag + b.signature : undefined });
       else if (b.type === "redacted_thinking") content.push({ type: "thinking", thinking: "", redacted: true, thinkingSignature: sigTag + b.data });
-      else if (b.type === "tool_use") content.push({ type: "toolCall", id: b.id, name: String(b.name).replace(PREFIX, ""), arguments: b.input ?? {} });
+      else if (b.type === "tool_use") content.push({ type: "toolCall", id: b.id, name: realName(b.name), arguments: b.input ?? {} });
     }
     const u = msg.usage ?? {};
     const usage = {
