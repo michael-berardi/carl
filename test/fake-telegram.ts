@@ -8,6 +8,9 @@ export class FakeTelegram {
   /** message id -> current text, for messages Carl sent. */
   sent = new Map<number, { chatId: number; text: string; deleted?: boolean; at: number }>();
   private updates: any[] = [];
+  /** getUpdates calls to answer by dropping the connection (a network blip), counted down per call. */
+  dropPolls = 0;
+  polls = 0;
   private nextUpdateId = 1;
   private nextMessageId = 1000;
   private waiters: (() => void)[] = [];
@@ -31,6 +34,8 @@ export class FakeTelegram {
           case "getMe":
             return reply({ id: 1, is_bot: true, first_name: "Carl", username: "carl_test_bot" });
           case "getUpdates": {
+            this.polls++;
+            if (this.dropPolls > 0) { this.dropPolls--; req.socket.destroy(); return; }
             const deadline = Date.now() + Math.min((body.timeout ?? 0) * 1000, 2_000);
             while (!this.updates.some((u) => u.update_id >= (body.offset ?? 0)) && Date.now() < deadline) {
               await new Promise<void>((r) => { this.waiters.push(r); setTimeout(r, 100); });
