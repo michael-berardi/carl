@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildFrames, Capture, normalizeSchema, pinMessageBreakpoint, signatureTag } from "../src/providers/claude-code.ts";
+import { buildFrames, Capture, MAX_TOOL_NAME, normalizeSchema, pinMessageBreakpoint, signatureTag, wireToolName } from "../src/providers/claude-code.ts";
 
 const ctx = (messages: any[]) => ({ messages }) as any;
 
@@ -82,4 +82,22 @@ test("pinMessageBreakpoint moves a trailing mark onto the replayed prefix and is
   assert.ok(out.system[0].cache_control, "system marks untouched");
   const junk = Buffer.from("not json");
   assert.equal(pinMessageBreakpoint(junk, queried as any), junk);
+});
+
+test("buildFrames: tool names over 50 characters get a stable alias that maps back", () => {
+  const long = "mcp__overseer__overseer_coordinator_note_disposition";
+  const { tools, frames, toolNames } = buildFrames(ctx([
+    { role: "system", content: "S", toolsAdded: [{ name: long, description: "d", parameters: { type: "object" } }, { name: "bash", description: "d", parameters: { type: "object" } }], timestamp: 0 },
+    { role: "user", content: "q", timestamp: 1 },
+    { role: "assistant", provider: "claude-code", content: [{ type: "toolCall", id: "c1", name: long, arguments: {} }], timestamp: 2 },
+    { role: "toolResult", toolCallId: "c1", toolName: long, content: [{ type: "text", text: "ok" }], isError: false, timestamp: 3 },
+  ]));
+  const alias = tools[0].name;
+  assert.ok(alias.length <= MAX_TOOL_NAME && /^[A-Za-z0-9_-]+$/.test(alias), alias);
+  assert.equal(alias, wireToolName(long), "alias is stable across turns");
+  assert.ok(alias.startsWith("mcp__overseer__overseer_coordinator_note"), "alias stays readable");
+  assert.equal(tools[1].name, "bash", "short names unchanged");
+  assert.equal(toolNames.get(alias), long);
+  assert.equal(frames[1].message.content[0].name, "mcp__carl__" + alias, "history replays the alias");
+  assert.ok(("mcp__carl__" + alias).length <= 64);
 });
