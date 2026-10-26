@@ -18,6 +18,9 @@ import { type InlineButton, TelegramApi, TelegramError, type TgCallbackQuery, ty
 
 interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string; status?: "unknown"; requestId?: string; unknownNoticeAttempted?: boolean; editMessageId?: number }
 
+/** Consecutive getUpdates failures before the channel reports "retrying" (a single dropped poll is not an outage). */
+export const POLL_FAILURES_BEFORE_RETRYING = 2;
+
 export type CommandHandler = (args: string, chatId: number, key: string) => Promise<string>;
 
 export interface ChannelStatus {
@@ -130,12 +133,14 @@ export class TelegramChannel {
           this.log.error("telegram token rejected; polling stopped", { code: err.code });
           return;
         }
+        failures++;
+        // One dropped long poll (a network blip, a sleep/wake) is routine and the next poll usually succeeds: report "retrying"
+        // only from the second failure in a row, so UltraTerm does not flash a connection error for a hiccup it would recover from.
         if (err instanceof TelegramError && err.code === 409) {
           this.setStatus("retrying", "another process is polling this bot token (409 conflict)");
-        } else {
+        } else if (failures >= POLL_FAILURES_BEFORE_RETRYING) {
           this.setStatus("retrying", err.message);
         }
-        failures++;
         const wait = Math.min(60_000, 1_000 * 2 ** Math.min(failures, 6));
         this.log.warn("telegram poll failed; retrying", { error: err.message, waitMs: wait });
         await new Promise((r) => setTimeout(r, wait));
