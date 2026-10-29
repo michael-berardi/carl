@@ -52,8 +52,10 @@ export class Gateway {
     this.scheduler = new Scheduler(cfg.home, this.log, {
       prompt: (job) => this.runPromptJob(job),
       builtin: { individuation: () => this.individuate() },
+      // The message is the job's own words. Its internal schedule id/name is not shown to the operator
+      // (Mike 2026-10-29: "we don't want it to even say overseer coordination"); failures already name the job.
       deliver: async (job, text) => {
-        await this.send(job.deliver, `**${job.name}**\n\n${text}`);
+        await this.send(job.deliver, text);
       },
       // Command jobs run under the shell sandbox too: the scripts and tools they call are ones the agent can change.
       commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg), cwd: cfg.workspace }),
