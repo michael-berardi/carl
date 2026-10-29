@@ -135,6 +135,8 @@ export function secret(home: string, name: string, envFiles: string[] = []): str
   return undefined;
 }
 
+export const DEFAULT_MODEL = "openai-codex/gpt-6.1-terra";
+
 const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 export function loadConfig(home = carlHome()): CarlConfig {
@@ -152,7 +154,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
   const cfg: CarlConfig = {
     home,
     name: str(raw.name, "Carl", "name"),
-    model: str(raw.model, "openai-codex/gpt-6.1-sol", "model"),
+    model: str(raw.model, DEFAULT_MODEL, "model"),
     thinking: (raw.thinking ?? "medium") as CarlConfig["thinking"],
     fallbackModels: strList(raw.fallbackModels, "fallbackModels"),
     sideModel: raw.sideModel === undefined ? undefined : str(raw.sideModel, "", "sideModel"),

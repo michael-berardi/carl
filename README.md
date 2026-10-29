@@ -142,13 +142,13 @@ Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 
 ## Configuration
 
-`~/.carl/carl.json` (set `CARL_HOME` to move it). Every key is optional.
+`~/.carl/carl.json` (set `CARL_HOME` to move it). Every key is optional. The default model, also seeded by `carl init`, is `openai-codex/gpt-6.1-terra`; existing explicit model choices are unchanged.
 
 ```json
 {
   "name": "Carl",
   "model": "claude-code/claude-sonnet-5-5",
-  "fallbackModels": ["openai-codex/gpt-6.1-sol"],
+  "fallbackModels": ["openai-codex/gpt-6.1-terra"],
   "thinking": "medium",
   "contextBudget": 100000,
   "tools": ["read", "bash"],

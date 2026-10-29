@@ -28,6 +28,7 @@ import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
+import { registerTerra } from "./providers/terra.ts";
 import { claudeCodeProviderConfig, closeSpares, PROVIDER as CLAUDE_PROVIDER, sweepCallFolders } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
 import { type Approver, guardedFileOps, guardedReadOps, shellGuard } from "./guard.ts";
@@ -289,6 +290,7 @@ export class Brain extends EventEmitter {
       authPath: join(this.cfg.agentDir, "auth.json"),
       modelsPath: join(this.cfg.agentDir, "models.json"),
     });
+    await registerTerra(this.runtime);
     if (this.cfg.claude.enabled) {
       const swept = sweepCallFolders(join(this.cfg.home, "state", "claude-tmp"));
       if (swept) this.log.info("removed per-call Claude folders left by an earlier process", { count: swept });

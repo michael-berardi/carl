@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 import { Brain } from "./brain.ts";
 import { TelegramApi } from "./channels/telegram-api.ts";
 import { chunkMarkdown, markdownToTelegramHtml } from "./channels/format.ts";
-import { carlHome, ConfigError, ensureHome, loadConfig, mcpFile, secret } from "./config.ts";
+import { carlHome, ConfigError, DEFAULT_MODEL, ensureHome, loadConfig, mcpFile, secret } from "./config.ts";
 import { Gateway } from "./gateway.ts";
 import { Log } from "./log.ts";
 import { recordDeliveries, sendLogOrigin } from "./message-log.ts";
@@ -129,7 +129,7 @@ function init(): number {
     JSON.stringify(
       {
         name: "Carl",
-        model: "openai-codex/gpt-6.1-sol",
+        model: DEFAULT_MODEL,
         thinking: "medium",
         contextBudget: 96000,
         tools: ["read", "bash"],

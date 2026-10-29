@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "../src/config.ts";
 import { executableChain, installProfile, readSandboxed, sandboxAvailable, sandboxSpawnHook } from "../src/sandbox.ts";
@@ -28,7 +28,28 @@ print("default-app", "found" if cs.LSCopyDefaultApplicationURLForURL(url, 0xFFFF
 test("shell sandbox: control plane and secrets are out of reach, the workspace is not", { skip: !sandboxAvailable() && "needs macOS sandbox-exec" }, async (t) => {
   mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "run-"));
-  t.after(() => { rmSync(root, { recursive: true, force: true }); try { rmdirSync(base); } catch {} });
+  const socketServers: ReturnType<typeof createNetServer>[] = [];
+  t.after(async () => {
+    try {
+      if (socketServers.length) {
+        const cwd = process.cwd();
+        try {
+          process.chdir(root);
+          const results = await Promise.allSettled(socketServers.map((s) => new Promise<void>((resolve, reject) => {
+            if (!s.listening) return resolve();
+            s.close((err) => err ? reject(err) : resolve());
+          })));
+          const failures = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+          if (failures.length) throw new AggregateError(failures.map((r) => r.reason), "socket cleanup failed");
+        } finally {
+          process.chdir(cwd);
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      try { rmdirSync(base); } catch {}
+    }
+  });
   const home = join(root, "carl");
   for (const d of ["state", "workspace", "engine"]) mkdirSync(join(home, d), { recursive: true });
   const outside = join(root, "elsewhere-ext");
@@ -42,6 +63,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   writeFileSync(join(root, "secrets", "extra.env"), "OTHER=2:secret\n");
   const cfg = loadConfig(home);
   const api = createServer((_q, r) => r.end("api")).listen(18_765, "127.0.0.1");
+  t.after(() => { api.close(); });
   // A program Carl starts by path: the link and its folder must stay put, the folder's other files need not.
   mkdirSync(join(root, "bin"));
   symlinkSync("/bin/echo", join(root, "bin", "tool"));
@@ -49,17 +71,35 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   // A stand-in tmux server: its socket must be out of reach (tmux runs whatever it is sent, outside the sandbox).
   const sock = join(root, "tmux-sock", "s");
   mkdirSync(dirname(sock));
-  const tmuxLike = createNetServer((c) => { c.on("error", () => {}); c.end("tmux"); }).listen(sock);
   const savedTmux = process.env.TMUX;
   process.env.TMUX = `${sock},1,0`;
+  t.after(() => { if (savedTmux === undefined) delete process.env.TMUX; else process.env.TMUX = savedTmux; });
   // Stand-in agent sockets for each name pattern, and an unrelated socket as the control that must stay reachable.
   const fakeSocks = { sshDir: join(root, "ssh-Xy12", "agent.4242"), named: join(root, "my-agent.sock"), plain: join(root, "plain-service.sock") };
   mkdirSync(join(root, "ssh-Xy12"));
-  const fakeServers = Object.values(fakeSocks).map((p) => createNetServer((c) => { c.on("error", () => {}); c.end("hello"); }).listen(p));
-  t.after(() => { for (const s of fakeServers) s.close(); });
+  // Unix socket addresses have a small byte limit; bind relative to the fixture even when TMPDIR is long.
+  const cwd = process.cwd();
+  try {
+    process.chdir(root);
+    for (const [path, message] of [[sock, "tmux"], ...Object.values(fakeSocks).map((p) => [p, "hello"])]) {
+      const server = createNetServer((c) => { c.on("error", () => {}); c.end(message); });
+      socketServers.push(server);
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(relative(root, path), () => { server.removeListener("error", reject); resolve(); });
+      });
+    }
+  } finally {
+    process.chdir(cwd);
+  }
+  // Verify every socket is actually reachable before treating a sandbox failure as a denial.
+  for (const path of [sock, ...Object.values(fakeSocks)]) {
+    const probe = spawnSync("/usr/bin/python3", ["-c", "import socket, sys; s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close()", relative(root, path)], { cwd: root, encoding: "utf8" });
+    assert.equal(probe.status, 0, `socket control failed for ${path}: ${probe.stderr}`);
+  }
   // A process outside the sandbox that commands must not be able to signal.
   const outsider = spawn("/bin/sleep", ["30"]);
-  t.after(() => { outsider.kill(); tmuxLike.close(); if (savedTmux === undefined) delete process.env.TMUX; else process.env.TMUX = savedTmux; });
+  t.after(() => { outsider.kill(); });
   // Positive control: the SSH agent socket exists and answers outside the sandbox, so a refusal inside means something.
   const agentSock = process.env.SSH_AUTH_SOCK && spawnSync("/usr/bin/ssh-add", ["-l"], { env: { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK } }).status !== 2 ? process.env.SSH_AUTH_SOCK : undefined;
   const homeProbe = join(homedir(), `.carl-sandbox-probe-${process.pid}`);
@@ -70,6 +110,7 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
   process.env.CARL_TEST_PASS = "passed-through";
   process.env.HOMEBREW_GITHUB_API_TOKEN = "ghp_must_not_leak";
   process.env.HTTPS_PROXY = "http://proxy.test:3128";
+  t.after(() => { for (const k of ["TELEGRAM_BOT_TOKEN", "STRIPE_TEST_KEY", "CARL_TEST_PASS", "HOMEBREW_GITHUB_API_TOKEN", "HTTPS_PROXY"]) delete process.env[k]; });
   const bash = createBashToolDefinition(cfg.workspace, { spawnHook: sandboxSpawnHook(cfg, profile), exposeSessionEnvironment: false });
   const run = async (command: string) => {
     const r: any = await bash.execute("t", { command } as any, undefined, undefined, {} as any).catch((e: Error) => ({ content: [{ type: "text", text: e.message }] }));
@@ -101,20 +142,18 @@ test("shell sandbox: control plane and secrets are out of reach, the workspace i
     `echo made > ${join(root, "made.txt")} && echo wrote-in-ancestor`,
     `/usr/bin/python3 ${join(root, "probe.py")}`,
     `echo nope > ${homeProbe}; echo home-write=$?`,
-    `/usr/bin/python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${sock}'); print('TMUX-REACHED', s.recv(9))" 2>/dev/null || echo tmux-blocked`,
+    `(cd ${root} && /usr/bin/python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${relative(root, sock)}'); print('TMUX-REACHED', s.recv(9))") 2>/dev/null || echo tmux-blocked`,
     `kill -0 ${outsider.pid} 2>/dev/null && echo SIGNAL-REACHED || echo signal-blocked`,
     `echo "PATHIS=[$PATH]" "FILEONLY=[$CARL_FILE_ONLY]"`,
     `echo t > /private/tmp/carl-sbx-probe-${process.pid}; echo tmp-write=$?`,
     `echo "TMPDIRIS=[$TMPDIR]"`,
-    ...Object.entries(fakeSocks).map(([k, p]) => `/usr/bin/python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${p}'); print('SOCK-${k}-reached')" 2>/dev/null || echo sock-${k}-blocked`),
+    ...Object.entries(fakeSocks).map(([k, p]) => `(cd ${root} && /usr/bin/python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${relative(root, p)}'); print('SOCK-${k}-reached')") 2>/dev/null || echo sock-${k}-blocked`),
     ...(agentSock ? [`SSH_AUTH_SOCK=${agentSock} ssh-add -l >/dev/null 2>&1; echo ssh-agent=$?`] : []),
     `ls ~/Library/Keychains >/dev/null 2>&1; echo keychain-files=$?`,
     ...(existsSync(join(homedir(), ".ssh")) ? [`ls ~/.ssh >/dev/null 2>&1; echo ssh-dir=$?`] : []),
     `security show-keychain-info >/dev/null 2>&1; echo keychain=$?`,
     `mv ${join(root, "nest")} ${join(root, "nest-moved")}; echo parent-move=$?`,
   ].join(" ; "));
-  api.close();
-  for (const k of ["TELEGRAM_BOT_TOKEN", "STRIPE_TEST_KEY", "CARL_TEST_PASS", "HOMEBREW_GITHUB_API_TOKEN", "HTTPS_PROXY"]) delete process.env[k];
   assert.equal(readFileSync(join(home, "carl.json"), "utf8").includes("hacked"), false, "carl.json must be unchanged");
   assert.doesNotMatch(out, /1:secret|2:secret/, "neither the .env files nor the env var may leak");
   assert.ok(!existsSync(join(ws, "config-link")), "control files cannot be hardlinked into the workspace");
