@@ -310,6 +310,7 @@ export class Brain extends EventEmitter {
         primary: () => this.cfg.model, // read per request: a model switch (portal, UltraTerm picker) takes effect at once
         fallbacks: () => this.cfg.fallbackModels,
         resolve: (ref) => this.model(ref),
+        usable: (ref) => this.runtime.hasConfiguredAuth(this.model(ref).provider),
         events: {
           onFallback: (from, to, reason, until) => {
             this.log.warn("primary model out of quota; using fallback", { from, to, until: new Date(until).toISOString(), reason });
