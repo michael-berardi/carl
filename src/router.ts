@@ -31,10 +31,14 @@ export interface RouterEvents {
 }
 
 /** Route definition for ModelRuntime.registerVirtualModel. */
-export function createRouter(opts: { primary: string | (() => string); fallbacks: string[] | (() => string[]); resolve: (ref: string) => Model<Api>; events: RouterEvents }) {
+export function createRouter(opts: { primary: string | (() => string); fallbacks: string[] | (() => string[]); resolve: (ref: string) => Model<Api>; events: RouterEvents;
+  /** Whether a model can be called at all (its provider has a login). A model without one is skipped, never routed to:
+   * 2026-10-29 the primary had no Codex login and every turn failed with "has no credentials" while Sonnet sat unused. */
+  usable?: (ref: string) => boolean }) {
   const exhaustedUntil = new Map<string, number>();
   const ref = (m: Model<Api>) => `${m.provider}/${m.id}`;
-  const available = (r: string) => (exhaustedUntil.get(r) ?? 0) <= Date.now();
+  const usable = (r: string) => { try { return opts.usable ? opts.usable(r) : true; } catch { return true; } };
+  const available = (r: string) => (exhaustedUntil.get(r) ?? 0) <= Date.now() && usable(r);
   const primaryOf = () => (typeof opts.primary === "function" ? opts.primary() : opts.primary);
   const fallbacksOf = () => (typeof opts.fallbacks === "function" ? opts.fallbacks() : opts.fallbacks);
   return {
