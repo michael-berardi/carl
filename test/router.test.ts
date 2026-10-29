@@ -36,3 +36,16 @@ test("router: primary, fallback on exhaustion, sticky continuations, recovery af
   // A non-quota failure is retried on the same model, never silently moved.
   assert.equal(r.route({ reason: "retry", thinkingLevel: "low", failed: { model: models["a/p"], message: err("HTTP 503 overloaded") } }).model.id, "p");
 });
+
+test("router: a model with no login is skipped, not routed to", () => {
+  const models: Record<string, any> = { "a/p": { provider: "a", id: "p" }, "b/f": { provider: "b", id: "f" } };
+  let signedIn = false;
+  const r = createRouter({ primary: "a/p", fallbacks: ["b/f"], resolve: (x) => models[x], usable: (x) => x !== "a/p" || signedIn,
+    events: { onFallback: () => {} } });
+  assert.equal(r.route({ reason: "user", thinkingLevel: "low" }).model.id, "f");
+  signedIn = true; // the primary signs in: it is used again at once
+  assert.equal(r.route({ reason: "user", thinkingLevel: "low" }).model.id, "p");
+  // A broken check never blocks routing.
+  const broken = createRouter({ primary: "a/p", fallbacks: ["b/f"], resolve: (x) => models[x], usable: () => { throw new Error("x"); }, events: { onFallback: () => {} } });
+  assert.equal(broken.route({ reason: "user", thinkingLevel: "low" }).model.id, "p");
+});
