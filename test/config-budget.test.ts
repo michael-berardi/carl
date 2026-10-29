@@ -9,9 +9,15 @@ import { capText } from "../src/budget.ts";
 test("defaults load without a file", () => {
   const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
   const c = loadConfig(h);
-  assert.equal(c.model, "openai-codex/gpt-6.1-sol");
+  assert.equal(c.model, "openai-codex/gpt-6.1-terra");
   assert.equal(c.api.port, 8642);
   assert.deepEqual(c.telegram.allowFrom, []);
+});
+
+test("an explicit model remains unchanged", () => {
+  const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(h, "carl.json"), JSON.stringify({ model: "openai-codex/gpt-6.1-sol" }));
+  assert.equal(loadConfig(h).model, "openai-codex/gpt-6.1-sol");
 });
 
 test("bad config names the field", () => {

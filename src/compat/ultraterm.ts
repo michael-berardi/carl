@@ -21,6 +21,7 @@ const MODEL_CONTRACT = "hermes.canonical-model-selection.v1";
  */
 const PICKER_MAP: [string, string, string][] = [
   ["claude-subscription-directsdk-experimental", "claude-sonnet-5-5[1m]", "claude-code/claude-sonnet-5-5"],
+  ["openai-codex", "gpt-6.1-terra", "openai-codex/gpt-6.1-terra"],
   ["openai-codex", "gpt-6.1-sol", "openai-codex/gpt-6.1-sol"],
 ];
 const toPicker = (ref: string) => PICKER_MAP.find((r) => r[2] === ref);

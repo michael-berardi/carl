@@ -1,40 +1,46 @@
-// The warm spare: a tool round pre-starts the next `claude -p`, and the next call with the same shape adopts it.
-// Runs the real Claude Code CLI against a loopback fake upstream; skipped when the CLI is not installed.
+// Exercise spare adoption with a deterministic CLI fixture and loopback upstream; no login or network required.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer } from "node:http";
-import { disposeSpares, resolveClaude, spareCount, streamClaude } from "../src/providers/claude-code.ts";
+import { disposeSpares, spareCount, streamClaude } from "../src/providers/claude-code.ts";
 
 const sse = (o: any) => `event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`;
 
-// This test drives the real CLI, so it needs one that is installed *and* logged in: an expired OAuth session would
-// otherwise fail the suite for a reason that has nothing to do with Carl. `auth status` is a local check (no network,
-// no quota); a CLI too old to answer it keeps the old behaviour and runs the test.
-function claudeSkip(): string | false {
-  const bin = resolveClaude(undefined, process.env);
-  if (!bin) return "claude CLI not installed";
-  let out = "";
-  try {
-    out = execFileSync(bin, ["auth", "status"], { encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "ignore"] });
-  } catch (e) {
-    // A logged-out CLI exits non-zero and still prints its status JSON on stdout.
-    out = String((e as { stdout?: string }).stdout ?? "");
-  }
-  try {
-    const status = JSON.parse(out) as { loggedIn?: boolean };
-    if (status?.loggedIn === false) return "claude CLI is installed but not logged in (run `claude auth login`)";
-  } catch {
-    // No usable `auth status` output: run the test as before rather than hiding a real failure.
-  }
-  return false;
-}
-
-test("a tool round pre-starts the next call's process; a different request shape does not use it", { skip: claudeSkip() }, async () => {
+test("a tool round pre-starts the next call's process; a different request shape does not use it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "carl-spare-test-"));
+  const bin = join(dir, "claude-fixture.cjs");
+  // A minimal CLI: acknowledge replay frames, then forward the fake upstream's SSE as stream-json.
+  writeFileSync(bin, `#!${process.execPath}
+const http = require("node:http");
+const readline = require("node:readline");
+const frames = [];
+readline.createInterface({ input: process.stdin }).on("line", line => {
+  const frame = JSON.parse(line);
+  frames.push(frame);
+  if (frame.shouldQuery === false) console.log(JSON.stringify({ type: "result", num_turns: 0, is_error: false }));
+}).on("close", () => {
+  const req = http.request(process.env.ANTHROPIC_BASE_URL + "/v1/messages", { method: "POST" }, res => {
+    let pending = "";
+    res.setEncoding("utf8");
+    res.on("data", chunk => {
+      pending += chunk;
+      let end;
+      while ((end = pending.indexOf("\\n\\n")) !== -1) {
+        const frame = pending.slice(0, end); pending = pending.slice(end + 2);
+        const data = frame.split("\\n").find(line => line.startsWith("data: "));
+        if (data) console.log(JSON.stringify({ type: "stream_event", event: JSON.parse(data.slice(6)) }));
+      }
+    });
+  });
+  req.on("error", e => { console.error(e); process.exitCode = 1; });
+  req.end(JSON.stringify({ messages: frames.map(f => f.message) }));
+});
+`, { mode: 0o755 });
   let n = 0;
-  let reqAt = 0;
   const srv = createServer((req, res) => {
-    reqAt = performance.now();
     n++;
     req.resume();
     req.on("end", () => {
@@ -61,13 +67,12 @@ test("a tool round pre-starts the next call's process; a different request shape
   const model = { id: "claude-sonnet-5-5", maxTokens: 64000 } as any;
   const tools = [{ name: "t", description: "d", parameters: { type: "object", properties: {} } }];
   const call = async (messages: any[], reasoning = "medium") => {
-    const t0 = performance.now();
     let final: any;
-    for await (const e of streamClaude(model, { messages } as any, { reasoning } as any, { log: (_l, m) => logs.push(m) })) {
+    for await (const e of streamClaude(model, { messages } as any, { reasoning } as any, { command: bin, workdir: dir, tmpRoot: dir, log: (_l, m) => logs.push(m) })) {
       if (e.type === "done") final = e.message;
       if (e.type === "error") throw new Error(e.error.errorMessage);
     }
-    return { final, toRequest: reqAt - t0 };
+    return { final };
   };
   try {
     const messages: any[] = [{ role: "system", content: "sys", toolsAdded: tools, timestamp: 1 }, { role: "user", content: "hi", timestamp: 2 }];
@@ -78,8 +83,9 @@ test("a tool round pre-starts the next call's process; a different request shape
     const second = await call(messages);
     assert.equal(second.final.content[0].text, "ok");
     assert.ok(logs.includes("claude call used a pre-started process"));
+    assert.ok(!logs.some((message) => message.includes("retrying with a fresh one")));
+    assert.equal(n, 2);
     assert.equal(spareCount(), 0);
-    assert.ok(second.toRequest < first.toRequest, `adopted call reached the API in ${second.toRequest.toFixed(0)} ms vs ${first.toRequest.toFixed(0)} ms cold`);
     // A different shape (effort) must not adopt a spare made for another one.
     n = 0;
     logs.length = 0;
@@ -88,10 +94,13 @@ test("a tool round pre-starts the next call's process; a different request shape
     m2.push(a.final, { role: "toolResult", toolCallId: "tu1", toolName: "t", content: [{ type: "text", text: "r" }], isError: false, timestamp: 3 });
     await call(m2, "high");
     assert.ok(!logs.includes("claude call used a pre-started process"));
+    assert.equal(spareCount(), 1);
+    assert.equal(n, 2);
   } finally {
     disposeSpares();
     if (prev === undefined) delete process.env.CARL_CLAUDE_UPSTREAM;
     else process.env.CARL_CLAUDE_UPSTREAM = prev;
-    srv.close();
+    await new Promise<void>((resolve, reject) => srv.close((err) => err ? reject(err) : resolve()));
+    rmSync(dir, { recursive: true, force: true });
   }
 });
