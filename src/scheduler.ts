@@ -252,7 +252,12 @@ export class Scheduler {
       if (job.when.startsWith("once")) job.enabled = false;
       try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); }
     }
-    const skip = job.deliver === "none" || (job.onlyIfOutput && job.lastStatus === "ok" && !output.trim());
+    // A run that answered only with a silence marker ("[SILENT]", "NO_REPLY", "HEARTBEAT_OK", optionally with trailing
+    // punctuation) has nothing to say: it is never delivered, whether or not the job set onlyIfOutput (Mike 2026-10-29: a
+    // background check posted "[SILENT]" to Telegram every 20 minutes).
+    const silent = isSilentReply(output);
+    const skip = job.deliver === "none" || silent || (job.onlyIfOutput && job.lastStatus === "ok" && !output.trim());
+    if (silent && job.lastStatus === "ok") this.log.info("schedule finished silently", { id: job.id, name: job.name });
     if (!skip && output.trim()) {
       await this.runners.deliver(job, output).catch((e) => {
         job.lastError = `ran, but delivery failed: ${(e as Error).message}`.slice(0, 500);
@@ -261,6 +266,11 @@ export class Scheduler {
       });
     }
   }
+}
+
+/** A reply that only says "nothing to report". Exported for the gateway and tests. */
+export function isSilentReply(text: string): boolean {
+  return /^\s*(?:\[\s*SILENT\s*\]|NO_REPLY|HEARTBEAT_OK)[\s.!]*$/i.test(text ?? "");
 }
 
 export function runCommand(command: string, timeoutMs: number, groups?: Set<number>, sandbox?: { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string }): Promise<string> {
