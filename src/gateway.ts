@@ -8,7 +8,7 @@ import { TelegramChannel } from "./channels/telegram.ts";
 import { TelegramError } from "./channels/telegram-api.ts";
 import { type CarlConfig, ensureHome, secret } from "./config.ts";
 import { Log } from "./log.ts";
-import { Asks, askTools } from "./asks.ts";
+import { Asks, moduleAskTools } from "./asks.ts";
 import { individuationPrompt, parseIndividuation, Psyche, readJsonl } from "./psyche.ts";
 import { type Job, Scheduler } from "./scheduler.ts";
 import { cleanEnv, sandboxArgv } from "./sandbox.ts";
@@ -64,7 +64,7 @@ export class Gateway {
     });
     const asks = cfg.asks ? new Asks(cfg.home) : undefined;
     this.asks = asks;
-    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox), ...(asks ? askTools(asks) : [])], { shared: true });
+    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox), ...moduleAskTools(cfg, asks)], { shared: true });
   }
 
   use(plugin: GatewayPlugin): this {

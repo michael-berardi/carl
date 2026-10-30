@@ -189,3 +189,8 @@ export function askTools(asks: Asks): ToolDefinition[] {
     }),
   ];
 }
+
+/** The asks module's tools when it is on, for every place that builds Carl's tool set (gateway, ask, prompt). */
+export function moduleAskTools(cfg: { asks: boolean; home: string }, asks?: Asks): ToolDefinition[] {
+  return cfg.asks ? askTools(asks ?? new Asks(cfg.home)) : [];
+}

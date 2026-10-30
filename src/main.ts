@@ -12,6 +12,7 @@ import { recordDeliveries, sendLogOrigin } from "./message-log.ts";
 import { Psyche } from "./psyche.ts";
 import { Scheduler } from "./scheduler.ts";
 import { carlTools } from "./tools.ts";
+import { moduleAskTools } from "./asks.ts";
 import { COMMIT, VERSION } from "./version.ts";
 import { loadPlugins } from "./plugins.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
@@ -268,7 +269,7 @@ async function ask(args: string[]): Promise<number> {
   const psyche = new Psyche(cfg.home, cfg.learning);
   psyche.seed();
   const scheduler = new Scheduler(cfg.home, log, { prompt: async () => "", builtin: {}, deliver: async () => {} });
-  const brain = new Brain(cfg, psyche, log, () => carlTools(psyche, scheduler, { send: async () => "Not delivered: carl ask has no channels." }));
+  const brain = new Brain(cfg, psyche, log, () => [...carlTools(psyche, scheduler, { send: async () => "Not delivered: carl ask has no channels." }), ...moduleAskTools(cfg)]);
   await brain.init();
   let shown = 0;
   const result = await brain.ask(values.conversation ?? "cli:default", { text, source: "cli" }, {
@@ -370,7 +371,7 @@ async function prompt(args: string[]): Promise<number> {
   psyche.seed();
   const log = new Log(undefined);
   const scheduler = new Scheduler(cfg.home, log, { prompt: async () => "", builtin: {}, deliver: async () => {} });
-  const brain = new Brain(cfg, psyche, log, () => carlTools(psyche, scheduler, { send: async () => "" }));
+  const brain = new Brain(cfg, psyche, log, () => [...carlTools(psyche, scheduler, { send: async () => "" }), ...moduleAskTools(cfg)]);
   await brain.init();
   const { systemPrompt, tools } = await brain.inspect();
   if (args.includes("--full")) console.log(systemPrompt + "\n");

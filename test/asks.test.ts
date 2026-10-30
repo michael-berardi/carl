@@ -85,3 +85,10 @@ test("waitingOn matches the askee to a member's configured name, only for open a
   write(h, { status: "done" });
   assert.equal(asks.waitingOn(-5269168638, "Kate"), false);
 });
+
+test("every place that builds Carl's tool set adds the asks tools when the module is on", () => {
+  const read = (f: string) => readFileSync(join(import.meta.dirname, "..", "src", f), "utf8");
+  const builders = (read("main.ts") + read("gateway.ts")).match(/carlTools\(/g)!.length;
+  const withAsks = (read("main.ts") + read("gateway.ts")).match(/carlTools\([^\n]*\n?[^\n]*moduleAskTools/g)!.length;
+  assert.equal(withAsks, builders, "a tool set built without moduleAskTools would silently lack ask_open/ask_answer/ask_finish");
+});
