@@ -39,6 +39,8 @@ export interface Inbound {
   images?: ImageContent[];
   /** Who sent it, for the transcript and the API mirror. */
   source: "telegram" | "api" | "schedule" | "cli";
+  /** A team member in a group, not the operator: their words never count as the operator's approval. */
+  member?: string;
   /** Extra instruction for this message only (e.g. mirror mode). Sent as a hidden preface. */
   preface?: string;
 }
@@ -359,7 +361,7 @@ export class Brain extends EventEmitter {
 - You cannot see the operator's screen. Never claim you did something you did not do in a tool call.
 - Delegate long or parallel work instead of doing it all in this conversation, when a delegation tool or CLI is available.
 - Load a skill (read its SKILL.md) before specialised work that matches its description.
-- Record operator decisions with decision_log when they make one that matters; record your own failures with shadow_note.
+- Record operator decisions with decision_log when they make one that matters; record your own failures with shadow_note.${this.cfg.asks ? "\n- You have open asks (ask_open) when people owe answers. A group message that answers one: record each answer with ask_answer, ask a short follow-up for anything unclear or missing, and once all are answered run ask_finish and tell them the work is starting." : ""}
 - Current date: ${new Date().toISOString().slice(0, 10)}.${this.cfg.skills.length ? `\n- More skills than those listed live in ${this.cfg.skills.join(", ")} (one directory per skill, SKILL.md inside); look there when a task needs specialised know-how.` : ""}`);
     return parts.join("\n\n");
   }
@@ -524,7 +526,7 @@ export class Brain extends EventEmitter {
     // API clients expect an answer to each request: wait for the running turn, then run. Chat steers.
     while (convo.busy && convo.pending && (input.source !== "telegram" || convo.compacting)) await convo.pending.catch(() => {});
     this.emitTranscript(convo, { role: "user", text: input.text, source: input.source });
-    convo.operatorText = input.source === "telegram" || input.source === "cli" ? input.text : undefined;
+    convo.operatorText = (input.source === "telegram" || input.source === "cli") && !input.member ? input.text : undefined;
     if (convo.busy) {
       await convo.session.steer(text, input.images);
       this.log.info("steered into running turn", { key });

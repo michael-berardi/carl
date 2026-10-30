@@ -27,6 +27,7 @@ const HELP = `carl ${VERSION}: the minimal bot gateway
   carl ask [-c key] <text>          one turn without channels (default conversation cli:default)
   carl send -t telegram:<chat> [--json] <text>
                                     send a message (Hermes-compatible output with --json)
+  carl ask-post <id>                post an ask's questions to its chat (asks module; CARL_HOME/asks/<id>.json)
   carl reflect                      run the individuation pass once and print it
   carl schedules                    list schedules
   carl prompt [--full]              the system prompt and tools a new conversation gets, with sizes
@@ -61,6 +62,8 @@ async function main(argv: string[]): Promise<number> {
       return ask(rest);
     case "send":
       return send(rest);
+    case "ask-post":
+      return askPost(rest);
     case "reflect":
       return reflect();
     case "schedules":
@@ -316,6 +319,37 @@ async function send(args: string[]): Promise<number> {
     return out({ success: true, message_id: ids[0], message_ids: ids }, 0);
   } catch (e) {
     return out({ success: false, error: (e as Error).message }, 1);
+  }
+}
+
+/** Post an ask's questions to its chat and open it: the gateway's agent then records the answers. */
+async function askPost(args: string[]): Promise<number> {
+  const id = args[0];
+  if (!id) { console.error("carl ask-post: give the ask id (CARL_HOME/asks/<id>.json)"); return 64; }
+  try {
+    const cfg = loadConfig();
+    if (!cfg.asks) throw new Error(`the asks module is off: set "asks": true in ${join(cfg.home, "carl.json")} and restart the gateway`);
+    const { Asks } = await import("./asks.ts");
+    const asks = new Asks(cfg.home);
+    const a = asks.load(id);
+    if (a.status === "done") throw new Error(`ask ${id} is already done`);
+    if (!cfg.telegram.groups.some((g) => g.chat === a.chat) && !cfg.telegram.allowFrom.includes(a.chat) && a.chat !== cfg.telegram.homeChat)
+      throw new Error(`chat ${a.chat} is not a configured group, allowed user or home chat: the answers would never reach Carl`);
+    const token = secret(cfg.home, cfg.telegram.tokenEnv, cfg.envFiles);
+    if (!token) throw new Error(`${cfg.telegram.tokenEnv} is not set`);
+    const api = new TelegramApi(token, cfg.telegram.apiBase);
+    recordDeliveries(api, !!cfg.ultraterm, (msg, data) => console.error(`carl: ${msg} ${JSON.stringify(data ?? {})}`));
+    let first: number | undefined;
+    for (const chunk of chunkMarkdown(Asks.message(a))) {
+      const sent = await api.sendHtmlMessage(a.chat, markdownToTelegramHtml(chunk));
+      first ??= sent.message_id;
+    }
+    asks.save({ ...a, status: "open", postedMessageId: first });
+    console.log(`posted ask ${id} to chat ${a.chat} (message ${first}); it is open`);
+    return 0;
+  } catch (e) {
+    console.error(`carl ask-post: ${(e as Error).message}`);
+    return 1;
   }
 }
 
