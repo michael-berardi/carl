@@ -31,6 +31,7 @@ export class Gateway {
   readonly scheduler: Scheduler;
   private hooks?: { journal: import("./hooks.ts").HookJournal; resume: () => void };
   telegram?: TelegramChannel;
+  private asks?: Asks;
   slack?: import("./channels/slack.ts").SlackChannel;
   discord?: import("./channels/discord.ts").DiscordChannel;
   api?: ApiServer;
@@ -62,6 +63,7 @@ export class Gateway {
       commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg), cwd: cfg.workspace }),
     });
     const asks = cfg.asks ? new Asks(cfg.home) : undefined;
+    this.asks = asks;
     this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox), ...(asks ? askTools(asks) : [])], { shared: true });
   }
 
@@ -79,6 +81,7 @@ export class Gateway {
       if (!token) throw new Error(`telegram is enabled but ${this.cfg.telegram.tokenEnv} is not set (environment or ${join(this.cfg.home, ".env")})`);
       this.telegram = new TelegramChannel(this.cfg, token, this.brain, this.log);
       this.telegram.onStatus = () => this.writeStatus();
+      if (this.asks) { const asks = this.asks; this.telegram.expecting = (chat, member) => asks.waitingOn(chat, member); }
       this.registerCommands(this.telegram);
       const tg = this.telegram;
       this.brain.approver = (key) => async (command, reason) => {

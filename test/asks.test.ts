@@ -73,3 +73,15 @@ test("bad asks and bad input are refused with their cause", async (t) => {
   assert.equal(existsSync(join(h, "out")), false);
   assert.match(Asks.message(asks.load("pub")), /1\. Fee\?\n2\. Notary first\?[\s\S]*Kate, reply to this message/);
 });
+
+test("waitingOn matches the askee to a member's configured name, only for open asks in that chat", (t) => {
+  const h = home(t);
+  write(h);
+  const asks = new Asks(h);
+  assert.equal(asks.waitingOn(-5269168638, "Kate"), true);
+  assert.equal(asks.waitingOn(-5269168638, "Kate (attorney)"), true);
+  assert.equal(asks.waitingOn(-5269168638, "Nico"), false);
+  assert.equal(asks.waitingOn(-1, "Kate"), false);
+  write(h, { status: "done" });
+  assert.equal(asks.waitingOn(-5269168638, "Kate"), false);
+});

@@ -40,10 +40,8 @@ const gw = new Gateway(loadConfig(home));
 await gw.start();
 const started = Date.now();
 try {
-  tg.groupMessage(GROUP, KATE, "1) yes, 185 is right\n2) it needs a notary first, then Cancillería\n3) approved", {
-    firstName: "Kate",
-    replyTo: { message_id: 500, date: 0, chat: { id: GROUP, type: "group" }, from: { id: 1, is_bot: true }, text: "Before the new pages go live" },
-  });
+  // A plain message, neither a reply nor a mention: the open ask waiting on Kate is what lets it through.
+  tg.groupMessage(GROUP, KATE, "1) yes, 185 is right\n2) it needs a notary first, then Cancillería\n3) approved", { firstName: "Kate" });
   await tg.waitFor(() => existsSync(marker), 240_000, "the ask to finish and run onComplete");
   assert.equal(readFileSync(marker, "utf8").trim(), "J-GATE");
   const md = readFileSync(answersFile, "utf8");
@@ -57,6 +55,6 @@ try {
   await tg.waitFor(() => tg.texts(GROUP).length > 0, 60_000, "a reply in the group");
   console.log(`ok   asks e2e (${Date.now() - started} ms). Reply: ${tg.texts(GROUP).at(-1)?.slice(0, 200)}`);
 } finally {
-  await gw.stop();
+  await gw.stop("asks e2e finished");
   await tg.stop();
 }

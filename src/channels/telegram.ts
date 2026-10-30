@@ -51,6 +51,8 @@ export class TelegramChannel {
   /** Callback-button handlers by data prefix. */
   readonly callbacks = new Map<string, (q: TgCallbackQuery, data: string) => Promise<string | void>>();
   onStatus?: (s: ChannelStatus) => void;
+  /** True when Carl is waiting on this member's answers in this chat (the asks module): their messages count as addressed. */
+  expecting?: (chatId: number, member: string) => boolean;
 
   private readonly cfg: CarlConfig;
   private readonly brain: Brain;
@@ -171,9 +173,10 @@ export class TelegramChannel {
   }
 
   /** In a group, Carl answers only when addressed: an @mention, a reply to one of its messages, or a command. */
-  private addressed(m: TgMessage): boolean {
+  private addressed(m: TgMessage, member?: string): boolean {
     if (m.chat.type === "private") return true;
     if (this.group(m.chat.id)?.listenAll) return true;
+    if (member && this.expecting?.(m.chat.id, member)) return true;
     const text = m.text ?? m.caption ?? "";
     if (/^\//.test(text)) return true;
     if (this.botName && new RegExp(`@${this.botName}\\b`, "i").test(text)) return true;
@@ -194,7 +197,8 @@ export class TelegramChannel {
     const key = TelegramChannel.conversationKey(m);
     // Journaled the moment the offset moves past it: a restart at any later point is reported, never silent.
     const journalId = `${m.chat.id}:${m.message_id}`;
-    if (this.admit(m).ok && this.addressed(m)) this.markInflight(journalId, { chatId: m.chat.id, threadId: m.message_thread_id, text: (m.text ?? m.caption ?? (m.voice ? "(voice note)" : "(attachment)")).slice(0, 500) });
+    const admitted = this.admit(m);
+    if (admitted.ok && this.addressed(m, admitted.member)) this.markInflight(journalId, { chatId: m.chat.id, threadId: m.message_thread_id, text: (m.text ?? m.caption ?? (m.voice ? "(voice note)" : "(attachment)")).slice(0, 500) });
     let done!: () => void;
     const handed = new Promise<void>((r) => (done = r));
     const prev = this.chains.get(key) ?? Promise.resolve();
@@ -261,7 +265,7 @@ export class TelegramChannel {
       this.log.warn("ignored message from a user not in telegram.allowFrom or the group's members", { userId: m.from?.id, chat: m.chat.type, chatId: m.chat.id });
       return handed();
     }
-    if (!this.addressed(m)) return handed(); // group chatter not meant for Carl
+    if (!this.addressed(m, who.member)) return handed(); // group chatter not meant for Carl
     const key = TelegramChannel.conversationKey(m);
     let text = (m.text ?? m.caption ?? "").trim();
     if (m.chat.type !== "private" && this.botName) text = text.replace(new RegExp(`@${this.botName}\\b`, "gi"), "").trim();

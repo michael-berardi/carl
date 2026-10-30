@@ -65,6 +65,12 @@ export class Asks {
     });
   }
 
+  /** Is an open ask in this chat waiting on this member? Matches the askee to the member's configured name. */
+  waitingOn(chat: number, member: string): boolean {
+    const name = member.toLowerCase();
+    return this.open().some((a) => a.chat === chat && (name === a.askee.toLowerCase() || name.startsWith(`${a.askee.toLowerCase()} `)));
+  }
+
   /** The message that puts the questions to the askee. */
   static message(a: Ask): string {
     const lines = [`**${a.title}**`, ""];
