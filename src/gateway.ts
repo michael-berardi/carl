@@ -8,6 +8,7 @@ import { TelegramChannel } from "./channels/telegram.ts";
 import { TelegramError } from "./channels/telegram-api.ts";
 import { type CarlConfig, ensureHome, secret } from "./config.ts";
 import { Log } from "./log.ts";
+import { Asks, askTools } from "./asks.ts";
 import { individuationPrompt, parseIndividuation, Psyche, readJsonl } from "./psyche.ts";
 import { type Job, Scheduler } from "./scheduler.ts";
 import { cleanEnv, sandboxArgv } from "./sandbox.ts";
@@ -60,7 +61,8 @@ export class Gateway {
       // Command jobs run under the shell sandbox too: the scripts and tools they call are ones the agent can change.
       commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg), cwd: cfg.workspace }),
     });
-    this.brain = new Brain(cfg, this.psyche, this.log, () => carlTools(this.psyche, this.scheduler, outbox), { shared: true });
+    const asks = cfg.asks ? new Asks(cfg.home) : undefined;
+    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox), ...(asks ? askTools(asks) : [])], { shared: true });
   }
 
   use(plugin: GatewayPlugin): this {
@@ -227,7 +229,8 @@ export class Gateway {
     if (!this.telegram) throw new Error("no messaging channel is enabled");
     const chatId = target === "home" ? this.cfg.telegram.homeChat : Number(target);
     if (!chatId || !Number.isSafeInteger(chatId)) throw new Error(target === "home" ? "telegram.homeChat is not configured" : `bad chat id "${target}"`);
-    if (!this.cfg.telegram.allowFrom.includes(chatId) && chatId !== this.cfg.telegram.homeChat) throw new Error(`chat ${chatId} is not the home chat or an allowed user`);
+    if (!this.cfg.telegram.allowFrom.includes(chatId) && chatId !== this.cfg.telegram.homeChat && !this.cfg.telegram.groups.some((g) => g.chat === chatId))
+      throw new Error(`chat ${chatId} is not the home chat, an allowed user or a configured group`);
     try {
       const sent = await this.telegram.sendMarkdown(chatId, text);
       return `Delivered (${sent.length} message${sent.length === 1 ? "" : "s"}).`;

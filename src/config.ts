@@ -15,6 +15,21 @@ export interface TelegramConfig {
   stream: boolean;
   /** Bot API base URL (a relay can stand in for api.telegram.org). */
   apiBase: string;
+  /**
+   * Team groups Carl serves besides the operator. In a listed group Carl answers the listed members (and the
+   * operators in allowFrom) only when addressed: an @mention, a reply to Carl, or a /command. Every message
+   * there names its sender, so the agent knows who is speaking. Empty = groups only for operators.
+   */
+  groups: TelegramGroup[];
+}
+
+export interface TelegramGroup {
+  /** The group's chat id (negative). */
+  chat: number;
+  /** Member Telegram user id -> the name the agent sees. Operators in allowFrom need no entry. */
+  members: Record<string, string>;
+  /** Also answer messages that are not addressed to the bot (default false: mentions, replies and commands only). */
+  listenAll: boolean;
 }
 
 export interface ApiConfig {
@@ -75,6 +90,8 @@ export interface CarlConfig {
   claude: { enabled: boolean; command?: string; configDirs: string[] };
   /** Inbound webhooks by name (POST /v1/hooks/<name>). */
   hooks: Record<string, { prompt: string; deliver: string; secretEnv?: string }>;
+  /** The asks module (src/asks.ts): put questions to people in a chat and hand their answers on. Off by default. */
+  asks: boolean;
   /** Extra shell-guard patterns on top of the built-in ones. */
   guard: { hardline: [string, string][]; dangerous: [string, string][]; allowTools: [string, string][]; operatorTools: [string, string][] };
   /** UltraCompress compaction (deterministic brief, no model call, plus recall): "auto" = on when the binary is installed. */
@@ -184,6 +201,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
       // the tool line is only rendered inside a draft, so streaming off means one final message and nothing else.
       stream: tg.stream === undefined ? false : bool(tg.stream, "telegram.stream"),
       apiBase: str(tg.apiBase, "https://api.telegram.org", "telegram.apiBase").replace(/\/+$/, ""),
+      groups: groupsOf(tg.groups),
     },
     discord: {
       enabled: raw.discord?.enabled === undefined ? !!raw.discord : bool(raw.discord.enabled, "discord.enabled"),
@@ -218,6 +236,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     trustedMcp: strList(raw.trustedMcp, "trustedMcp"),
     ultracompress: raw.ultracompress === "off" || raw.ultracompress === false ? "off" : "auto",
     hooks: hooksOf(raw.hooks),
+    asks: raw.asks === undefined ? false : bool(raw.asks, "asks"),
     guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous"), allowTools: pairs(raw.guard?.allowTools, "guard.allowTools"), operatorTools: pairs(raw.guard?.operatorTools, "guard.operatorTools") },
     claude: {
       enabled: raw.claude?.enabled === undefined ? true : bool(raw.claude.enabled, "claude.enabled"),
@@ -233,6 +252,22 @@ export function loadConfig(home = carlHome()): CarlConfig {
   if (!cfg.model.includes("/")) throw new ConfigError(`model "${cfg.model}" must be "provider/model"`);
   if (cfg.keepRecentTokens >= cfg.contextBudget) throw new ConfigError("keepRecentTokens must be below contextBudget");
   return cfg;
+}
+
+function groupsOf(raw: unknown): TelegramGroup[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) throw new ConfigError("telegram.groups must be a list of {chat, members}");
+  return raw.map((g: any, i: number) => {
+    const chat = Number(g?.chat);
+    if (!Number.isSafeInteger(chat) || chat >= 0) throw new ConfigError(`telegram.groups[${i}].chat must be a negative Telegram group id`);
+    const members: Record<string, string> = {};
+    for (const [id, name] of Object.entries(g?.members ?? {})) {
+      if (!/^\d+$/.test(id)) throw new ConfigError(`telegram.groups[${i}].members: "${id}" must be a numeric Telegram user id`);
+      if (typeof name !== "string" || !name.trim()) throw new ConfigError(`telegram.groups[${i}].members.${id} must be a name`);
+      members[id] = name.trim();
+    }
+    return { chat, members, listenAll: g?.listenAll === undefined ? false : bool(g.listenAll, `telegram.groups[${i}].listenAll`) };
+  });
 }
 
 /** Carl's MCP server list. */

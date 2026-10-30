@@ -21,7 +21,7 @@ export class TelegramError extends Error {
   }
 }
 
-export interface TgUser { id: number; is_bot: boolean; first_name?: string; username?: string }
+export interface TgUser { id: number; is_bot: boolean; first_name?: string; last_name?: string; username?: string }
 export interface TgChat { id: number; type: string; title?: string; username?: string }
 export interface TgPhotoSize { file_id: string; width: number; height: number; file_size?: number }
 export interface TgFile { file_id: string; file_path?: string; file_size?: number }
