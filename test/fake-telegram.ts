@@ -76,6 +76,13 @@ export class FakeTelegram {
     return message_id;
   }
 
+  /** A message in a group chat from a given member. */
+  groupMessage(chatId: number, fromId: number, text: string, opts: { firstName?: string; replyTo?: any } = {}): number {
+    const message_id = this.nextMessageId++;
+    this.push({ message: { message_id, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: "group", title: "Team" }, from: { id: fromId, is_bot: false, first_name: opts.firstName ?? "Member" }, text, ...(opts.replyTo ? { reply_to_message: opts.replyTo } : {}) } });
+    return message_id;
+  }
+
   callback(fromId: number, data: string, message: any): void {
     this.push({ callback_query: { id: `cb-${this.nextUpdateId}`, from: { id: fromId, is_bot: false }, message, data } });
   }

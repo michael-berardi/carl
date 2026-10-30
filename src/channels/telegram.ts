@@ -45,6 +45,7 @@ export class TelegramChannel {
   private readonly offsetFile: string;
   private loop?: Promise<void>;
   private botName = "";
+  private botId?: number;
   /** Extra slash commands (/reflect, /schedules ...) registered by the gateway. */
   readonly commands = new Map<string, { help: string; run: CommandHandler }>();
   /** Callback-button handlers by data prefix. */
@@ -77,6 +78,7 @@ export class TelegramChannel {
     if (!this.cfg.telegram.allowFrom.length) this.log.warn("telegram.allowFrom is empty: Carl will answer nobody");
     const me = await this.api.getMe();
     this.botName = me.username ?? "";
+    this.botId = me.id;
     this.log.info("telegram connected", { bot: this.botName });
     const builtin = [
       ["new", "Start a fresh conversation"],
@@ -152,6 +154,32 @@ export class TelegramChannel {
     return userId !== undefined && this.cfg.telegram.allowFrom.includes(userId);
   }
 
+  /** The configured team group for a chat, if any. */
+  private group(chatId: number) {
+    return this.cfg.telegram.groups.find((g) => g.chat === chatId);
+  }
+
+  /**
+   * Who may speak to Carl in this message's chat: an operator anywhere, or a listed member inside their own
+   * listed group. Returns the sender's name for team members (operators return "").
+   */
+  private admit(m: Pick<TgMessage, "chat" | "from">): { ok: boolean; member?: string } {
+    if (this.allowed(m.from?.id)) return { ok: true };
+    const g = m.chat.type === "private" ? undefined : this.group(m.chat.id);
+    const name = g && m.from ? g.members[String(m.from.id)] : undefined;
+    return name ? { ok: true, member: name } : { ok: false };
+  }
+
+  /** In a group, Carl answers only when addressed: an @mention, a reply to one of its messages, or a command. */
+  private addressed(m: TgMessage): boolean {
+    if (m.chat.type === "private") return true;
+    if (this.group(m.chat.id)?.listenAll) return true;
+    const text = m.text ?? m.caption ?? "";
+    if (/^\//.test(text)) return true;
+    if (this.botName && new RegExp(`@${this.botName}\\b`, "i").test(text)) return true;
+    return m.reply_to_message?.from?.id !== undefined && m.reply_to_message.from.id === this.botId;
+  }
+
   static conversationKey(m: Pick<TgMessage, "chat" | "message_thread_id">): string {
     if (m.chat.type === "private") return `telegram:dm:${m.chat.id}`;
     return `telegram:group:${m.chat.id}${m.message_thread_id ? `:${m.message_thread_id}` : ""}`;
@@ -166,7 +194,7 @@ export class TelegramChannel {
     const key = TelegramChannel.conversationKey(m);
     // Journaled the moment the offset moves past it: a restart at any later point is reported, never silent.
     const journalId = `${m.chat.id}:${m.message_id}`;
-    if (this.allowed(m.from?.id)) this.markInflight(journalId, { chatId: m.chat.id, threadId: m.message_thread_id, text: (m.text ?? m.caption ?? (m.voice ? "(voice note)" : "(attachment)")).slice(0, 500) });
+    if (this.admit(m).ok && this.addressed(m)) this.markInflight(journalId, { chatId: m.chat.id, threadId: m.message_thread_id, text: (m.text ?? m.caption ?? (m.voice ? "(voice note)" : "(attachment)")).slice(0, 500) });
     let done!: () => void;
     const handed = new Promise<void>((r) => (done = r));
     const prev = this.chains.get(key) ?? Promise.resolve();
@@ -228,15 +256,22 @@ export class TelegramChannel {
   }
 
   private async onMessage(m: TgMessage, handed: () => void = () => {}): Promise<void> {
-    if (!this.allowed(m.from?.id)) {
-      this.log.warn("ignored message from a user not in telegram.allowFrom", { userId: m.from?.id, chat: m.chat.type });
+    const who = this.admit(m);
+    if (!who.ok) {
+      this.log.warn("ignored message from a user not in telegram.allowFrom or the group's members", { userId: m.from?.id, chat: m.chat.type, chatId: m.chat.id });
       return handed();
     }
+    if (!this.addressed(m)) return handed(); // group chatter not meant for Carl
     const key = TelegramChannel.conversationKey(m);
     let text = (m.text ?? m.caption ?? "").trim();
-    if (m.chat.type !== "private" && this.botName) text = text.replace(new RegExp(`@${this.botName}\\b`, "g"), "").trim();
+    if (m.chat.type !== "private" && this.botName) text = text.replace(new RegExp(`@${this.botName}\\b`, "gi"), "").trim();
 
     const cmd = text.match(/^\/([a-z_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+    if (cmd && who.member && !["start", "help"].includes(cmd[1].toLowerCase())) {
+      handed();
+      await this.sendMarkdown(m.chat.id, "Only the operator can use that command.", { replyTo: m.message_id, threadId: m.message_thread_id });
+      return;
+    }
     if (cmd) {
       handed(); // commands never wait behind each other
       const handled = await this.command(cmd[1].toLowerCase(), (cmd[2] ?? "").trim(), m, key);
@@ -271,9 +306,11 @@ export class TelegramChannel {
       notes.push(`[attachment could not be fetched: ${(e as Error).message}]`);
     }
     if (m.reply_to_message?.text) notes.unshift(`[replying to: "${m.reply_to_message.text.slice(0, 400)}"]`);
+    // In a group, every message names its sender: several people share one conversation.
+    if (m.chat.type !== "private") notes.unshift(`[from ${who.member ?? "the operator"}${m.from?.first_name ? ` (${[m.from.first_name, m.from.last_name].filter(Boolean).join(" ")})` : ""}]`);
     const body = [...notes, text].filter(Boolean).join("\n");
     if (!body && !images.length) return handed();
-    await this.converse(m, key, { text: body || "(image)", images: images.length ? images : undefined, source: "telegram" }, handed);
+    await this.converse(m, key, { text: body || "(image)", images: images.length ? images : undefined, source: "telegram", member: who.member }, handed);
   }
 
   private async converse(m: TgMessage, key: string, input: Parameters<Brain["ask"]>[1], handed: () => void = () => {}): Promise<void> {

@@ -57,6 +57,7 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
   - Telegram message attempts (delivered, refused or unknown) are recorded in UltraTerm's UltraBot message log when `ultraterm` is configured; secrets are masked before persistence. See [Telegram delivery and audit safety](docs/TELEGRAM-DELIVERY.md).
   - A message sent while Carl is working joins the current turn instead of waiting in a queue.
   - `/stop`, `/new`, `/status`, `/model`, `/compact` and `/mirror` work at any time.
+  - **Team groups:** list a group under `telegram.groups` with its members (`{"chat": -100…, "members": {"<user id>": "Kate (attorney)"}}`) and Carl serves that team too. In a group it answers only when addressed (an @mention, a reply to one of its messages, or a command; set `listenAll` to answer everything), and every message names its sender. Members are never the operator: their words cannot approve operator-only tools, approval cards still go to the operator, and they can use only `/help`.
   - Voice notes go through any speech-to-text command you configure; photos and files go to the model.
   - Slack connects over Socket Mode (no public URL needed). Discord connects over its Gateway.
   - Replies Telegram explicitly refuses are retried for 24 hours; ambiguous deliveries are held for reconciliation, never automatically replayed. If Carl restarts mid-reply, it picks the message up again when its answer had not run any tool yet, and otherwise tells you which message was interrupted (it never repeats an action on its own).
@@ -66,6 +67,7 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
   - Read and edit the psyche (below).
   - Status and recent log.
   - No framework and no build step.
+- **Asks (module, off by default):** with `"asks": true`, Carl can put questions to someone in a chat and act on the answers. Write `~/.carl/asks/<id>.json` (`chat`, `askee`, `title`, `questions` as `[{n, text}]`, an absolute `answersFile`, and optionally `onComplete`, an argv run when every answer is in), then `carl ask-post <id>`. When the person replies, the agent records each answer, asks a follow-up if one is unclear, and finishes the ask: the answers are written to `answersFile` and `onComplete` runs. The agent can only record and finish; it cannot create an ask or change what finishing runs. Point `onComplete` at your job system (for example `ut-overseer job-report` on a gate job that the follow-up work depends on) and the work starts without you.
 - **Webhooks:** `POST /v1/hooks/<name>` turns an event from GitHub, Stripe, a form or another bot into an agent run, with the result delivered where you choose. Requests need the API key or a valid HMAC signature (GitHub's `X-Hub-Signature-256` format). Each delivery is recorded before Carl answers: after a restart, one that had not started runs, and one cut short is reported rather than rerun. A repeated delivery id (`X-GitHub-Delivery` or `Idempotency-Key`) runs once.
 - **API:**
   - An OpenAI-compatible `/v1/chat/completions` that streams and keeps conversation state.
@@ -155,7 +157,8 @@ Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
   "contextFiles": ["~/team/AGENTS.md"],
   "skills": ["~/.agents/skills"],
   "skillAllow": ["deploy", "triage"],
-  "telegram": { "allowFrom": [123456789], "homeChat": 123456789, "tokenEnv": "TELEGRAM_BOT_TOKEN" },
+  "telegram": { "allowFrom": [123456789], "homeChat": 123456789, "tokenEnv": "TELEGRAM_BOT_TOKEN",
+                "groups": [{ "chat": -1001234567890, "members": { "987654321": "Kate" } }] },
   "api": { "port": 8642, "keyEnv": "CARL_API_KEY" },
   "stt": ["/path/to/transcribe", "{file}", "{output}"],
   "claude": { "configDirs": ["~/.claude", "~/.claude-work"] },
@@ -181,6 +184,7 @@ carl status             the running gateway's status
 carl ask [-c key] text  one turn from the terminal
 carl prompt             the exact system prompt and tools, with token counts
 carl send -t telegram:<chat> text
+carl ask-post <id>      post an ask's questions (asks module)
 carl reflect            run the individuation pass now
 carl schedules          list schedules
 carl app [--install]    open the web app in its own window; --install adds Carl.app (macOS)
