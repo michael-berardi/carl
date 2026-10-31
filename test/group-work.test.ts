@@ -90,3 +90,24 @@ test("work config is validated with errors that name the cause", () => {
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("saying the bot's name addresses it like an @mention; a longer word that contains the name does not", async (t) => {
+  const tg = new FakeTelegram();
+  await tg.start();
+  const home = mkdtempSync(join(tmpdir(), "carl-gw-"));
+  mkdirSync(join(home, "state"), { recursive: true });
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ name: "Felix", telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: false, groups: [{ chat: GROUP, members: { [String(SAM)]: "Sam" } }] }, api: { enabled: false } }));
+  const asked: string[] = [];
+  const brain: any = { ask: async (_k: string, i: any) => { asked.push(i.text); return { ok: true, text: "ok", aborted: false, toolCalls: 0 }; }, whenRegistered: async () => {}, status: () => ({}), routerState: new Map() };
+  const ch = new TelegramChannel(loadConfig(home), "123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz", brain, new Log(undefined));
+  await ch.start();
+  t.after(async () => { await ch.stop(); await tg.stop(); rmSync(home, { recursive: true, force: true }); });
+
+  tg.groupMessage(GROUP, SAM, "we drove past Felixstowe", { firstName: "Sam" });
+  tg.groupMessage(GROUP, SAM, "Felix, queue the Hamptons feedback", { firstName: "Sam" });
+  tg.groupMessage(GROUP, OP, "hey felix can you queue it", { firstName: "Mike" });
+  await tg.waitFor(() => asked.length >= 2, 10_000, "name mentions");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(asked.length, 2, `only real name mentions reach the brain: ${JSON.stringify(asked)}`);
+  assert.match(asked[0], /queue the Hamptons feedback/);
+});
