@@ -12,6 +12,7 @@ import { type Brain, type RunResult, toolsRanAfter } from "../brain.ts";
 import type { CarlConfig } from "../config.ts";
 import type { Log } from "../log.ts";
 import { recordDeliveries } from "../message-log.ts";
+import { GroupArchive } from "../group-archive.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
 import { chunkMarkdown, escapeHtml, htmlToPlain, markdownToTelegramHtml, visibleControls } from "./format.ts";
 import { type InlineButton, TelegramApi, TelegramError, type TgCallbackQuery, type TgMessage } from "./telegram-api.ts";
@@ -53,6 +54,8 @@ export class TelegramChannel {
   onStatus?: (s: ChannelStatus) => void;
   /** True when Carl is waiting on this member's answers in this chat (the asks module): their messages count as addressed. */
   expecting?: (chatId: number, member: string) => boolean;
+  /** Every group message is kept here (addressed or not, member or not), so the agent can read the chats it is in. */
+  readonly archive: GroupArchive;
 
   private readonly cfg: CarlConfig;
   private readonly brain: Brain;
@@ -65,6 +68,7 @@ export class TelegramChannel {
     // Every delivered message (answer, draft frame, edit, deletion) is recorded where `utp ultrabot audit` reads it.
     // The file belongs to UltraTerm, so it is written only for an installation wired to UltraTerm.
     recordDeliveries(this.api, !!cfg.ultraterm, (msg, data) => this.log.warn(msg, data));
+    this.archive = new GroupArchive(cfg.home, (msg, data) => this.log.warn(msg, data));
     this.offsetFile = join(cfg.home, "state", "telegram-offset.json");
     if (existsSync(this.offsetFile)) {
       try { this.offset = JSON.parse(readFileSync(this.offsetFile, "utf8")).offset ?? 0; } catch { this.offset = 0; }
@@ -126,7 +130,8 @@ export class TelegramChannel {
           this.offset = u.update_id + 1;
           this.saveOffset(); // before handling: a crash mid-message never replays it
           this.status.lastUpdateAt = new Date().toISOString();
-          if (u.message) this.enqueueMessage(u.message);
+          if (u.message) { this.archive.record(u.message); this.enqueueMessage(u.message); }
+          else if (u.edited_message) this.archive.record(u.edited_message, { edited: true });
           else if (u.callback_query) void this.onCallback(u.callback_query).catch((e) => this.log.error("callback failed", { error: (e as Error).message }));
         }
       } catch (e) {
