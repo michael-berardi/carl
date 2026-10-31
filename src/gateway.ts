@@ -1,5 +1,6 @@
 // The gateway process: wires config, psyche, brain, channels, API and schedules; owns status and shutdown.
 import { execFileSync } from "node:child_process";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assistantText, Brain, listSessionFiles } from "./brain.ts";
@@ -14,6 +15,8 @@ import { type Job, Scheduler } from "./scheduler.ts";
 import { cleanEnv, sandboxArgv } from "./sandbox.ts";
 import { ApiServer } from "./server.ts";
 import { carlTools, type Outbox } from "./tools.ts";
+import { GroupArchive, groupHistoryTool } from "./group-archive.ts";
+import { WorkLedger, workTools } from "./work.ts";
 import { COMMIT, VERSION } from "./version.ts";
 
 export const ULTRATERM_LEARNING = "Lessons come from UltraTerm Dream and Nightmare: they read Carl's shadow and decision ledgers with every other agent's work, and approved lessons reach Carl through shared memory. Carl runs no separate individuation pass.";
@@ -64,7 +67,12 @@ export class Gateway {
     });
     const asks = cfg.asks ? new Asks(cfg.home) : undefined;
     this.asks = asks;
-    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox), ...moduleAskTools(cfg, asks)], { shared: true });
+    const groupTools = (): ToolDefinition[] => {
+      if (!cfg.telegram.enabled || !cfg.telegram.groups.length) return [];
+      const ledger = new WorkLedger(cfg.home);
+      return [groupHistoryTool(new GroupArchive(cfg.home), cfg.telegram.allowFrom, (chat) => ledger.lastQueued(chat)), ...workTools(cfg, ledger)];
+    };
+    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
   }
 
   use(plugin: GatewayPlugin): this {
