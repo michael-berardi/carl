@@ -30,6 +30,8 @@ export interface TelegramGroup {
   members: Record<string, string>;
   /** Also answer messages that are not addressed to the bot (default false: mentions, replies and commands only). */
   listenAll: boolean;
+  /** Work module: requests in this group can be queued as work for this project (needs top-level `work`). */
+  work?: { project: string };
 }
 
 export interface ApiConfig {
@@ -92,6 +94,8 @@ export interface CarlConfig {
   hooks: Record<string, { prompt: string; deliver: string; secretEnv?: string }>;
   /** The asks module (src/asks.ts): put questions to people in a chat and hand their answers on. Off by default. */
   asks: boolean;
+  /** The work module (src/work.ts): the operator's argv that queues a work request (JSON on stdin). Off when unset. */
+  work?: { command: string[] };
   /** Extra shell-guard patterns on top of the built-in ones. */
   guard: { hardline: [string, string][]; dangerous: [string, string][]; allowTools: [string, string][]; operatorTools: [string, string][] };
   /** UltraCompress compaction (deterministic brief, no model call, plus recall): "auto" = on when the binary is installed. */
@@ -237,6 +241,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     ultracompress: raw.ultracompress === "off" || raw.ultracompress === false ? "off" : "auto",
     hooks: hooksOf(raw.hooks),
     asks: raw.asks === undefined ? false : bool(raw.asks, "asks"),
+    work: workOf(raw.work, home),
     guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous"), allowTools: pairs(raw.guard?.allowTools, "guard.allowTools"), operatorTools: pairs(raw.guard?.operatorTools, "guard.operatorTools") },
     claude: {
       enabled: raw.claude?.enabled === undefined ? true : bool(raw.claude.enabled, "claude.enabled"),
@@ -266,7 +271,13 @@ function groupsOf(raw: unknown): TelegramGroup[] {
       if (typeof name !== "string" || !name.trim()) throw new ConfigError(`telegram.groups[${i}].members.${id} must be a name`);
       members[id] = name.trim();
     }
-    return { chat, members, listenAll: g?.listenAll === undefined ? false : bool(g.listenAll, `telegram.groups[${i}].listenAll`) };
+    let work: { project: string } | undefined;
+    if (g?.work !== undefined) {
+      const project = g.work?.project;
+      if (typeof project !== "string" || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(project)) throw new ConfigError(`telegram.groups[${i}].work.project must be a lowercase project name`);
+      work = { project };
+    }
+    return { chat, members, listenAll: g?.listenAll === undefined ? false : bool(g.listenAll, `telegram.groups[${i}].listenAll`), ...(work ? { work } : {}) };
   });
 }
 
@@ -331,6 +342,15 @@ function hooksOf(v: unknown): Record<string, { prompt: string; deliver: string; 
     out[name] = { prompt: h.prompt, deliver: typeof h.deliver === "string" ? h.deliver : "home", secretEnv: typeof h.secretEnv === "string" ? h.secretEnv : undefined };
   }
   return out;
+}
+
+function workOf(v: unknown, home: string): { command: string[] } | undefined {
+  if (v === undefined || v === null || v === false) return undefined;
+  const cmd = (v as any)?.command;
+  if (!Array.isArray(cmd) || !cmd.length || cmd.some((s) => typeof s !== "string" || !s)) throw new ConfigError("work.command must be an argv list of strings");
+  const first = abs(cmd[0], home);
+  if (!isAbsolute(first)) throw new ConfigError("work.command[0] must be an absolute path");
+  return { command: [first, ...cmd.slice(1)] };
 }
 
 function learningMode(v: unknown, ultraterm: boolean): "carl" | "ultraterm" {

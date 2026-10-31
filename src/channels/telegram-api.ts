@@ -146,7 +146,7 @@ export class TelegramApi {
   getMe() { return this.call<TgUser>("getMe"); }
 
   getUpdates(offset: number, signal: AbortSignal) {
-    return this.call<TgUpdate[]>("getUpdates", { offset, timeout: 50, allowed_updates: ["message", "callback_query"] }, { signal, timeoutMs: 65_000, retries: 0 });
+    return this.call<TgUpdate[]>("getUpdates", { offset, timeout: 50, allowed_updates: ["message", "edited_message", "callback_query"] }, { signal, timeoutMs: 65_000, retries: 0 });
   }
 
   sendMessage(chatId: number, text: string, o: SendOptions = {}) {
