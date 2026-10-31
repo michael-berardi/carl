@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 
-test("init seeds Terra and preserves an existing model on rerun", () => {
+test("init seeds the OpenRouter Exacto default and preserves an existing model on rerun", () => {
   const home = mkdtempSync(join(tmpdir(), "carl-init-"));
   try {
     const init = () => spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", main, "init"], {
@@ -17,7 +17,9 @@ test("init seeds Terra and preserves an existing model on rerun", () => {
     const first = init();
     assert.equal(first.status, 0, first.stderr);
     const file = join(home, "carl.json");
-    assert.equal(JSON.parse(readFileSync(file, "utf8")).model, "openai-codex/gpt-6.1-terra");
+    const seeded = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(seeded.model, "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto");
+    assert.deepEqual(seeded.fallbackModels, ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6.1-terra", "claude-code/claude-sonnet-5-5"]);
     const existing = JSON.stringify({ model: "openai-codex/gpt-6.1-sol" });
     writeFileSync(file, existing);
     const second = init();

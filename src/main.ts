@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 import { Brain } from "./brain.ts";
 import { TelegramApi } from "./channels/telegram-api.ts";
 import { chunkMarkdown, markdownToTelegramHtml } from "./channels/format.ts";
-import { carlHome, ConfigError, DEFAULT_MODEL, ensureHome, loadConfig, mcpFile, secret } from "./config.ts";
+import { carlHome, ConfigError, DEFAULT_FALLBACK_MODELS, DEFAULT_MODEL, ensureHome, loadConfig, mcpFile, secret } from "./config.ts";
 import { Gateway } from "./gateway.ts";
 import { Log } from "./log.ts";
 import { recordDeliveries, sendLogOrigin } from "./message-log.ts";
@@ -134,6 +134,7 @@ function init(): number {
       {
         name: "Carl",
         model: DEFAULT_MODEL,
+        fallbackModels: DEFAULT_FALLBACK_MODELS,
         thinking: "medium",
         contextBudget: 96000,
         tools: ["read", "bash"],
@@ -152,8 +153,9 @@ function init(): number {
 Next:
   1. Put TELEGRAM_BOT_TOKEN and CARL_API_KEY (16+ chars) in ${join(home, ".env")} (mode 600).
   2. Add your Telegram user id to telegram.allowFrom and telegram.homeChat in ${file}.
-  3. Sign in to a model: \`carl login\` lists providers (\`carl login openai-codex\` for GPT through Codex);
-     for Claude, install Claude Code and run \`claude auth login\`.
+  3. Sign in to the default model: \`carl login openrouter\` (an OpenRouter API key), or choose another route
+     with \`carl login\` (\`carl login openai-codex\` for GPT through Codex). For Claude, install Claude Code and
+     run \`claude auth login\`. The default chain is OpenRouter DeepSeek, OpenCode Go, GPT-6.1 Terra, then Claude.
   4. Edit ${join(home, "psyche", "persona.md")} and self.md, then run \`carl doctor\` and \`carl gateway\`.`);
   return 0;
 }
@@ -184,10 +186,16 @@ telegram ${s.telegram?.state}${s.telegram?.error ? ` (${s.telegram.error})` : ""
 
 async function doctor(): Promise<number> {
   let failed = 0;
-  const check = async (name: string, fn: () => Promise<string> | string) => {
+  // A fallback's login is reported but does not fail the check: the default chain names four providers and a
+  // fresh install only signs in to the ones it means to use. The primary model's login must work.
+  const check = async (name: string, fn: () => Promise<string> | string, soft = false) => {
     try {
       console.log(`ok    ${name}: ${await fn()}`);
     } catch (e) {
+      if (soft) {
+        console.log(`warn  ${name}: ${(e as Error).message}`);
+        return;
+      }
       failed++;
       console.log(`FAIL  ${name}: ${(e as Error).message}`);
     }
@@ -206,7 +214,7 @@ async function doctor(): Promise<number> {
     const m = brain.model(c.model);
     return `${c.model} (window ${m.contextWindow.toLocaleString()} tokens; Carl compacts at ${Math.min(c.contextBudget, m.contextWindow).toLocaleString()})`;
   });
-  for (const ref of [c.model, ...c.fallbackModels]) {
+  for (const [i, ref] of [c.model, ...c.fallbackModels].entries()) {
     const provider = ref.split("/")[0];
     await check(`login ${provider}`, async () => {
       if (provider === "claude-code") {
@@ -229,7 +237,7 @@ async function doctor(): Promise<number> {
       const available = brain.listModels().filter((m) => m.startsWith(provider + "/"));
       if (!available.length) throw new Error(`no credentials for ${provider} in ${c.agentDir}/auth.json (sign in with \`carl login ${provider}\`)`);
       return `${provider} signed in`;
-    });
+    }, i > 0);
   }
   if (c.telegram.enabled) {
     await check("telegram", async () => {

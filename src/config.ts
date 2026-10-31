@@ -48,7 +48,8 @@ export interface CarlConfig {
   /** "provider/model", resolved through Pi's model registry. */
   model: string;
   thinking: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-  /** Models used, in order, only while the primary is provably out of quota. */
+  /** Models used, in order, when the primary cannot answer: out of quota, out of credits, a 5xx outage or an
+   *  OpenRouter route with no endpoints. Defaults to DEFAULT_FALLBACK_MODELS when carl.json omits the key. */
   fallbackModels: string[];
   /** Cheaper model for reflection, titles and schedule runs that ask for it. Defaults to `model`. */
   sideModel?: string;
@@ -156,7 +157,15 @@ export function secret(home: string, name: string, envFiles: string[] = []): str
   return undefined;
 }
 
-export const DEFAULT_MODEL = "openai-codex/gpt-6.1-terra";
+export const DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto";
+
+/** Used, in order, when carl.json gives no fallbackModels: OpenCode Go, then GPT-6.1 Terra, then Claude. The default
+ *  primary is the OpenRouter Exacto route; these are the three tiers after it. */
+export const DEFAULT_FALLBACK_MODELS = [
+  "opencode-go/deepseek-v4.1-flash",
+  "openai-codex/gpt-6.1-terra",
+  "claude-code/claude-sonnet-5-5",
+];
 
 const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -177,7 +186,8 @@ export function loadConfig(home = carlHome()): CarlConfig {
     name: str(raw.name, "Carl", "name"),
     model: str(raw.model, DEFAULT_MODEL, "model"),
     thinking: (raw.thinking ?? "medium") as CarlConfig["thinking"],
-    fallbackModels: strList(raw.fallbackModels, "fallbackModels"),
+    // An explicit list (including []) always wins; only an omitted key gets the default chain.
+    fallbackModels: raw.fallbackModels === undefined ? [...DEFAULT_FALLBACK_MODELS] : strList(raw.fallbackModels, "fallbackModels"),
     sideModel: raw.sideModel === undefined ? undefined : str(raw.sideModel, "", "sideModel"),
     contextBudget: int(raw.contextBudget, 96_000, "contextBudget", 8_000),
     keepRecentTokens: int(raw.keepRecentTokens, 16_000, "keepRecentTokens", 1_000),

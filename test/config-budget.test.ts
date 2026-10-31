@@ -3,21 +3,43 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigError, loadConfig, parseEnvFile, secret } from "../src/config.ts";
+import { ConfigError, DEFAULT_FALLBACK_MODELS, DEFAULT_MODEL, loadConfig, parseEnvFile, secret } from "../src/config.ts";
 import { capText } from "../src/budget.ts";
 
 test("defaults load without a file", () => {
   const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
   const c = loadConfig(h);
-  assert.equal(c.model, "openai-codex/gpt-6.1-terra");
+  assert.equal(c.model, "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto");
+  assert.equal(c.model, DEFAULT_MODEL);
+  assert.deepEqual(c.fallbackModels, ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6.1-terra", "claude-code/claude-sonnet-5-5"]);
+  assert.deepEqual(c.fallbackModels, DEFAULT_FALLBACK_MODELS);
   assert.equal(c.api.port, 8642);
   assert.deepEqual(c.telegram.allowFrom, []);
+});
+
+test("an omitted fallbackModels gets the default chain; an explicit list (even empty) wins", () => {
+  const omitted = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(omitted, "carl.json"), JSON.stringify({ model: "openai-codex/gpt-6.1-sol" }));
+  assert.deepEqual(loadConfig(omitted).fallbackModels, DEFAULT_FALLBACK_MODELS);
+  const chosen = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(chosen, "carl.json"), JSON.stringify({ fallbackModels: ["openai-codex/gpt-6.1-terra"] }));
+  assert.deepEqual(loadConfig(chosen).fallbackModels, ["openai-codex/gpt-6.1-terra"]);
+  const none = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(none, "carl.json"), JSON.stringify({ fallbackModels: [] }));
+  assert.deepEqual(loadConfig(none).fallbackModels, [], "an empty list turns fallbacks off");
 });
 
 test("an explicit model remains unchanged", () => {
   const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
   writeFileSync(join(h, "carl.json"), JSON.stringify({ model: "openai-codex/gpt-6.1-sol" }));
   assert.equal(loadConfig(h).model, "openai-codex/gpt-6.1-sol");
+});
+
+test("the default OpenRouter route keeps its nested id: provider splits on the first slash only", () => {
+  const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  const [provider, ...rest] = loadConfig(h).model.split("/");
+  assert.equal(provider, "openrouter");
+  assert.equal(rest.join("/"), "deepseek/deepseek-v4.1-flash-1017:exacto");
 });
 
 test("bad config names the field", () => {

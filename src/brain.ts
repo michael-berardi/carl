@@ -29,6 +29,8 @@ import { resultBudget } from "./budget.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { registerTerra } from "./providers/terra.ts";
+import { registerOpenRouter } from "./providers/openrouter.ts";
+import { cooldownMs, isExhaustion } from "./router.ts";
 import { claudeCodeProviderConfig, closeSpares, PROVIDER as CLAUDE_PROVIDER, sweepCallFolders } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
 import { type Approver, guardedFileOps, guardedReadOps, shellGuard } from "./guard.ts";
@@ -116,9 +118,37 @@ export class Brain extends EventEmitter {
   claudeAccounts: () => string[] = () => this.cfg.claude.configDirs;
   /** Models currently cooling down after a quota refusal (ref -> until epoch ms). */
   routerState = new Map<string, number>();
-  /** The model sessions select: the router when fallbacks are configured, else the primary. */
+  /** Fallbacks that resolve in this runtime. One that does not (its provider is off or unregistered) is skipped with
+   *  a named warning instead of blocking startup: the default chain names Claude even when claude.enabled is false. */
+  private fallbackRefs: string[] = [];
+  /** True once the carl/auto router is registered. */
+  private routerReady = false;
+  /** The model sessions select: the router when fallbacks are configured and resolvable, else the primary. */
   sessionModelRef(): string {
-    return this.cfg.fallbackModels.length ? "carl/auto" : this.cfg.model;
+    return this.routerReady ? "carl/auto" : this.cfg.model;
+  }
+  /** Whether a model can be called at all: its provider has a login. Claude Code's login lives in the CLI. */
+  private usableModel(ref: string): boolean {
+    const provider = this.model(ref).provider;
+    if (provider === CLAUDE_PROVIDER) return this.cfg.claude.enabled && !!resolveClaude(this.cfg.claude.command, process.env);
+    return this.runtime.hasConfiguredAuth(provider);
+  }
+  /** Which chain link a failed message came from. A provider that reports another id in its message (a proxy, a
+   *  test double) is matched on the model id alone; undefined when no link matches. */
+  private failedRef(m: any): string | undefined {
+    const chain = [this.cfg.model, ...this.fallbackRefs];
+    const exact = chain.find((r) => { const x = this.model(r); return x.provider === m?.provider && x.id === m?.model; });
+    return exact ?? chain.find((r) => this.model(r).id === m?.model);
+  }
+  /** The next chain link after `failed` that is not benched and has a login; undefined when none is left. */
+  private nextFallback(failed: string): string | undefined {
+    for (const ref of [this.cfg.model, ...this.fallbackRefs]) {
+      if (ref === failed) continue;
+      if ((this.routerState.get(ref) ?? 0) > Date.now()) continue;
+      if (!this.usableModel(ref)) continue;
+      return ref;
+    }
+    return undefined;
   }
   /** Asks the operator to approve a dangerous shell command for a conversation. Default: unattended (refuse). */
   approver: (key: string) => Approver = () => async () => "unattended";
@@ -293,6 +323,7 @@ export class Brain extends EventEmitter {
       modelsPath: join(this.cfg.agentDir, "models.json"),
     });
     await registerTerra(this.runtime);
+    await registerOpenRouter(this.runtime);
     if (this.cfg.claude.enabled) {
       const swept = sweepCallFolders(join(this.cfg.home, "state", "claude-tmp"));
       if (swept) this.log.info("removed per-call Claude folders left by an earlier process", { count: swept });
@@ -306,26 +337,35 @@ export class Brain extends EventEmitter {
       }) as any);
     }
     this.model(this.cfg.model); // fail fast, naming the model, when it is unknown
-    for (const f of this.cfg.fallbackModels) this.model(f);
-    if (this.cfg.fallbackModels.length) {
+    this.fallbackRefs = this.cfg.fallbackModels.filter((f) => {
+      try {
+        this.model(f);
+        return true;
+      } catch (e) {
+        this.log.warn("fallback model unavailable; skipping it", { model: f, error: (e as Error).message });
+        return false;
+      }
+    });
+    if (this.fallbackRefs.length) {
       const router = createRouter({
         primary: () => this.cfg.model, // read per request: a model switch (portal, UltraTerm picker) takes effect at once
-        fallbacks: () => this.cfg.fallbackModels,
+        fallbacks: () => this.fallbackRefs,
         resolve: (ref) => this.model(ref),
-        usable: (ref) => this.runtime.hasConfiguredAuth(this.model(ref).provider),
+        usable: (ref) => this.usableModel(ref),
         events: {
           onFallback: (from, to, reason, until) => {
-            this.log.warn("primary model out of quota; using fallback", { from, to, until: new Date(until).toISOString(), reason });
+            this.log.warn("primary model unavailable; using the next model in the fallback chain", { from, to, until: new Date(until).toISOString(), reason });
             this.emit("fallback", { from, to, reason, until });
           },
         },
       });
       this.routerState = router.exhaustedUntil;
+      this.routerReady = true;
       const primary = this.model(this.cfg.model);
       this.runtime.registerVirtualModel({
         provider: "carl",
         id: "auto",
-        name: `${primary.name} (falls back to ${this.cfg.fallbackModels.join(", ")})`,
+        name: `${primary.name} (falls back to ${this.fallbackRefs.join(", ")})`,
         thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"],
         contextWindow: primary.contextWindow,
         maxTokens: primary.maxTokens,
@@ -550,6 +590,8 @@ export class Brain extends EventEmitter {
     sink.onRunStart?.(convo.runId);
     let live = "";
     let toolCalls = 0;
+    /** Tool calls in the attempt that is running now, so a failed attempt with side effects is never repeated. */
+    let attemptTools = 0;
     const errors: string[] = [];
     // Collected from events, not by slicing session.messages: a compaction mid-run rewrites that list.
     let lastAssistant: any;
@@ -574,6 +616,7 @@ export class Brain extends EventEmitter {
       }
       if (e.type === "tool_execution_start") {
         toolCalls++;
+        attemptTools++;
         sink.onTool?.(e.toolName, summarizeArgs(e.args));
       }
       if (e.type === "tool_execution_end" && e.isError) {
@@ -586,14 +629,43 @@ export class Brain extends EventEmitter {
       }
     });
     let thrown: Error | undefined;
-    try {
-      // Never run Pi extension /commands from message text: a schedule or webhook prompt is data, not a command.
-      await convo.session.prompt(text, { images, source: "rpc", expandPromptTemplates: false } as any);
-    } catch (e) {
-      thrown = e as Error;
-    } finally {
-      unsubscribe();
+    // Pi retries the failures it classifies as transient. A refusal it does not retry (OpenRouter's 402
+    // "insufficient credits" and its 404 "no endpoints available" are not in that set) would end the turn as a
+    // stall, so Carl benches the failed model and runs the same turn again on the next link of the chain. Only
+    // while nothing was written and no tool ran: a partial answer or a started tool call belongs to its model.
+    let attempt = 0;
+    for (;;) {
+      thrown = undefined;
+      lastAssistant = undefined;
+      live = "";
+      attemptTools = 0;
+      try {
+        // Never run Pi extension /commands from message text: a schedule or webhook prompt is data, not a command.
+        await convo.session.prompt(text, { images, source: "rpc", expandPromptTemplates: false } as any);
+      } catch (e) {
+        thrown = e as Error;
+      }
+      if (convo.stopRequested || !this.routerReady) break;
+      const failed = lastAssistant?.stopReason === "error"
+        ? { stopReason: "error" as const, errorMessage: lastAssistant.errorMessage ?? "" }
+        : undefined;
+      if (!failed || !isExhaustion(failed)) break;
+      const failedRef = this.failedRef(lastAssistant);
+      if (!failedRef) break;
+      const until = Date.now() + cooldownMs(failed.errorMessage ?? "");
+      this.routerState.set(failedRef, until); // benched either way: the next turn starts elsewhere
+      // The failure came after output or after a tool ran: finish this turn on its own model (its words and tool
+      // calls belong to it), never switch mid-turn and duplicate them. The next turn moves on.
+      if (assistantText(lastAssistant).trim() || attemptTools > 0) break;
+      const next = attempt < this.fallbackRefs.length ? this.nextFallback(failedRef) : undefined;
+      if (!next) break;
+      const reason = (failed.errorMessage ?? "").slice(0, 200);
+      this.log.warn("primary model unavailable; retrying the turn on the next model in the fallback chain",
+        { from: failedRef, to: next, until: new Date(until).toISOString(), reason });
+      this.emit("fallback", { from: failedRef, to: next, reason, until });
+      attempt++;
     }
+    unsubscribe();
     const operatorStop = !!convo.stopRequested;
     const aborted = lastAssistant?.stopReason === "aborted" || operatorStop;
     convo.stopRequested = false;

@@ -235,6 +235,12 @@ await step("model selection: read and refuse stale writes", async () => {
   const sid = (db.prepare("SELECT id FROM sessions WHERE source='telegram' ORDER BY started_at DESC LIMIT 1").get() as any).id;
   db.close();
   const status = await (await api(`/api/sessions/${sid}/model-selection`)).json();
+  if (status.error?.code === "model_selection_route_unavailable") {
+    // The configured model is not one of UltraTerm's three picker routes (the default OpenRouter route is not):
+    // the compat API says so and UltraTerm shows a read-only label instead of a picker.
+    assert.match(status.error.message, /is not one of UltraTerm's picker routes/);
+    return;
+  }
   assert.equal(status.persisted, true);
   const options = await (await api("/api/model/options")).json();
   assert.ok(options.providers.length >= 1);
