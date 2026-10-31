@@ -177,7 +177,7 @@ export class TelegramChannel {
     return name ? { ok: true, member: name } : { ok: false };
   }
 
-  /** In a group, Carl answers only when addressed: an @mention, a reply to one of its messages, or a command. */
+  /** In a group, Carl answers only when addressed: an @mention, its name, a reply to one of its messages, or a command. */
   private addressed(m: TgMessage, member?: string): boolean {
     if (m.chat.type === "private") return true;
     if (this.group(m.chat.id)?.listenAll) return true;
@@ -185,6 +185,9 @@ export class TelegramChannel {
     const text = m.text ?? m.caption ?? "";
     if (/^\//.test(text)) return true;
     if (this.botName && new RegExp(`@${this.botName}\\b`, "i").test(text)) return true;
+    // Saying the bot's name counts too ("Felix, queue the feedback"): people write names, not @handles.
+    const name = this.cfg.name.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (name && new RegExp(`(^|[^\\p{L}\\p{N}_@])${name}(?![\\p{L}\\p{N}_])`, "iu").test(text)) return true;
     return m.reply_to_message?.from?.id !== undefined && m.reply_to_message.from.id === this.botId;
   }
 
