@@ -1,16 +1,30 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cooldownMs, createRouter, isExhaustion } from "../src/router.ts";
+import { cooldownMs, createRouter, isExhaustion, isOutage } from "../src/router.ts";
 
-const err = (errorMessage: string) => ({ stopReason: "error" as const, errorMessage });
+const err = (errorMessage: string) => ({ stopReason: "error" as const, errorMessage, content: [] });
 
 test("exhaustion is recognised only from the provider's own words", () => {
   assert.ok(isExhaustion(err("Claude upstream error (HTTP 429): You've hit your session limit · resets 3pm")));
   assert.ok(isExhaustion(err("insufficient_quota")));
   assert.ok(isExhaustion(err("HTTP 402: credit balance too low")));
+  // OpenRouter's credit refusal, outage and empty provider set each name their cause and all move the work on.
+  assert.ok(isExhaustion(err("OpenRouter error (HTTP 402): insufficient credits to run deepseek/deepseek-v4.1-flash-1017:exacto")));
+  assert.ok(isExhaustion(err("OpenRouter error (HTTP 502): upstream provider returned bad gateway")));
+  assert.ok(isExhaustion(err("OpenRouter error (HTTP 503): service unavailable")));
+  assert.ok(isExhaustion(err("OpenRouter error (HTTP 404): no endpoints available for this model")));
   assert.ok(!isExhaustion(err("Claude Code is not logged in: run `claude auth login`")));
-  assert.ok(!isExhaustion(err("Claude upstream error (HTTP 500): internal error")));
+  assert.ok(!isExhaustion(err("HTTP 400: messages must not be empty")));
   assert.ok(!isExhaustion({ stopReason: "stop" as any, errorMessage: "429" }));
+});
+
+test("outages bench for minutes and quota refusals for the provider's reset window", () => {
+  assert.ok(!isOutage(err("HTTP 402: insufficient credits")));
+  assert.ok(isOutage(err("OpenRouter error (HTTP 502): upstream provider returned bad gateway")));
+  assert.ok(isOutage(err("OpenRouter error (HTTP 404): no endpoints available for this model")));
+  assert.equal(cooldownMs("OpenRouter error (HTTP 503): service unavailable"), 2 * 60_000);
+  assert.equal(cooldownMs("OpenRouter error (HTTP 404): no endpoints available"), 10 * 60_000);
+  assert.equal(cooldownMs("HTTP 402: insufficient credits"), 30 * 60_000);
 });
 
 test("cooldown follows the provider's reset hint", () => {
@@ -33,8 +47,43 @@ test("router: primary, fallback on exhaustion, sticky continuations, recovery af
   assert.equal(r.route({ reason: "continuation", thinkingLevel: "low", previous: { model: models["b/f"] } }).model.id, "f");
   r.exhaustedUntil.set("a/p", Date.now() - 1);
   assert.equal(r.route({ reason: "user", thinkingLevel: "low" }).model.id, "p", "primary returns after cooldown");
-  // A non-quota failure is retried on the same model, never silently moved.
-  assert.equal(r.route({ reason: "retry", thinkingLevel: "low", failed: { model: models["a/p"], message: err("HTTP 503 overloaded") } }).model.id, "p");
+  // A failure the provider did not name as exhaustion is retried on the same model, never silently moved.
+  assert.equal(r.route({ reason: "retry", thinkingLevel: "low", failed: { model: models["a/p"], message: err("HTTP 400: bad request") } }).model.id, "p");
+});
+
+test("router: an OpenRouter 402, 5xx or no-endpoints failure moves to the next tier before any output", () => {
+  const models: Record<string, any> = {
+    "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto": { provider: "openrouter", id: "deepseek/deepseek-v4.1-flash-1017:exacto" },
+    "opencode-go/deepseek-v4.1-flash": { provider: "opencode-go", id: "deepseek-v4.1-flash" },
+    "openai-codex/gpt-6.1-terra": { provider: "openai-codex", id: "gpt-6.1-terra" },
+  };
+  for (const [cause, message] of [
+    ["402 credits", "OpenRouter error (HTTP 402): insufficient credits"],
+    ["429 limit", "OpenRouter error (HTTP 429): rate limit exceeded, resets in 5m"],
+    ["502", "OpenRouter error (HTTP 502): bad gateway"],
+    ["no endpoints", "OpenRouter error (HTTP 404): no endpoints available for this model"],
+  ] as const) {
+    const fell: string[] = [];
+    const r = createRouter({ primary: "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto",
+      fallbacks: ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6.1-terra"], resolve: (x) => models[x],
+      events: { onFallback: (from, to, reason) => fell.push(`${from}->${to}: ${reason}`) } });
+    const routed = r.route({ reason: "retry", thinkingLevel: "medium",
+      failed: { model: models["openrouter/deepseek/deepseek-v4.1-flash-1017:exacto"], message: err(message) } });
+    assert.equal(routed.model.provider, "opencode-go", cause);
+    assert.equal(fell.length, 1, cause);
+    assert.match(fell[0], /^openrouter\/deepseek\/deepseek-v4\.1-flash-1017:exacto->opencode-go\/deepseek-v4\.1-flash: /, cause);
+    // The reason names the provider's own words, so the logged warning says why.
+    assert.ok(fell[0].includes(message.slice(0, 20)), cause);
+    // The next request stays on the fallback while the primary is benched.
+    assert.equal(r.route({ reason: "user", thinkingLevel: "medium" }).model.provider, "opencode-go", cause);
+  }
+  // A failure after output finishes the turn where it started; the model is still benched for the next turn.
+  const models2: Record<string, any> = { "a/p": { provider: "a", id: "p" }, "b/f": { provider: "b", id: "f" } };
+  const r2 = createRouter({ primary: "a/p", fallbacks: ["b/f"], resolve: (x) => models2[x], events: { onFallback: () => {} } });
+  const partial = { ...err("HTTP 402: insufficient credits"), content: [{ type: "text", text: "half an answer" }] };
+  assert.equal(r2.route({ reason: "retry", thinkingLevel: "low", failed: { model: models2["a/p"], message: partial } }).model.id, "p");
+  assert.ok((r2.exhaustedUntil.get("a/p") ?? 0) > Date.now(), "the failed model is benched even mid-turn");
+  assert.equal(r2.route({ reason: "user", thinkingLevel: "low" }).model.id, "f", "the next turn starts on the fallback");
 });
 
 test("router: a model with no login is skipped, not routed to", () => {

@@ -42,9 +42,10 @@ Then:
 
 1. Put `TELEGRAM_BOT_TOKEN` and `CARL_API_KEY` (16 or more characters) in `~/.carl/.env` and `chmod 600` it.
 2. Add your Telegram user id to `telegram.allowFrom` and `telegram.homeChat` in `~/.carl/carl.json`. Carl answers nobody else.
-3. Sign in to a model:
-   - **Claude:** install Claude Code and run `claude auth login`.
+3. Sign in to a model (the default is DeepSeek V4.1 Flash on OpenRouter):
+   - **OpenRouter (the default):** `carl login openrouter` with an OpenRouter API key. Add `opencode-go` too if you want the second tier of the default fallback chain.
    - **GPT through Codex:** `carl login openai-codex`.
+   - **Claude:** install Claude Code and run `claude auth login`.
    - **Anything else:** `carl login` lists the providers and which are already set up; `carl login <provider>` signs in (add `--api-key` for a key). Logins are stored in `~/.carl/agent/auth.json`; set `agentDir` to share another app's folder instead.
 4. Run `carl doctor`, then `carl gateway`.
 
@@ -81,7 +82,7 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
   - Shell-command schedules (created by the operator) deliver their output without a model call.
   - They run in the shell sandbox. To run one of your own scripts outside it (one that needs a login the sandbox hides, such as `cf`'s), set `"unsandboxed": true` on that job in `~/.carl/schedules.json`. The agent cannot set it.
 - **Models:**
-  - A primary model, plus fallbacks used only when the primary is provably out of quota (see Routing).
+  - A primary model, plus fallbacks used only when the primary provably cannot answer: out of quota or credits, a 5xx outage, or an OpenRouter route with no endpoints (see Routing).
   - Switch the model per conversation or globally.
 
 ## The Claude route
@@ -98,7 +99,14 @@ Carl is not affiliated with Anthropic. Use of Claude through your subscription i
 
 ## Routing
 
-`model` is the primary. `fallbackModels` are used only when the provider itself says the primary is out of quota: a plan, usage or session limit, or a 402 or 429 from a subscription route. An outage, a bad login or an unknown error fails with its own message instead of quietly moving your work to another model. A model that hit its limit stays benched until the reset time the provider gave, or 30 minutes if it gave none.
+`model` is the primary. `fallbackModels` are used, in order, only when the provider itself says the primary cannot answer:
+
+- out of quota or credits: a plan, usage or session limit, an HTTP 402 or 429 (OpenRouter's "insufficient credits" included);
+- a 5xx outage, or an OpenRouter route with no endpoints (404 "No endpoints available").
+
+The work moves before any output was written. A failure after output, or after a tool ran, finishes the turn on the model that started it, so the partial answer or the tool call is never duplicated. The warning in the log and the `fallback` event name the provider's own words. A failed model stays benched: until the reset time the provider gave, 2 minutes after a 5xx outage, 10 minutes for a route with no endpoints, or 30 minutes when a quota refusal gave no hint. A bad login or an unknown error fails with its own message instead of quietly moving your work to another model.
+
+Omitting `fallbackModels` gives the default chain (OpenRouter Exacto, OpenCode Go, GPT-6.1 Terra, Claude); an explicit list replaces it, and `[]` turns fallbacks off. A fallback whose provider is unavailable (Claude Code when `claude.enabled` is false, a provider with no login) is skipped with a named warning rather than blocking startup. Carl registers the Exacto route itself, since Pi's catalog lists only the plain `deepseek/deepseek-v4.1-flash` id; the route uses OpenRouter's `/api/v1` endpoint, text input, a 1,048,576-token window and 65,536 output tokens.
 
 ## The psyche
 
@@ -146,13 +154,13 @@ Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 
 ## Configuration
 
-`~/.carl/carl.json` (set `CARL_HOME` to move it). Every key is optional. The default model, also seeded by `carl init`, is `openai-codex/gpt-6.1-terra`; existing explicit model choices are unchanged.
+`~/.carl/carl.json` (set `CARL_HOME` to move it). Every key is optional. The default model, also seeded by `carl init`, is `openrouter/deepseek/deepseek-v4.1-flash-1017:exacto` (DeepSeek V4.1 Flash on OpenRouter's quality-first Exacto provider sort), with the fallback chain `opencode-go/deepseek-v4.1-flash`, `openai-codex/gpt-6.1-terra`, then `claude-code/claude-sonnet-5-5`. Existing explicit model choices are unchanged.
 
 ```json
 {
   "name": "Carl",
   "model": "claude-code/claude-sonnet-5-5",
-  "fallbackModels": ["openai-codex/gpt-6.1-terra"],
+  "fallbackModels": ["openrouter/deepseek/deepseek-v4.1-flash-1017:exacto", "openai-codex/gpt-6.1-terra"],
   "thinking": "medium",
   "contextBudget": 100000,
   "tools": ["read", "bash"],
