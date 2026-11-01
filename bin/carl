@@ -1,6 +1,9 @@
 #!/bin/sh
 # Carl launcher: Node >= 22.19 runs the TypeScript sources directly (type stripping, no build step).
-# System tools by absolute path: nothing here is looked up on PATH except node itself.
+# System tools by absolute path. Node: the release's own `node` (an installed release links the host's bundled Node beside
+# bin/, and the owner-report guard checks that the running gateway is exactly that executable); otherwise node from PATH.
 self=$(/usr/bin/readlink -f "$0" 2>/dev/null || echo "$0")
 here=$(cd "$(/usr/bin/dirname "$self")" && pwd -P)
-exec node --experimental-strip-types --no-warnings=ExperimentalWarning "$here/../src/main.ts" "$@"
+node=node
+[ -x "$here/../node" ] && node="$here/../node"
+exec "$node" --experimental-strip-types --no-warnings=ExperimentalWarning "$here/../src/main.ts" "$@"
