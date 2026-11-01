@@ -17,7 +17,18 @@ import { MIRROR_INSTRUCTION } from "../psyche.ts";
 import { chunkMarkdown, escapeHtml, htmlToPlain, markdownToTelegramHtml, visibleControls } from "./format.ts";
 import { type InlineButton, TelegramApi, TelegramError, type TgCallbackQuery, type TgMessage } from "./telegram-api.ts";
 
-interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string; status?: "unknown"; requestId?: string; unknownNoticeAttempted?: boolean; editMessageId?: number }
+interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string; status?: "unknown"; requestId?: string; unknownNoticeAttempted?: boolean; editMessageId?: number; nextAt?: number }
+
+/** Retry spacing for a queued reply Telegram refused for now: 30 s doubling per attempt, capped at 5 min. */
+export function outboxRetryDelayMs(attempts: number): number {
+  return Math.min(300_000, 30_000 * 2 ** Math.max(0, attempts - 1));
+}
+
+/** A refusal that no retry can fix: the bot was blocked or removed (403), or the chat or topic no longer exists (400). */
+export function permanentSendFailure(error: unknown): boolean {
+  return error instanceof TelegramError && error.status === "failed" &&
+    (error.code === 403 || (error.code === 400 && /chat not found|thread not found|topic.*(?:closed|deleted|not found)|bot was (?:blocked|kicked)/i.test(error.description)));
+}
 
 /** Consecutive getUpdates failures before the channel reports "retrying" (a single dropped poll is not an outage). */
 export const POLL_FAILURES_BEFORE_RETRYING = 2;
@@ -432,6 +443,10 @@ export class TelegramChannel {
     if (!chunks.length) return;
     const unknown = unknownSend(error);
     const lastError = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+    if (!unknown && permanentSendFailure(error)) {
+      this.log.error("reply dropped: Telegram will never accept it", { chatId, threadId, error: lastError });
+      return;
+    }
     const item: OutboxItem = { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, chatId, threadId, chunks, firstAt: Date.now(), attempts: 1, lastError, status: unknown ? "unknown" : undefined, requestId: unknown && error instanceof TelegramError ? error.requestId : undefined, editMessageId };
     this.loadOutbox().push(item);
     this.saveOutbox();
@@ -452,9 +467,21 @@ export class TelegramChannel {
     return this.loadOutbox().filter((item) => item.status === "unknown" && item.chatId === chatId && item.threadId === threadId);
   }
 
+  /** Replies Telegram refused for now and that are queued for another try (visible in /status, never silent). */
+  private pendingReplies(chatId: number, threadId?: number): OutboxItem[] {
+    return this.loadOutbox().filter((item) => item.status !== "unknown" && item.chatId === chatId && item.threadId === threadId);
+  }
+
+  /** Every queued reply waiting for a retry, across chats: what the gateway reports when a send is queued. */
+  pendingCount(): number {
+    return this.loadOutbox().filter((item) => item.status !== "unknown").length;
+  }
+
   private scheduleOutbox(): void {
     if (this.outboxTimer || this.abort.signal.aborted) return;
-    this.outboxTimer = setTimeout(() => { this.outboxTimer = undefined; void this.flushOutbox(); }, 30_000);
+    const due = this.loadOutbox().filter((item) => item.status !== "unknown").map((item) => item.nextAt ?? 0);
+    const wait = due.length ? Math.max(1_000, Math.min(...due) - Date.now()) : 30_000;
+    this.outboxTimer = setTimeout(() => { this.outboxTimer = undefined; void this.flushOutbox(); }, Math.min(wait, 300_000));
     this.outboxTimer.unref();
   }
 
@@ -473,6 +500,7 @@ export class TelegramChannel {
         queue.splice(queue.indexOf(item), 1);
         continue;
       }
+      if (item.nextAt !== undefined && item.nextAt > Date.now()) continue; // backing off: not due yet
       try {
         while (item.chunks.length) {
           if (item.editMessageId !== undefined) {
@@ -493,6 +521,12 @@ export class TelegramChannel {
       } catch (e) {
         item.attempts++;
         item.lastError = (e as Error).message;
+        if (permanentSendFailure(e)) {
+          this.log.error("queued reply dropped: Telegram will never accept it", { chatId: item.chatId, attempts: item.attempts, error: item.lastError });
+          queue.splice(queue.indexOf(item), 1);
+          continue;
+        }
+        item.nextAt = Date.now() + outboxRetryDelayMs(item.attempts);
         if (unknownSend(e) && e instanceof TelegramError) {
           item.status = "unknown";
           item.requestId = e.requestId;
@@ -526,7 +560,9 @@ export class TelegramChannel {
       case "status": {
         const s = await this.brain.status(key);
         const held = this.heldReplies(m.chat.id, m.message_thread_id);
-        await reply("```\n" + JSON.stringify(s, null, 1).slice(0, 3_000) + "\n```\n" + `${held.length} replies with unknown delivery${held.length ? `: ${held.slice(0, 10).map((item) => item.id).join(", ")}\n/outbox lists all; check the chat before resend/discard.` : "."}`);
+        const pending = this.pendingReplies(m.chat.id, m.message_thread_id);
+        await reply("```\n" + JSON.stringify(s, null, 1).slice(0, 3_000) + "\n```\n" + `${held.length} replies with unknown delivery${held.length ? `: ${held.slice(0, 10).map((item) => item.id).join(", ")}\n/outbox lists all; check the chat before resend/discard.` : "."}` +
+          (pending.length ? `\n${pending.length} replies queued for retry (last error: ${pending.at(-1)!.lastError ?? "unknown"}).` : ""));
         return true;
       }
       case "outbox": {
