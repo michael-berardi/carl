@@ -48,8 +48,8 @@ export interface CarlConfig {
   /** "provider/model", resolved through Pi's model registry. */
   model: string;
   thinking: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-  /** Models used, in order, when the primary cannot answer: out of quota, out of credits, a 5xx outage or an
-   *  OpenRouter route with no endpoints. Defaults to DEFAULT_FALLBACK_MODELS when carl.json omits the key. */
+  /** Models used, in order, when the primary cannot answer: out of quota, out of credits, a 5xx outage or a
+   *  route with no endpoints. Empty unless carl.json names them. */
   fallbackModels: string[];
   /** Cheaper model for reflection, titles and schedule runs that ask for it. Defaults to `model`. */
   sideModel?: string;
@@ -157,15 +157,8 @@ export function secret(home: string, name: string, envFiles: string[] = []): str
   return undefined;
 }
 
-export const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash";
-
-/** Used, in order, when carl.json gives no fallbackModels (Mike 2026-10-31): the default primary is DeepSeek V4.1 Flash on
- *  OpenCode Go; once Go is used up the same model on OpenRouter's Exacto route, then GPT-6.1 Terra, then Claude. */
-export const DEFAULT_FALLBACK_MODELS = [
-  "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto",
-  "openai-codex/gpt-6.1-terra",
-  "claude-code/claude-sonnet-5-5",
-];
+/** Carl ships no model choice of its own: the operator names the model (and any fallbacks) in carl.json. */
+export const MODEL_REQUIRED = 'carl.json needs "model": "provider/model" (for example the model you signed in to with `carl login`)';
 
 const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -184,10 +177,9 @@ export function loadConfig(home = carlHome()): CarlConfig {
   const cfg: CarlConfig = {
     home,
     name: str(raw.name, "Carl", "name"),
-    model: str(raw.model, DEFAULT_MODEL, "model"),
+    model: str(raw.model, "", "model"),
     thinking: (raw.thinking ?? "medium") as CarlConfig["thinking"],
-    // An explicit list (including []) always wins; only an omitted key gets the default chain.
-    fallbackModels: raw.fallbackModels === undefined ? [...DEFAULT_FALLBACK_MODELS] : strList(raw.fallbackModels, "fallbackModels"),
+    fallbackModels: strList(raw.fallbackModels, "fallbackModels"),
     sideModel: raw.sideModel === undefined ? undefined : str(raw.sideModel, "", "sideModel"),
     contextBudget: int(raw.contextBudget, 96_000, "contextBudget", 8_000),
     keepRecentTokens: int(raw.keepRecentTokens, 16_000, "keepRecentTokens", 1_000),
@@ -264,7 +256,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
   if ((cfg.home + "/").startsWith(cfg.workspace.replace(/\/+$/, "") + "/"))
     throw new ConfigError(`workspace (${cfg.workspace}) must not contain CARL_HOME (${cfg.home}): the agent would be able to rewrite Carl's own configuration`);
   if (!THINKING.has(cfg.thinking)) throw new ConfigError(`thinking must be one of ${[...THINKING].join(", ")}`);
-  if (!cfg.model.includes("/")) throw new ConfigError(`model "${cfg.model}" must be "provider/model"`);
+  if (cfg.model && !cfg.model.includes("/")) throw new ConfigError(`model "${cfg.model}" must be "provider/model"`);
   if (cfg.keepRecentTokens >= cfg.contextBudget) throw new ConfigError("keepRecentTokens must be below contextBudget");
   return cfg;
 }

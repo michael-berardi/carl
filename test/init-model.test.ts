@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 
-test("init seeds the OpenRouter Exacto default and preserves an existing model on rerun", () => {
+test("init writes no model choice of its own and preserves an existing model on rerun", () => {
   const home = mkdtempSync(join(tmpdir(), "carl-init-"));
   try {
     const init = () => spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", main, "init"], {
@@ -18,9 +18,10 @@ test("init seeds the OpenRouter Exacto default and preserves an existing model o
     assert.equal(first.status, 0, first.stderr);
     const file = join(home, "carl.json");
     const seeded = JSON.parse(readFileSync(file, "utf8"));
-    assert.equal(seeded.model, "opencode-go/deepseek-v4.1-flash");
-    assert.deepEqual(seeded.fallbackModels, ["openrouter/deepseek/deepseek-v4.1-flash-1017:exacto", "openai-codex/gpt-6.1-terra", "claude-code/claude-sonnet-5-5"]);
-    const existing = JSON.stringify({ model: "openai-codex/gpt-6.1-sol" });
+    assert.equal(seeded.model, "", "the operator chooses the model");
+    assert.deepEqual(seeded.fallbackModels, []);
+    assert.match(first.stdout, /set "model": "provider\/model"/);
+    const existing = JSON.stringify({ model: "provider-a/model-1" });
     writeFileSync(file, existing);
     const second = init();
     assert.equal(second.status, 0, second.stderr);

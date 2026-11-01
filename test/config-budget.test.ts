@@ -3,43 +3,39 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigError, DEFAULT_FALLBACK_MODELS, DEFAULT_MODEL, loadConfig, parseEnvFile, secret } from "../src/config.ts";
+import { ConfigError, loadConfig, parseEnvFile, secret } from "../src/config.ts";
 import { capText } from "../src/budget.ts";
 
-test("defaults load without a file", () => {
+test("defaults load without a file: no model choice is built in", () => {
   const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
   const c = loadConfig(h);
-  assert.equal(c.model, "opencode-go/deepseek-v4.1-flash");
-  assert.equal(c.model, DEFAULT_MODEL);
-  assert.deepEqual(c.fallbackModels, ["openrouter/deepseek/deepseek-v4.1-flash-1017:exacto", "openai-codex/gpt-6.1-terra", "claude-code/claude-sonnet-5-5"]);
-  assert.deepEqual(c.fallbackModels, DEFAULT_FALLBACK_MODELS);
+  assert.equal(c.model, "", "Carl ships no default model: the operator chooses one");
+  assert.deepEqual(c.fallbackModels, [], "and no default fallbacks");
   assert.equal(c.api.port, 8642);
   assert.deepEqual(c.telegram.allowFrom, []);
 });
 
-test("an omitted fallbackModels gets the default chain; an explicit list (even empty) wins", () => {
-  const omitted = mkdtempSync(join(tmpdir(), "carl-cfg-"));
-  writeFileSync(join(omitted, "carl.json"), JSON.stringify({ model: "openai-codex/gpt-6.1-sol" }));
-  assert.deepEqual(loadConfig(omitted).fallbackModels, DEFAULT_FALLBACK_MODELS);
+test("fallbackModels is exactly what carl.json names", () => {
   const chosen = mkdtempSync(join(tmpdir(), "carl-cfg-"));
-  writeFileSync(join(chosen, "carl.json"), JSON.stringify({ fallbackModels: ["openai-codex/gpt-6.1-terra"] }));
-  assert.deepEqual(loadConfig(chosen).fallbackModels, ["openai-codex/gpt-6.1-terra"]);
-  const none = mkdtempSync(join(tmpdir(), "carl-cfg-"));
-  writeFileSync(join(none, "carl.json"), JSON.stringify({ fallbackModels: [] }));
-  assert.deepEqual(loadConfig(none).fallbackModels, [], "an empty list turns fallbacks off");
+  writeFileSync(join(chosen, "carl.json"), JSON.stringify({ model: "provider-a/model-1", fallbackModels: ["provider-b/model-2"] }));
+  assert.deepEqual(loadConfig(chosen).fallbackModels, ["provider-b/model-2"]);
+  const omitted = mkdtempSync(join(tmpdir(), "carl-cfg-"));
+  writeFileSync(join(omitted, "carl.json"), JSON.stringify({ model: "provider-a/model-1" }));
+  assert.deepEqual(loadConfig(omitted).fallbackModels, []);
 });
 
-test("an explicit model remains unchanged", () => {
+test("an explicit model remains unchanged, including a nested id: provider splits on the first slash only", () => {
   const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
-  writeFileSync(join(h, "carl.json"), JSON.stringify({ model: "openai-codex/gpt-6.1-sol" }));
-  assert.equal(loadConfig(h).model, "openai-codex/gpt-6.1-sol");
+  writeFileSync(join(h, "carl.json"), JSON.stringify({ model: "router/vendor/model-x:variant" }));
+  const [provider, ...rest] = loadConfig(h).model.split("/");
+  assert.equal(provider, "router");
+  assert.equal(rest.join("/"), "vendor/model-x:variant");
 });
 
-test("the default OpenRouter fallback keeps its nested id: provider splits on the first slash only", () => {
+test("a model without a provider is refused with its cause", () => {
   const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
-  const [provider, ...rest] = loadConfig(h).fallbackModels[0].split("/");
-  assert.equal(provider, "openrouter");
-  assert.equal(rest.join("/"), "deepseek/deepseek-v4.1-flash-1017:exacto");
+  writeFileSync(join(h, "carl.json"), JSON.stringify({ model: "just-a-model" }));
+  assert.throws(() => loadConfig(h), (e: Error) => e instanceof ConfigError && /must be "provider\/model"/.test(e.message));
 });
 
 test("bad config names the field", () => {

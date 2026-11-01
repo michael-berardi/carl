@@ -42,9 +42,8 @@ Then:
 
 1. Put `TELEGRAM_BOT_TOKEN` and `CARL_API_KEY` (16 or more characters) in `~/.carl/.env` and `chmod 600` it.
 2. Add your Telegram user id to `telegram.allowFrom` and `telegram.homeChat` in `~/.carl/carl.json`. Carl answers nobody else.
-3. Sign in to a model (the default is DeepSeek V4.1 Flash on OpenCode Go, then the same model on OpenRouter once Go is used up):
-   - **OpenCode Go (the default) and OpenRouter (its fallback):** `carl login opencode-go`, then `carl login openrouter` with an OpenRouter API key for the second tier.
-   - **GPT through Codex:** `carl login openai-codex`.
+3. Choose a model. Carl has no built-in model: sign in to the provider you want, then set `"model": "provider/model"` (and, optionally, `fallbackModels`) in `~/.carl/carl.json`.
+   - **Most providers:** `carl login` lists them; `carl login <provider>` signs in (an API key or OAuth).
    - **Claude:** install Claude Code and run `claude auth login`.
    - **Anything else:** `carl login` lists the providers and which are already set up; `carl login <provider>` signs in (add `--api-key` for a key). Logins are stored in `~/.carl/agent/auth.json`; set `agentDir` to share another app's folder instead.
 4. Run `carl doctor`, then `carl gateway`.
@@ -58,7 +57,7 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
   - Telegram message attempts (delivered, refused or unknown) are recorded in UltraTerm's UltraBot message log when `ultraterm` is configured; secrets are masked before persistence. See [Telegram delivery and audit safety](docs/TELEGRAM-DELIVERY.md).
   - A message sent while Carl is working joins the current turn instead of waiting in a queue.
   - `/stop`, `/new`, `/status`, `/model`, `/compact` and `/mirror` work at any time.
-  - **Team groups:** list a group under `telegram.groups` with its members (`{"chat": -100…, "members": {"<user id>": "Dana (attorney)"}}`) and Carl serves that team too. In a group it answers only when addressed (an @mention, its name as a word (`name` in carl.json, e.g. "Felix, ..."), a reply to one of its messages, or a command; set `listenAll` to answer everything), and every message names its sender. Members are never the operator: their words cannot approve operator-only tools, approval cards still go to the operator, and they can use only `/help`.
+  - **Team groups:** list a group under `telegram.groups` with its members (`{"chat": -100…, "members": {"<user id>": "Alex (editor)"}}`) and Carl serves that team too. In a group it answers only when addressed (an @mention, its name as a word (`name` in carl.json, e.g. "Carl, ..."), a reply to one of its messages, or a command; set `listenAll` to answer everything), and every message names its sender. Members are never the operator: their words cannot approve operator-only tools, approval cards still go to the operator, and they can use only `/help`.
   - Voice notes go through any speech-to-text command you configure; photos and files go to the model.
   - Slack connects over Socket Mode (no public URL needed). Discord connects over its Gateway.
   - Replies Telegram explicitly refuses are retried for 24 hours; ambiguous deliveries are held for reconciliation, never automatically replayed. If Carl restarts mid-reply, it picks the message up again when its answer had not run any tool yet, and otherwise tells you which message was interrupted (it never repeats an action on its own).
@@ -106,7 +105,7 @@ Carl is not affiliated with Anthropic. Use of Claude through your subscription i
 
 The work moves before any output was written. A failure after output, or after a tool ran, finishes the turn on the model that started it, so the partial answer or the tool call is never duplicated. The warning in the log and the `fallback` event name the provider's own words. A failed model stays benched: until the reset time the provider gave, 2 minutes after a 5xx outage, 10 minutes for a route with no endpoints, or 30 minutes when a quota refusal gave no hint. A bad login or an unknown error fails with its own message instead of quietly moving your work to another model.
 
-Omitting `fallbackModels` gives the default chain after OpenCode Go (OpenRouter Exacto, GPT-6.1 Terra, Claude); an explicit list replaces it, and `[]` turns fallbacks off. A fallback whose provider is unavailable (Claude Code when `claude.enabled` is false, a provider with no login) is skipped with a named warning rather than blocking startup. Carl registers the Exacto route itself, since Pi's catalog lists only the plain `deepseek/deepseek-v4.1-flash` id; the route uses OpenRouter's `/api/v1` endpoint, text input, a 1,048,576-token window and 65,536 output tokens.
+Carl uses exactly the `fallbackModels` you list, in order; without the key there are none. A fallback whose provider is unavailable (Claude Code when `claude.enabled` is false, a provider with no login) is skipped with a named warning rather than blocking startup. A model your provider's catalog does not list can be added in the agent folder's `models.json`.
 
 ## The psyche
 
@@ -122,7 +121,7 @@ Carl is named after Carl Jung, and its self-model borrows his layers. Each layer
 
 Only Self, Persona and Lessons enter the prompt. The ledgers stay on disk and are read only when needed.
 
-With the UltraTerm module on, Carl joins UltraTerm's own learning loop instead of running a second one. Dream and Nightmare read Carl's shadow and decision ledgers along with every other agent's work. Lessons Mike approves reach Carl through shared memory. Carl then runs no individuation pass and keeps no `integrated.md` in its prompt. Set `"learning": "carl"` to keep Carl's own pass, or `"ultraterm"` to use UltraTerm's loop without the rest of the module.
+With the UltraTerm module on, Carl joins UltraTerm's own learning loop instead of running a second one. Dream and Nightmare read Carl's shadow and decision ledgers along with every other agent's work. Lessons the operator approves reach Carl through shared memory. Carl then runs no individuation pass and keeps no `integrated.md` in its prompt. Set `"learning": "carl"` to keep Carl's own pass, or `"ultraterm"` to use UltraTerm's loop without the rest of the module.
 
 ## Safety
 
@@ -154,13 +153,13 @@ Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 
 ## Configuration
 
-`~/.carl/carl.json` (set `CARL_HOME` to move it). Every key is optional. The default model, also seeded by `carl init`, is `opencode-go/deepseek-v4.1-flash` (DeepSeek V4.1 Flash on the OpenCode Go plan). Once Go is used up, the same model on `openrouter/deepseek/deepseek-v4.1-flash-1017:exacto` (OpenRouter's quality-first Exacto provider sort) takes over, then `openai-codex/gpt-6.1-terra`, then `claude-code/claude-sonnet-5-5`. Existing explicit model choices are unchanged.
+`~/.carl/carl.json` (set `CARL_HOME` to move it). `model` is required; every other key is optional. `carl init` writes the file with an empty `model` for you to fill in.
 
 ```json
 {
   "name": "Carl",
-  "model": "claude-code/claude-sonnet-5-5",
-  "fallbackModels": ["openrouter/deepseek/deepseek-v4.1-flash-1017:exacto", "openai-codex/gpt-6.1-terra"],
+  "model": "provider-a/model-name",
+  "fallbackModels": ["provider-b/other-model"],
   "thinking": "medium",
   "contextBudget": 100000,
   "tools": ["read", "bash"],
@@ -168,7 +167,7 @@ Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
   "skills": ["~/.agents/skills"],
   "skillAllow": ["deploy", "triage"],
   "telegram": { "allowFrom": [123456789], "homeChat": 123456789, "tokenEnv": "TELEGRAM_BOT_TOKEN",
-                "groups": [{ "chat": -1001234567890, "members": { "987654321": "Dana" } }] },
+                "groups": [{ "chat": -1001234567890, "members": { "987654321": "Alex" } }] },
   "api": { "port": 8642, "keyEnv": "CARL_API_KEY" },
   "stt": ["/path/to/transcribe", "{file}", "{output}"],
   "claude": { "configDirs": ["~/.claude", "~/.claude-work"] },

@@ -58,7 +58,7 @@ export class Gateway {
       prompt: (job) => this.runPromptJob(job),
       builtin: { individuation: () => this.individuate() },
       // The message is the job's own words. Its internal schedule id/name is not shown to the operator
-      // (Mike 2026-10-29: "we don't want it to even say overseer coordination"); failures already name the job.
+      // Failures already name the job.
       deliver: async (job, text) => {
         await this.send(job.deliver, text);
       },

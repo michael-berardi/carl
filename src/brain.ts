@@ -23,13 +23,11 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { type CarlConfig, mcpFile } from "./config.ts";
+import { type CarlConfig, mcpFile, ConfigError, MODEL_REQUIRED } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
-import { registerTerra } from "./providers/terra.ts";
-import { registerOpenRouter } from "./providers/openrouter.ts";
 import { cooldownMs, isExhaustion } from "./router.ts";
 import { claudeCodeProviderConfig, closeSpares, PROVIDER as CLAUDE_PROVIDER, sweepCallFolders } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
@@ -119,7 +117,7 @@ export class Brain extends EventEmitter {
   /** Models currently cooling down after a quota refusal (ref -> until epoch ms). */
   routerState = new Map<string, number>();
   /** Fallbacks that resolve in this runtime. One that does not (its provider is off or unregistered) is skipped with
-   *  a named warning instead of blocking startup: the default chain names Claude even when claude.enabled is false. */
+   *  a named warning instead of blocking startup: a configured Claude link is skipped when claude.enabled is false. */
   private fallbackRefs: string[] = [];
   /** True once the carl/auto router is registered. */
   private routerReady = false;
@@ -322,8 +320,6 @@ export class Brain extends EventEmitter {
       authPath: join(this.cfg.agentDir, "auth.json"),
       modelsPath: join(this.cfg.agentDir, "models.json"),
     });
-    await registerTerra(this.runtime);
-    await registerOpenRouter(this.runtime);
     if (this.cfg.claude.enabled) {
       const swept = sweepCallFolders(join(this.cfg.home, "state", "claude-tmp"));
       if (swept) this.log.info("removed per-call Claude folders left by an earlier process", { count: swept });
@@ -336,6 +332,7 @@ export class Brain extends EventEmitter {
         log: (level, msg, data) => this.log[level](msg, data),
       }) as any);
     }
+    if (!this.cfg.model) throw new ConfigError(MODEL_REQUIRED); // Carl ships no model choice: the operator names one
     this.model(this.cfg.model); // fail fast, naming the model, when it is unknown
     this.fallbackRefs = this.cfg.fallbackModels.filter((f) => {
       try {
