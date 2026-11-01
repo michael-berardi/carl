@@ -143,9 +143,9 @@ test("the OpenRouter Exacto route keeps the catalog's transport and sets its own
   assert.equal(runtime.getModels("openrouter").filter((m: any) => m.id === OPENROUTER_EXACTO_MODEL.id).length, 1);
 });
 
-test("Brain resolves the default OpenRouter Exacto route and skips a fallback whose provider is off", async () => {
+test("Brain resolves the default Go-then-OpenRouter chain and skips a fallback whose provider is off", async () => {
   const result = await scenario(undefined, undefined, undefined); // no model, no fallbackModels: Carl's defaults
-  assert.equal(result.selected, "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto");
+  assert.equal(result.selected, "opencode-go/deepseek-v4.1-flash");
   assert.equal(result.sessionModel, "carl/auto", "the default fallback chain turns the router on");
   assert.deepEqual(result.openrouter, OPENROUTER_EXACTO_MODEL);
   // claude.enabled is false in this scenario, so the Claude link of the default chain is skipped by name.
