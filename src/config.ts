@@ -157,12 +157,12 @@ export function secret(home: string, name: string, envFiles: string[] = []): str
   return undefined;
 }
 
-export const DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto";
+export const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash";
 
-/** Used, in order, when carl.json gives no fallbackModels: OpenCode Go, then GPT-6.1 Terra, then Claude. The default
- *  primary is the OpenRouter Exacto route; these are the three tiers after it. */
+/** Used, in order, when carl.json gives no fallbackModels (Mike 2026-10-31): the default primary is DeepSeek V4.1 Flash on
+ *  OpenCode Go; once Go is used up the same model on OpenRouter's Exacto route, then GPT-6.1 Terra, then Claude. */
 export const DEFAULT_FALLBACK_MODELS = [
-  "opencode-go/deepseek-v4.1-flash",
+  "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto",
   "openai-codex/gpt-6.1-terra",
   "claude-code/claude-sonnet-5-5",
 ];

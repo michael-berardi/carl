@@ -9,9 +9,9 @@ import { capText } from "../src/budget.ts";
 test("defaults load without a file", () => {
   const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
   const c = loadConfig(h);
-  assert.equal(c.model, "openrouter/deepseek/deepseek-v4.1-flash-1017:exacto");
+  assert.equal(c.model, "opencode-go/deepseek-v4.1-flash");
   assert.equal(c.model, DEFAULT_MODEL);
-  assert.deepEqual(c.fallbackModels, ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6.1-terra", "claude-code/claude-sonnet-5-5"]);
+  assert.deepEqual(c.fallbackModels, ["openrouter/deepseek/deepseek-v4.1-flash-1017:exacto", "openai-codex/gpt-6.1-terra", "claude-code/claude-sonnet-5-5"]);
   assert.deepEqual(c.fallbackModels, DEFAULT_FALLBACK_MODELS);
   assert.equal(c.api.port, 8642);
   assert.deepEqual(c.telegram.allowFrom, []);
@@ -35,9 +35,9 @@ test("an explicit model remains unchanged", () => {
   assert.equal(loadConfig(h).model, "openai-codex/gpt-6.1-sol");
 });
 
-test("the default OpenRouter route keeps its nested id: provider splits on the first slash only", () => {
+test("the default OpenRouter fallback keeps its nested id: provider splits on the first slash only", () => {
   const h = mkdtempSync(join(tmpdir(), "carl-cfg-"));
-  const [provider, ...rest] = loadConfig(h).model.split("/");
+  const [provider, ...rest] = loadConfig(h).fallbackModels[0].split("/");
   assert.equal(provider, "openrouter");
   assert.equal(rest.join("/"), "deepseek/deepseek-v4.1-flash-1017:exacto");
 });
