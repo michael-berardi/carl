@@ -38,6 +38,26 @@ const EDIT_INTERVAL_MS = 1_200;
 const FIRST_DRAFT_MS = 900;
 const TYPING_INTERVAL_MS = 4_500;
 
+/**
+ * Startup identity check with a bounded retry. A transient Telegram answer (a 5xx such as 502 Bad Gateway, or a network
+ * error: TelegramError status "unknown") used to stop the whole gateway at startup, so one Telegram hiccup took UltraBot
+ * offline until its supervisor relaunched it (2026-10-31). A definite refusal (401/404: a bad or revoked token) still fails
+ * at once, with its cause, so the operator sees it.
+ */
+export async function getMeWithRetry<T>(getMe: () => Promise<T>, onRetry: (attempt: number, error: Error, waitMs: number) => void,
+  delays: readonly number[] = [2_000, 5_000, 10_000, 20_000, 30_000], sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await getMe();
+    } catch (e) {
+      const transient = e instanceof TelegramError ? e.status === "unknown" : true;
+      if (!transient || attempt >= delays.length) throw e;
+      onRetry(attempt + 1, e as Error, delays[attempt]);
+      await sleep(delays[attempt]);
+    }
+  }
+}
+
 export class TelegramChannel {
   readonly api: TelegramApi;
   status: ChannelStatus = { state: "connecting", updatedAt: new Date().toISOString() };
@@ -82,7 +102,8 @@ export class TelegramChannel {
 
   async start(): Promise<void> {
     if (!this.cfg.telegram.allowFrom.length) this.log.warn("telegram.allowFrom is empty: Carl will answer nobody");
-    const me = await this.api.getMe();
+    const me = await getMeWithRetry(() => this.api.getMe(), (attempt, error, waitMs) =>
+      this.log.warn("telegram getMe failed; retrying", { attempt, error: error.message, waitMs }));
     this.botName = me.username ?? "";
     this.botId = me.id;
     this.log.info("telegram connected", { bot: this.botName });
