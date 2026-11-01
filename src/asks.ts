@@ -1,7 +1,7 @@
 // Asks: Carl puts questions to a person in a chat, collects the answers, and hands them to whatever waits on
 // them. Off unless `asks` is set in carl.json. One ask is one JSON file in CARL_HOME/asks/:
 //
-//   { "id": "acme-publication", "chat": -1001234567, "askee": "Dana",
+//   { "id": "site-launch", "chat": -1001234567890, "askee": "Alex",
 //     "title": "Before the new pages go live", "questions": [{"n": 1, "text": "..."}],
 //     "answersFile": "/abs/answers.md", "onComplete": ["ut-overseer", "job-report", "--json", "{...}"] }
 //
