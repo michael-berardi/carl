@@ -248,7 +248,9 @@ export class Gateway {
     } catch (e) {
       this.telegram.enqueue(chatId, chunkMarkdown(text), undefined, e);
       if (e instanceof TelegramError && e.status === "unknown") return `Telegram outcome unknown (request ${e.requestId}); held for reconciliation, not retried.`;
-      return `Telegram refused it for now (${(e as Error).message}); queued and retried every 30 s.`;
+      const pending = this.telegram.pendingCount();
+      return pending ? `Telegram refused it for now (${(e as Error).message}); queued for retry with backoff (${pending} pending).`
+        : `Telegram will never accept it (${(e as Error).message}); not queued.`;
     }
   }
 
