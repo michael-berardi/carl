@@ -28,7 +28,7 @@ export interface Job {
   /**
    * Command jobs only, operator-set (the portal or schedules.json; the agent's schedule tool cannot set it): run outside
    * the shell sandbox, still with the clean environment. For an operator's own script that needs a credential store the
-   * sandbox denies, such as cf's login (Mike 2026-10-16: the PlataPlace photo render could not reach Cloudflare).
+   * sandbox denies, such as cf's login.
    */
   unsandboxed?: boolean;
   createdAt: string;
@@ -253,8 +253,7 @@ export class Scheduler {
       try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); }
     }
     // A run that answered only with a silence marker ("[SILENT]", "NO_REPLY", "HEARTBEAT_OK", optionally with trailing
-    // punctuation) has nothing to say: it is never delivered, whether or not the job set onlyIfOutput (Mike 2026-10-29: a
-    // background check posted "[SILENT]" to Telegram every 20 minutes).
+    // punctuation) has nothing to say: it is never delivered, whether or not the job set onlyIfOutput.
     const silent = isSilentReply(output);
     const skip = job.deliver === "none" || silent || (job.onlyIfOutput && job.lastStatus === "ok" && !output.trim());
     if (silent && job.lastStatus === "ok") this.log.info("schedule finished silently", { id: job.id, name: job.name });

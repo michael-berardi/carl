@@ -30,7 +30,7 @@ export interface GuardRules {
   noExec?: string[];
   /**
    * True when shell commands run under the kernel sandbox. Code an interpreter reads from a flag or stdin cannot do more than the
-   * sandbox allows, so it no longer asks (Mike 2026-10-23: a read-only `python3 -c` stopped at an "Approve?" card).
+   * sandbox allows, so it no longer asks.
    */
   sandboxed?: boolean;
   /** MCP servers that run outside the sandbox: their tools ask first unless they match a read-only pattern. */
@@ -39,7 +39,7 @@ export interface GuardRules {
   allowTools?: [string, string][];
   /**
    * Trusted-server tools that run without asking only on the operator's own words: the run must be the operator's attended chat and the
-   * call's `evidence` must appear verbatim in their latest message (Mike 2026-10-17: a relay he asked for stopped at an "Approve?" card).
+   * call's `evidence` must appear verbatim in their latest message.
    * Anything else asks as before.
    */
   operatorTools?: [string, string][];
