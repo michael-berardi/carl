@@ -51,7 +51,8 @@ test("an ambiguous final reply is held across outbox flush and channel restart",
 
 test("a refused queued reply becomes held if a later retry loses its response", async (t) => {
   const { instance, make, file } = channel(t);
-  t.mock.method(globalThis, "fetch", async () => Response.json({ ok: false, error_code: 403, description: "refused" }, { status: 403 }));
+  // A refusal Telegram may lift (429); a 403 (bot blocked) is permanent and is never queued (see telegram-outbox-backoff.test.ts).
+  t.mock.method(globalThis, "fetch", async () => Response.json({ ok: false, error_code: 429, description: "Too Many Requests" }, { status: 429 }));
   await (instance as any).deliverFinal({ chunksSent: 0, finish: () => instance.api.sendMessage(1, "answer") }, 1, undefined, "answer");
   assert.equal(JSON.parse(readFileSync(file, "utf8"))[0].status, undefined, "a refusal may be queued");
   let requests = 0, notices = 0;

@@ -158,7 +158,8 @@ for (const outcome of ["delivered", "refused", "unknown"] as const) {
         const [persisted] = JSON.parse(readFileSync(file, "utf8"));
         assert.equal(persisted.firstAt, now, "the fresh window is durable before replay");
         assert.equal(persisted.attempts, 0, "old attempts do not carry into explicit replay");
-        if (outcome !== "delivered") throw new TelegramError("sendMessage", outcome === "unknown" ? 0 : 403, "refused or lost");
+        // "refused" is a refusal Telegram may lift (429); a 403 (bot blocked) is permanent and dropped (telegram-outbox-backoff.test.ts).
+        if (outcome !== "delivered") throw new TelegramError("sendMessage", outcome === "unknown" ? 0 : 429, "refused or lost");
       }
       return { message_id: sent.length };
     });
@@ -173,6 +174,11 @@ for (const outcome of ["delivered", "refused", "unknown"] as const) {
       assert.equal(queue[0].attempts, 1);
       assert.equal(queue[0].status, outcome === "unknown" ? "unknown" : undefined);
       assert.doesNotMatch(sent.at(-1)!, /Resent held reply/);
+      if (outcome === "refused") {
+        // A refusal Telegram may lift backs off before the next try; make it due so the restart drains it.
+        assert.ok(queue[0].nextAt > now, "the refused reply records when it is next due");
+        writeFileSync(file, JSON.stringify([{ ...queue[0], nextAt: now - 1 }]));
+      }
       const restarted = make(); t.after(() => restarted.stop());
       t.mock.method(restarted.api, "sendMessage", async () => ({ message_id: 99 }));
       await restarted.flushOutbox();
