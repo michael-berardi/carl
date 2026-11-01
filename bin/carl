@@ -5,5 +5,9 @@
 self=$(/usr/bin/readlink -f "$0" 2>/dev/null || echo "$0")
 here=$(cd "$(/usr/bin/dirname "$self")" && pwd -P)
 node=node
-[ -x "$here/../node" ] && node="$here/../node"
+if [ -e "$here/../node" ] || [ -L "$here/../node" ]; then
+  # A release's own runtime is there: use it, or stop with the cause; never fall back to another Node silently.
+  if [ -f "$here/../node" ] && [ -x "$here/../node" ]; then node="$here/../node"
+  else echo "carl: $here/../node exists but is not an executable file (broken link?); reinstall this release" >&2; exit 127; fi
+fi
 exec "$node" --experimental-strip-types --no-warnings=ExperimentalWarning "$here/../src/main.ts" "$@"
