@@ -3,6 +3,19 @@ import { writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { htmlToPlain } from "./format.ts";
 
+/** Error codes that prove a request never reached the server: it was not sent, so retrying cannot duplicate it. */
+const PRE_CONNECT_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "EAI_NONAME", "EAI_FAIL", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "ENETDOWN", "EHOSTDOWN", "EADDRNOTAVAIL", "UND_ERR_CONNECT_TIMEOUT", "ERR_TLS_CERT_ALTNAME_INVALID", "CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN"]);
+
+/** The pre-connect error code behind a fetch failure, or undefined when the request may have reached the server. */
+export function preConnectCause(error: unknown): string | undefined {
+  for (let e: any = error, depth = 0; e && depth < 4; e = e.cause, depth++) {
+    const codes = [e.code, ...(Array.isArray(e.errors) ? e.errors.map((x: any) => x?.code) : [])];
+    const hit = codes.find((code) => typeof code === "string" && PRE_CONNECT_CODES.has(code));
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
 export class TelegramError extends Error {
   override name = "TelegramError";
   readonly method: string;
@@ -123,7 +136,11 @@ export class TelegramApi {
         const value: unknown = await res.json();
         json = value && typeof value === "object" ? value : {};
       } catch (e) {
-        if (!read || opts.signal?.aborted || attempt >= retries) throw new TelegramError(method, 0, `network or response error: ${(e as Error).message}`);
+        // A failure before the request left this machine (DNS, refused or unreachable connection, TLS setup) means
+        // Telegram never saw it: that is a plain failure, safe to retry, not an "unknown delivery" to hold for the
+        // operator. Only a failure after the request may have reached Telegram (reset, timeout, bad body) is unknown.
+        const cause = preConnectCause(e);
+        if (!read || opts.signal?.aborted || attempt >= retries) throw new TelegramError(method, 0, `network or response error: ${(e as Error).message}${cause ? ` (${cause}: not sent)` : ""}`, undefined, cause ? "failed" : "unknown");
         await sleep(1_000 * 2 ** attempt, opts.signal);
         continue;
       }

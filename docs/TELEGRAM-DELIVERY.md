@@ -6,8 +6,14 @@ copies, forwards, edits and deletions. Read-only calls retain bounded retries. E
 bounded retries and honor `retry_after`; a delay above 60 seconds is returned to the caller rather than retried early.
 HTML-to-plain-text fallback runs only after an explicit HTTP/Bot API 400 refusal, not a timeout or server error.
 
+A send that fails before the request leaves the machine (DNS failure, connection refused, host or network
+unreachable, connect timeout, TLS setup) never reached Telegram, so it is a plain failure: the outbox retries it with
+backoff, and the error names the cause (`ECONNREFUSED: not sent`). Only a failure after the request may have reached
+Telegram (a reset, a read timeout, an unreadable response, HTTP 5xx) is "unknown".
+
 The gateway outbox keeps uncertain replies with `status: "unknown"` and the request identity. Restarting Carl or
-flushing the outbox does not resend them or expire them after 24 hours. Carl attempts one in-chat notice per held
+flushing the outbox does not resend them. A held reply that is still unresolved 24 hours after it was queued is
+dropped without being resent, with a log line naming it; until then it stays visible in `/status` and `/outbox`. Carl attempts one in-chat notice per held
 outcome (the attempt is persisted first, so a lost notice response is not replayed after restart); `/status` shows the
 held count and IDs for the current chat/topic, and `/outbox` lists them. Check the actual chat before using
 `/outbox resend <id>`: this explicitly authorizes replay and may duplicate an already-delivered reply. It resets

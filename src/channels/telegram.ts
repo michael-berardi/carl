@@ -45,6 +45,9 @@ export interface ChannelStatus {
 // Own-draft edits/deletes are idempotent; only a mutation that can create another message needs replay authorization.
 const unknownSend = (error: unknown) => error instanceof TelegramError && error.status === "unknown" && !/^(?:edit|delete)/.test(error.method);
 
+/** A held reply (delivery unknown) is dropped, never resent, once it is this old. */
+export const HELD_REPLY_TTL_MS = 24 * 3_600_000;
+
 const EDIT_INTERVAL_MS = 1_200;
 const FIRST_DRAFT_MS = 900;
 const TYPING_INTERVAL_MS = 4_500;
@@ -494,7 +497,17 @@ export class TelegramChannel {
   private async flushPass(): Promise<void> {
     const queue = this.loadOutbox();
     for (const item of [...queue]) {
-      if (item.status === "unknown") { await this.noticeHeld(item); continue; } // an ambiguous receipt must be reconciled before replay, even after restart
+      if (item.status === "unknown") {
+        // A held reply is never resent on its own (it may already be in the chat). After 24 h it is stale either way:
+        // drop it with a log line instead of keeping an operator chore in /status forever.
+        if (Date.now() - item.firstAt > HELD_REPLY_TTL_MS) {
+          this.log.warn("held reply with unknown delivery expired after 24 h; not resent", { chatId: item.chatId, id: item.id, requestId: item.requestId, error: item.lastError });
+          queue.splice(queue.indexOf(item), 1);
+          this.saveOutbox();
+          continue;
+        }
+        await this.noticeHeld(item); continue; // an ambiguous receipt must be reconciled before replay, even after restart
+      }
       if (Date.now() - item.firstAt > 24 * 3_600_000) {
         this.log.error("undeliverable reply dropped after 24 h", { chatId: item.chatId, attempts: item.attempts, error: item.lastError });
         queue.splice(queue.indexOf(item), 1);
