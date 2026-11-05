@@ -75,6 +75,46 @@ test("reads retry transient failures, but explicit 429 refusals alone permit mut
   assert.deepEqual(rows(dir).map((r) => r.status), ["delivered"]);
 });
 
+test("unchanged edits are delivered once to callers and the message log", async (t) => {
+  const dir = scratch(t);
+  const api = wired(t, dir);
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    requests++;
+    return Response.json({ ok: false, error_code: 400, description: "Bad Request: message is not modified: specified new message content and reply markup are exactly the same" }, { status: 400 });
+  });
+  const methods = ["editMessageText", "editMessageReplyMarkup", "editMessageCaption"];
+  for (const method of methods) {
+    assert.equal(await api.call(method, { chat_id: 1, message_id: 4, text: "same" }), true);
+  }
+  assert.equal(requests, methods.length);
+  assert.deepEqual(rows(dir).map(({ method, status, ok, unchanged, error, messageId }) => ({ method, status, ok, unchanged, error, messageId })),
+    methods.map((method) => ({ method, status: "delivered", ok: true, unchanged: true, error: null, messageId: 4 })));
+});
+
+test("unchanged classification excludes other methods, errors and ambiguous responses", async (t) => {
+  const dir = scratch(t);
+  const api = wired(t, dir);
+  const cases = [
+    { method: "sendMessage", http: 400, code: 400, description: "Bad Request: message is not modified", status: "failed" },
+    { method: "editMessageMedia", http: 400, code: 400, description: "Bad Request: message is not modified", status: "failed" },
+    { method: "editMessageText", http: 400, code: 400, description: "Bad Request: message to edit not found", status: "failed" },
+    { method: "editMessageText", http: 400, code: 400, description: "Bad Request: message is not modifiedable", status: "failed" },
+    { method: "editMessageText", http: 200, code: 400, description: "Bad Request: message is not modified", status: "failed" },
+    { method: "editMessageText", http: 500, code: 400, description: "Bad Request: message is not modified", status: "unknown" },
+    { method: "editMessageText", http: 503, code: 503, description: "message is not modified", status: "unknown" },
+  ];
+  for (const entry of cases) {
+    t.mock.method(globalThis, "fetch", async () => Response.json({ ok: false, error_code: entry.code, description: entry.description }, { status: entry.http }));
+    await assert.rejects(api.call(entry.method, { chat_id: 1, message_id: 4, text: "same" }));
+  }
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("timeout"); });
+  await assert.rejects(api.call("editMessageCaption", { chat_id: 1, message_id: 4 }));
+  const recorded = rows(dir);
+  assert.deepEqual(recorded.map((row) => row.status), [...cases.map((entry) => entry.status), "unknown"]);
+  assert.ok(recorded.every((row) => row.unchanged !== true && typeof row.error === "string"));
+});
+
 test("definite refusals and multipart failures are observed, including missing identities", async (t) => {
   const dir = scratch(t);
   const api = wired(t, dir);

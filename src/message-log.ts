@@ -212,6 +212,7 @@ function attemptRow(method: string, body: Record<string, unknown>, result: unkno
     requestId: outcome?.requestId ?? randomUUID(), status,
     ok: status === "delivered" ? true : status === "unknown" ? null : false,
     error: outcome?.error ?? null,
+    ...(outcome?.unchanged ? { unchanged: true } : {}),
   };
   // Only an explicitly supplied CLI envelope may replace default provenance.
   Object.assign(row, origin);
