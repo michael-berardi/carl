@@ -68,7 +68,12 @@ export interface TelegramOutcome {
   requestId: string;
   status: "delivered" | "failed" | "unknown";
   error: string | null;
+  unchanged?: true;
 }
+
+// Internal signal: Telegram has confirmed that this edit's requested state already exists.
+class UnchangedEdit extends Error {}
+const IDEMPOTENT_EDIT_METHODS = new Set(["editMessageText", "editMessageReplyMarkup", "editMessageCaption"]);
 
 // Fail closed for unknown methods: only explicitly listed read-only methods can replay an ambiguous request.
 const READ_METHODS = new Set([
@@ -108,6 +113,11 @@ export class TelegramApi {
       outcome = { requestId, status: "delivered", error: null };
       return result;
     } catch (e) {
+      if (e instanceof UnchangedEdit) {
+        result = true as T; // Telegram edit methods may return true for inline messages.
+        outcome = { requestId, status: "delivered", error: null, unchanged: true };
+        return result;
+      }
       if (e instanceof TelegramError) e.requestId = requestId;
       outcome = { requestId, status: e instanceof TelegramError ? e.status : "unknown", error: e instanceof Error ? e.message : String(e) };
       throw e;
@@ -146,6 +156,10 @@ export class TelegramApi {
       }
       if (res.ok && json.ok === true) return json.result as T;
       const code = json.error_code ?? res.status;
+      if (res.status === 400 && json.ok === false && code === 400 && IDEMPOTENT_EDIT_METHODS.has(method)
+          && typeof json.description === "string" && /^(?:bad request:\s*)?message is not modified(?:\b|$)/i.test(json.description)) {
+        throw new UnchangedEdit();
+      }
       const retryAfter = json.parameters?.retry_after;
       if (res.status < 500 && json.ok === false && code === 429 && Number.isFinite(retryAfter) && retryAfter! >= 0 && retryAfter! <= 60 && attempt < retries + 2) {
         await sleep(retryAfter! * 1_000 + 250, opts.signal);
