@@ -3,6 +3,7 @@ import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent
 import { Type } from "@earendil-works/pi-ai";
 import type { Psyche } from "./psyche.ts";
 import type { Scheduler } from "./scheduler.ts";
+import type { PostService } from "./post/service.ts";
 
 export interface Outbox {
   /** Deliver text to a chat ("home" = the configured home chat). Returns a short receipt. */
@@ -11,7 +12,7 @@ export interface Outbox {
 
 const ok = (text: string, details?: unknown) => ({ content: [{ type: "text" as const, text }], details });
 
-export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox): ToolDefinition[] {
+export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, post?: PostService): ToolDefinition[] {
   const decisionLog = defineTool({
     name: "decision_log",
     label: "Decision log",
@@ -111,7 +112,43 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox):
     },
   });
 
-  return [decisionLog, shadowNote, sendMessage, schedule] as ToolDefinition[];
+  // Drafting, dry runs and scheduling only. There is deliberately no way to approve or to post at once from here: the
+  // operator approves a draft's text with `carl post approve`, and scheduling refuses a draft without that approval.
+  const postDraft = post && defineTool({
+    name: "post_draft",
+    label: "Post draft",
+    description:
+      'Social posts. action=draft: write a new draft (name, platform, account, and text or thread parts, optional reply); action=dry_run: render and validate a draft, and with offline=false also check the platform takes the exact text, posting nothing; action=schedule: schedule an approved draft at an ISO time (late="post" posts a missed slot late; the default skips a slot missed by more than the configured window); action=status. You cannot approve a draft or post one now: the operator approves the exact text with `carl post approve`, and scheduling refuses a draft that is not approved or was edited after approval. Accounts come from the operator\'s configuration.',
+    parameters: Type.Object({
+      action: Type.Union(["draft", "dry_run", "schedule", "status"].map((a) => Type.Literal(a))),
+      name: Type.Optional(Type.String({ description: "draft name: lowercase letters, digits, . _ -" })),
+      platform: Type.Optional(Type.String()),
+      account: Type.Optional(Type.String({ description: "an account key from the operator's configuration" })),
+      text: Type.Optional(Type.String()),
+      thread: Type.Optional(Type.Array(Type.String(), { description: "thread parts, in order (instead of text)" })),
+      reply: Type.Optional(Type.String({ description: "first reply under a single post" })),
+      at: Type.Optional(Type.String({ description: "schedule: ISO time" })),
+      late: Type.Optional(Type.Union([Type.Literal("skip"), Type.Literal("post")])),
+      offline: Type.Optional(Type.Boolean({ description: "dry_run: only render and validate (default true)" })),
+    }),
+    async execute(_id, p) {
+      switch (p.action) {
+        case "draft":
+          if (!p.name || !p.platform || !p.account) throw new Error("draft needs name, platform, account and text or thread");
+          return ok(post.createDraft({ name: p.name, platform: p.platform, account: p.account, text: p.text, thread: p.thread, reply: p.reply }));
+        case "dry_run":
+          return ok(await post.dryRun(need(p.name), { offline: p.offline ?? true, named: true }));
+        case "schedule":
+          if (!p.name || !p.at) throw new Error("schedule needs name and at");
+          return ok((await post.schedule(p.name, p.at, { late: p.late, named: true })).text);
+        case "status":
+          return ok(post.status());
+      }
+      throw new Error(`unknown action ${p.action}`);
+    },
+  });
+
+  return [decisionLog, shadowNote, sendMessage, schedule, ...(postDraft ? [postDraft] : [])] as ToolDefinition[];
 }
 
 function need(id: string | undefined): string {

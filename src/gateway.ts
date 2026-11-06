@@ -18,6 +18,9 @@ import { carlTools, type Outbox } from "./tools.ts";
 import { GroupArchive, groupHistoryTool } from "./group-archive.ts";
 import { WorkLedger, workTools } from "./work.ts";
 import { COMMIT, VERSION } from "./version.ts";
+import { PostService } from "./post/service.ts";
+import { defaultRegistry } from "./post/registry.ts";
+import { realRunner } from "./post/runner.ts";
 
 export const ULTRATERM_LEARNING = "Lessons come from UltraTerm Dream and Nightmare: they read Carl's shadow and decision ledgers with every other agent's work, and approved lessons reach Carl through shared memory. Carl runs no separate individuation pass.";
 
@@ -32,6 +35,7 @@ export class Gateway {
   readonly psyche: Psyche;
   readonly brain: Brain;
   readonly scheduler: Scheduler;
+  readonly post: PostService;
   private hooks?: { journal: import("./hooks.ts").HookJournal; resume: () => void };
   telegram?: TelegramChannel;
   private asks?: Asks;
@@ -56,7 +60,7 @@ export class Gateway {
     const outbox: Outbox = { send: (target, text) => this.send(target, text) };
     this.scheduler = new Scheduler(cfg.home, this.log, {
       prompt: (job) => this.runPromptJob(job),
-      builtin: { individuation: () => this.individuate() },
+      builtin: { individuation: () => this.individuate(), post: (job) => this.post.runScheduled(job) },
       // The message is the job's own words. Its internal schedule id/name is not shown to the operator
       // Failures already name the job.
       deliver: async (job, text) => {
@@ -65,6 +69,7 @@ export class Gateway {
       // Command jobs run under the shell sandbox too: the scripts and tools they call are ones the agent can change.
       commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg), cwd: cfg.workspace }),
     });
+    this.post = new PostService({ home: cfg.home, config: cfg.post, run: realRunner, registry: defaultRegistry(), scheduler: this.scheduler });
     const asks = cfg.asks ? new Asks(cfg.home) : undefined;
     this.asks = asks;
     const groupTools = (): ToolDefinition[] => {
@@ -72,7 +77,7 @@ export class Gateway {
       const ledger = new WorkLedger(cfg.home);
       return [groupHistoryTool(new GroupArchive(cfg.home), cfg.telegram.allowFrom, (chat) => ledger.lastQueued(chat)), ...workTools(cfg, ledger)];
     };
-    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
+    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox, Object.keys(cfg.post.accounts).length ? this.post : undefined), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
   }
 
   use(plugin: GatewayPlugin): this {
