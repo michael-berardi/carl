@@ -13,7 +13,11 @@ function files(dir: string): string[] {
     return statSync(path).isDirectory() ? files(path) : /\.(ts|js|sh|md)$/.test(name) ? [path] : [];
   });
 }
-const shipped = [...files(join(root, "src")), ...files(join(root, "bin")), ...files(join(root, "scripts")), join(root, "README.md")];
+const shipped = [
+  ...files(join(root, "src")), ...files(join(root, "bin")), ...files(join(root, "scripts")), join(root, "README.md"),
+  // The post primitive: its docs, changelog and tests ship neutral too (accounts and handles live only in an operator's carl.json).
+  join(root, "docs", "POSTING.md"), join(root, "CHANGELOG.md"), join(root, "test", "post.test.ts"), join(root, "test", "post-fake.ts"),
+];
 
 // Concrete model ids that only an operator should choose. Adapter code for a provider (src/providers/claude-code.ts
 // lists the Claude Code CLI's own models) and the UltraTerm picker contract (src/compat/ultraterm.ts) are the exceptions.
@@ -34,6 +38,17 @@ test("source and README name no person, client or project", () => {
   const hits = shipped
     .flatMap((f) => readFileSync(f, "utf8").split("\n").map((line, i) => [f, i + 1, line] as const))
     .filter(([f, , line]) => PERSONAL.test(line) && !(f.endsWith("src/guard.ts") && line.includes('"/Users"')))
+    .map(([f, n, line]) => `${f.slice(root.length)}:${n}: ${line.trim().slice(0, 120)}`);
+  assert.deepEqual(hits, []);
+});
+
+test("the post primitive ships no account, handle or platform preference: accounts come from operator config only", () => {
+  const post = shipped.filter((f) => f.includes("/src/post/") || f.endsWith("POSTING.md") || f.includes("/test/post"));
+  assert.ok(post.length >= 10, "the post files are covered");
+  const hits = post
+    .flatMap((f) => readFileSync(f, "utf8").split("\n").map((line, i) => [f, i + 1, line] as const))
+    // Only the documentation example handle "example" is allowed in a profile URL; nothing else may look like an account.
+    .filter(([, , line]) => /(?:x|twitter|linkedin|bsky|threads)\.(?:com|app|net)\/@?(?!example\b|<|compose\b|i\/)[A-Za-z0-9_]+/i.test(line) || /@[A-Za-z0-9_]{3,}\b(?<!@example)/.test(line))
     .map(([f, n, line]) => `${f.slice(root.length)}:${n}: ${line.trim().slice(0, 120)}`);
   assert.deepEqual(hits, []);
 });

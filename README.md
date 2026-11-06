@@ -151,6 +151,20 @@ The guard is a tripwire for mistakes and prompt injection, not a proof. The sand
 
 Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 
+## Posting
+
+Carl publishes a social post from a draft file, now or on a schedule, and never without your approval. A draft is a Markdown file with front matter (`platform`, `account`, `text` or `thread`, optional `reply`). Accounts are defined only in your `carl.json` (`post.accounts`), and X is the first platform (driven through an owned `overseer-browser` session).
+
+```
+carl post dry-run <draft>      render, validate and prove the exact text fits the composer; posts nothing
+carl post approve <draft>      you approve the exact text (needs a terminal; editing the draft clears it)
+carl post now <draft>          post it; resumes a half-posted thread without double posting
+carl post schedule <draft> --at <ISO> [--late post]
+carl post status
+```
+
+Scheduled posts survive restarts. A slot missed by more than three hours (`post.missedWindowMinutes`) is skipped, the draft stays Scheduled and the delivered message says so, unless you chose `--late post`. The agent can draft, dry-run and schedule through its `post_draft` tool but cannot approve or post at once. See [docs/POSTING.md](docs/POSTING.md).
+
 ## Configuration
 
 `~/.carl/carl.json` (set `CARL_HOME` to move it). `model` is required; every other key is optional. `carl init` writes the file with an empty `model` for you to fill in.
@@ -196,6 +210,7 @@ carl send -t telegram:<chat> text
 carl ask-post <id>      post an ask's questions (asks module)
 carl reflect            run the individuation pass now
 carl schedules          list schedules
+carl post <command>     draft posts: dry-run, approve, now, schedule, status
 carl app [--install]    open the web app in its own window; --install adds Carl.app (macOS)
 ```
 
