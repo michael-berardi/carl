@@ -31,6 +31,16 @@ export interface Job {
    * sandbox denies, such as cf's login.
    */
   unsandboxed?: boolean;
+  /**
+   * Post jobs only (the post primitive, src/post): fire this draft at `when` ("once <ISO>"). Set by the post service after
+   * it checks the operator's approval, never by the agent's schedule tool or the portal's generic form. The runner checks
+   * the approval again when the job fires. A run that fails is retried (resuming from the profile check, never reposting)
+   * up to POST_ATTEMPTS times; a refusal is final.
+   */
+  post?: { draft: string; late?: "skip" | "post" };
+  attempts?: number;
+  /** Post jobs: a refusal that retrying cannot fix. */
+  noRetry?: boolean;
   createdAt: string;
   lastRunAt?: number;
   lastStatus?: "ok" | "error" | "running";
@@ -48,6 +58,10 @@ export class Scheduler {
   readonly children = new Set<number>();
   /** Agent and built-in runs are cut off after this long. */
   static readonly RUN_TIMEOUT_MS = 30 * 60_000;
+  static readonly POST_ATTEMPTS = 5;
+  static readonly POST_RETRY_MS = 60_000;
+  /** Job ids this instance has seen (loaded, added or removed): others in schedules.json were added by another process (the CLI). */
+  private readonly known = new Set<string>();
   private readonly file: string;
 
   private readonly log: Log;
@@ -71,6 +85,7 @@ export class Scheduler {
     try {
       const raw = JSON.parse(readFileSync(this.file, "utf8"));
       this.jobs = Array.isArray(raw.jobs) ? raw.jobs : [];
+      for (const j of this.jobs) this.known.add(j.id);
     } catch (e) {
       throw new Error(`${this.file} is not valid JSON: ${(e as Error).message}`);
     }
@@ -91,7 +106,21 @@ export class Scheduler {
     }
   }
 
+  /** Jobs another process wrote to schedules.json since we last looked (`carl post schedule` from the CLI). */
+  private adoptExternal(): void {
+    if (!existsSync(this.file)) return;
+    let raw: { jobs?: Job[] };
+    try { raw = JSON.parse(readFileSync(this.file, "utf8")); } catch { return; }
+    for (const job of Array.isArray(raw.jobs) ? raw.jobs : []) {
+      if (this.known.has(job.id)) continue;
+      this.known.add(job.id);
+      try { job.nextRunAt ??= this.next(job, Date.now()); } catch { continue; }
+      this.jobs.push(job);
+    }
+  }
+
   private save(): void {
+    this.adoptExternal();
     const tmp = `${this.file}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify({ jobs: this.jobs }, null, 2) + "\n", { mode: 0o600 });
     renameSync(tmp, this.file);
@@ -102,6 +131,7 @@ export class Scheduler {
     if (once) {
       const at = Date.parse(once[1]);
       if (Number.isNaN(at)) throw new Error(`schedule "${job.when}": bad time`);
+      if (job.post && job.lastRunAt && job.lastStatus !== "ok" && !job.noRetry && (job.attempts ?? 0) < Scheduler.POST_ATTEMPTS) return after + Scheduler.POST_RETRY_MS;
       return job.lastRunAt ? undefined : at;
     }
     return nextRun(parseSchedule(job.when), after, job.lastRunAt);
@@ -148,15 +178,17 @@ export class Scheduler {
     if (changed) this.save();
   }
 
-  add(spec: { name: string; when: string; prompt?: string; command?: string; builtin?: string; deliver: string; onlyIfOutput?: boolean; model?: string; timeoutMinutes?: number }): Job {
+  add(spec: { name: string; when: string; prompt?: string; command?: string; builtin?: string; post?: Job["post"]; deliver: string; onlyIfOutput?: boolean; model?: string; timeoutMinutes?: number }): Job {
     if (!spec.name?.trim()) throw Object.assign(new Error("a schedule needs a name"), { status: 400 });
-    if (!spec.prompt && !spec.command && !spec.builtin) throw Object.assign(new Error("a schedule needs a prompt or a command"), { status: 400 });
-    const job: Job = { id: `j-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, enabled: true, createdAt: new Date().toISOString(), ...spec };
+    if (!spec.prompt && !spec.command && !spec.builtin && !spec.post) throw Object.assign(new Error("a schedule needs a prompt or a command"), { status: 400 });
+    if (spec.post && !/^once\s/i.test(spec.when)) throw Object.assign(new Error('a post schedule fires once: when is "once <ISO time>"'), { status: 400 });
+    const job: Job = { id: `j-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, enabled: true, createdAt: new Date().toISOString(), ...spec, ...(spec.post ? { builtin: "post" } : {}) };
     try {
       job.nextRunAt = this.next(job, Date.now());
     } catch (e) {
       throw Object.assign(new Error((e as Error).message), { status: 400 });
     }
+    this.known.add(job.id);
     this.jobs.push(job);
     this.save();
     return job;
@@ -164,6 +196,7 @@ export class Scheduler {
 
   remove(id: string): boolean {
     const before = this.jobs.length;
+    this.known.add(id);
     this.jobs = this.jobs.filter((j) => j.id !== id);
     this.save();
     return this.jobs.length < before;
@@ -184,7 +217,7 @@ export class Scheduler {
   describe(): string {
     if (!this.jobs.length) return "No schedules.";
     return this.jobs
-      .map((j) => `${j.id} ${j.enabled ? "on " : "off"} ${j.name} [${j.when}] ${j.prompt ? "agent" : j.command ? "command" : j.builtin ?? ""}` +
+      .map((j) => `${j.id} ${j.enabled ? "on " : "off"} ${j.name} [${j.when}] ${j.prompt ? "agent" : j.command ? "command" : j.post ? "post" : j.builtin ?? ""}` +
         ` next=${j.nextRunAt ? new Date(j.nextRunAt).toISOString().slice(0, 16) : "-"} last=${j.lastStatus ?? "-"}${j.lastError ? ` (${j.lastError.slice(0, 80)})` : ""}`)
       .join("\n");
   }
@@ -204,6 +237,7 @@ export class Scheduler {
   }
 
   private async tick(): Promise<void> {
+    try { this.adoptExternal(); } catch (e) { this.log.error("cannot read schedules.json", { error: (e as Error).message }); }
     const now = Date.now();
     for (const job of this.jobs) {
       if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now || this.running.has(job.id)) continue;
@@ -218,6 +252,7 @@ export class Scheduler {
     try {
       job.lastStatus = "running";
       job.lastRunAt = Date.now();
+      if (job.post) job.attempts = (job.attempts ?? 0) + 1;
       this.save();
       this.log.info("schedule started", { id: job.id, name: job.name });
       const timed = <T>(p: Promise<T>) =>
@@ -240,6 +275,7 @@ export class Scheduler {
     } catch (e) {
       job.lastStatus = "error";
       job.lastError = (e as Error).message.slice(0, 500);
+      if (job.post && (e as { final?: boolean }).final) job.noRetry = true;
       output = `Schedule "${job.name}" failed: ${job.lastError}`;
       this.log.error("schedule failed", { id: job.id, error: job.lastError });
     } finally {
@@ -249,7 +285,8 @@ export class Scheduler {
       } catch {
         job.nextRunAt = undefined;
       }
-      if (job.when.startsWith("once")) job.enabled = false;
+      if (job.when.startsWith("once") && job.nextRunAt === undefined) job.enabled = false;
+      if (job.post && job.lastStatus === "error" && job.nextRunAt !== undefined) output += ` It will retry in ${Scheduler.POST_RETRY_MS / 60_000} min, resuming from the profile check; a part already live is not posted again.`;
       try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); }
     }
     // A run that answered only with a silence marker ("[SILENT]", "NO_REPLY", "HEARTBEAT_OK", optionally with trailing

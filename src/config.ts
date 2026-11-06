@@ -42,6 +42,16 @@ export interface ApiConfig {
   keyEnv: string;
 }
 
+export interface PostConfig {
+  /** Folder of draft files (Markdown with YAML front matter). Keep it where the agent cannot write: approvals live in the drafts. */
+  draftsDir: string;
+  /** A scheduled slot missed by more than this many minutes is skipped (the draft stays Scheduled) unless the job says late: post. */
+  missedWindowMinutes: number;
+  /** "auto" uses `retex set --if-hash` when retex is installed; "off" always uses an atomic write with a hash check. */
+  retex: "auto" | "off";
+  accounts: Record<string, { platform: string; profile: string; session: { command: string; timeoutSeconds: number; namePrefix: string } }>;
+}
+
 export interface CarlConfig {
   home: string;
   name: string;
@@ -97,6 +107,9 @@ export interface CarlConfig {
   asks: boolean;
   /** The work module (src/work.ts): the operator's argv that queues a work request (JSON on stdin). Off when unset. */
   work?: { command: string[] };
+  /** The post primitive (src/post): where drafts live, the accounts they may post to, and the missed-slot window.
+   *  Accounts exist only here: a draft names a key, never a login or profile. */
+  post: PostConfig;
   /** Extra shell-guard patterns on top of the built-in ones. */
   guard: { hardline: [string, string][]; dangerous: [string, string][]; allowTools: [string, string][]; operatorTools: [string, string][] };
   /** UltraCompress compaction (deterministic brief, no model call, plus recall): "auto" = on when the binary is installed. */
@@ -244,6 +257,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     hooks: hooksOf(raw.hooks),
     asks: raw.asks === undefined ? false : bool(raw.asks, "asks"),
     work: workOf(raw.work, home),
+    post: postOf(raw.post, home),
     guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous"), allowTools: pairs(raw.guard?.allowTools, "guard.allowTools"), operatorTools: pairs(raw.guard?.operatorTools, "guard.operatorTools") },
     claude: {
       enabled: raw.claude?.enabled === undefined ? true : bool(raw.claude.enabled, "claude.enabled"),
@@ -353,6 +367,38 @@ function workOf(v: unknown, home: string): { command: string[] } | undefined {
   const first = abs(cmd[0], home);
   if (!isAbsolute(first)) throw new ConfigError("work.command[0] must be an absolute path");
   return { command: [first, ...cmd.slice(1)] };
+}
+
+function postOf(v: unknown, home: string): PostConfig {
+  const raw = (v ?? {}) as Record<string, any>;
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new ConfigError("post must be an object");
+  const accounts: PostConfig["accounts"] = {};
+  const given = raw.accounts ?? {};
+  if (typeof given !== "object" || Array.isArray(given)) throw new ConfigError("post.accounts must be an object of key -> {platform, profile, session}");
+  for (const [key, a] of Object.entries(given as Record<string, any>)) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(key)) throw new ConfigError(`post.accounts.${key}: keys use letters, digits, _ and - (max 64)`);
+    const platform = str(a?.platform, "", `post.accounts.${key}.platform`);
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(platform)) throw new ConfigError(`post.accounts.${key}.platform must be a lowercase platform name`);
+    const profile = str(a?.profile, "", `post.accounts.${key}.profile`);
+    if (!/^https?:\/\//.test(profile)) throw new ConfigError(`post.accounts.${key}.profile must be a URL`);
+    const s = a?.session ?? {};
+    accounts[key] = {
+      platform,
+      profile,
+      session: {
+        command: str(s.command, "overseer-browser", `post.accounts.${key}.session.command`),
+        timeoutSeconds: int(s.timeoutSeconds, 60, `post.accounts.${key}.session.timeoutSeconds`, 5),
+        namePrefix: str(s.namePrefix, "carl-post", `post.accounts.${key}.session.namePrefix`),
+      },
+    };
+  }
+  if (raw.retex !== undefined && raw.retex !== "auto" && raw.retex !== "off") throw new ConfigError('post.retex must be "auto" or "off"');
+  return {
+    draftsDir: abs(str(raw.draftsDir, "posts", "post.draftsDir"), home),
+    missedWindowMinutes: int(raw.missedWindowMinutes, 180, "post.missedWindowMinutes", 1),
+    retex: raw.retex ?? "auto",
+    accounts,
+  };
 }
 
 function learningMode(v: unknown, ultraterm: boolean): "carl" | "ultraterm" {
