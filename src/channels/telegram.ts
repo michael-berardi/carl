@@ -15,6 +15,7 @@ import { recordDeliveries } from "../message-log.ts";
 import { GroupArchive } from "../group-archive.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
 import { chunkMarkdown, escapeHtml, htmlToPlain, markdownToTelegramHtml, visibleControls } from "./format.ts";
+import type { FileOutput } from "../tools.ts";
 import { type InlineButton, TelegramApi, TelegramError, type TgCallbackQuery, type TgMessage } from "./telegram-api.ts";
 
 interface OutboxItem { id: string; chatId: number; threadId?: number; chunks: string[]; firstAt: number; attempts: number; lastError?: string; status?: "unknown"; requestId?: string; unknownNoticeAttempted?: boolean; editMessageId?: number; nextAt?: number }
@@ -762,6 +763,32 @@ export class TelegramChannel {
       resolve(choice === "yes" ? "approved" : "denied", String(q.from.id));
       return choice === "yes" ? "Allowed" : "Denied";
     });
+  }
+
+  /**
+   * Send a file: photos (png/jpg/jpeg/webp/gif) go as sendPhoto, falling back to sendDocument when Telegram refuses the
+   * photo; everything else is a document. The caption is plain text; one over Telegram's 1024 limit goes as a normal
+   * message just before the file instead.
+   */
+  async sendFile(chatId: number, file: FileOutput, caption?: string, threadId?: number): Promise<TgMessage[]> {
+    const sent: TgMessage[] = [];
+    let cap = caption?.trim() || undefined;
+    if (cap && cap.length > 1024) {
+      sent.push(...(await this.sendMarkdown(chatId, cap, { threadId })));
+      cap = undefined;
+    }
+    const ext = file.name.toLowerCase().split(".").pop() ?? "";
+    const document = () => this.api.sendDocument(chatId, file.name, file.data, cap, threadId);
+    if (["png", "jpg", "jpeg", "webp", "gif"].includes(ext)) {
+      try {
+        sent.push(await this.api.sendPhoto(chatId, file.name, file.data, cap, threadId));
+      } catch (e) {
+        if (!(e instanceof TelegramError) || e.status !== "failed") throw e;
+        this.log.info("Telegram refused the photo; sending it as a document", { error: e.message });
+        sent.push(await document());
+      }
+    } else sent.push(await document());
+    return sent;
   }
 
   /** Send Markdown as Telegram HTML, chunked; falls back to plain text when Telegram rejects the HTML. */

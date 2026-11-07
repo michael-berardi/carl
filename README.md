@@ -30,25 +30,53 @@ Measured on 2026-10-15 against the Hermes gateway it replaced: the same four que
 
 Prompt tokens include cached tokens. Carl's cached share was about 97%.
 
+## Privacy
+
+Carl is private by default. It runs on your machine and keeps everything there: conversations, logs, schedules, files, logins and the psyche all live in `~/.carl`. There is no account, no analytics, no crash reporting and no usage data. We see nothing.
+
+Carl connects only to:
+
+- **The model providers you sign in to,** with the messages you send them.
+- **The chat platforms you turn on** (Telegram, Slack, Discord).
+- **Its own GitHub releases, once a day,** to tell you when an update is out. That request asks for the latest version number and sends nothing about you or your machine. Turn it off with `"update": {"check": false}` or `CARL_OFFLINE=1`.
+
+It also switches off what the libraries underneath would send:
+
+- **Pi SDK:** runs offline (`PI_OFFLINE=1`). It makes no version checks, install reports or model-catalog fetches, and adds no attribution headers to your provider requests.
+- **Claude Code:** runs with its documented opt-outs set (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, surveys and auto-update off).
+
+Your provider still sees what you send it, under its own terms. Choose a provider whose data policy you trust.
+
 ## Install
 
 ```sh
 git clone https://github.com/michael-berardi/carl && cd carl
 npm ci --omit=dev && npm link      # puts `carl` on your PATH
-carl init                          # creates ~/.carl with a starter carl.json
+carl setup
 ```
 
-Then:
+`carl setup` walks you through the first run:
 
-1. Put `TELEGRAM_BOT_TOKEN` and `CARL_API_KEY` (16 or more characters) in `~/.carl/.env` and `chmod 600` it.
-2. Add your Telegram user id to `telegram.allowFrom` and `telegram.homeChat` in `~/.carl/carl.json`. Carl answers nobody else.
-3. Choose a model. Carl has no built-in model: sign in to the provider you want, then set `"model": "provider/model"` (and, optionally, `fallbackModels`) in `~/.carl/carl.json`.
-   - **Most providers:** `carl login` lists them; `carl login <provider>` signs in (an API key or OAuth).
-   - **Claude:** install Claude Code and run `claude auth login`.
-   - **Anything else:** `carl login` lists the providers and which are already set up; `carl login <provider>` signs in (add `--api-key` for a key). Logins are stored in `~/.carl/agent/auth.json`; set `agentDir` to share another app's folder instead.
-4. Run `carl doctor`, then `carl gateway`.
+1. **Channel.** For Telegram, paste the token from @BotFather. Carl checks it, then asks you to send your bot a message, so it knows who you are. It answers nobody else.
+2. **Secrets.** Tokens and a generated API key go into `~/.carl/.env`, readable only by you.
+3. **Model.** Carl has no built-in model. Pick a provider you are already signed in to, or sign in from setup. Claude runs through your Claude Code login (`claude auth login`).
+4. **Check.** `carl doctor` runs and tells you what, if anything, still needs attention.
+
+Then run `carl gateway`. Re-run `carl setup` at any time; it fills in only what is missing.
 
 Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (or *Add to Dock*) turns it into a desktop app window.
+
+Prefer to edit files? `carl init` without a terminal writes a starter `~/.carl/carl.json`. Put `TELEGRAM_BOT_TOKEN` and `CARL_API_KEY` in `~/.carl/.env` (`chmod 600`), add your Telegram user id to `telegram.allowFrom` and `telegram.homeChat`, and set `"model": "provider/model"`. `carl login` lists providers and signs in to one.
+
+## Updates
+
+Carl checks for a new release once a day. When one is out, it tells you in your Telegram home chat, in `carl status` and in the web app.
+
+- **From your phone:** send `/update`. Carl installs it and restarts on it as soon as nothing is running.
+- **From a terminal:** `carl update` installs it; `carl update --check` only checks.
+- **Undo:** `carl update --rollback` goes back to the release you had before.
+
+Each update is tested before Carl switches to it: if its dependencies do not install or it does not start, nothing changes and you get the error. Set `"update": {"auto": true}` to install new releases without asking.
 
 ## What you get
 
@@ -58,8 +86,9 @@ Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (o
   - A message sent while Carl is working joins the current turn instead of waiting in a queue.
   - `/stop`, `/new`, `/status`, `/model`, `/compact` and `/mirror` work at any time.
   - **Team groups:** list a group under `telegram.groups` with its members (`{"chat": -100…, "members": {"<user id>": "Alex (editor)"}}`) and Carl serves that team too. In a group it answers only when addressed (an @mention, its name as a word (`name` in carl.json, e.g. "Carl, ..."), a reply to one of its messages, or a command; set `listenAll` to answer everything), and every message names its sender. Members are never the operator: their words cannot approve operator-only tools, approval cards still go to the operator, and they can use only `/help`.
-  - Voice notes go through any speech-to-text command you configure; photos and files go to the model.
-  - Slack connects over Socket Mode (no public URL needed). Discord connects over its Gateway.
+  - Voice notes go through any speech-to-text command you configure; photos and files go to the model, on Telegram, Slack and Discord alike.
+  - Carl can send files and images back (a chart, a report, a screenshot) into the same chat or thread, or to your home chat. It can only send files its sandbox lets it read, so its own secrets never leave.
+  - Slack connects over Socket Mode (no public URL needed) and answers in threads. Discord connects over its Gateway and keeps each thread its own conversation.
   - Replies Telegram explicitly refuses are retried for 24 hours; ambiguous deliveries are held for reconciliation, never automatically replayed. If Carl restarts mid-reply, it picks the message up again when its answer had not run any tool yet, and otherwise tells you which message was interrupted (it never repeats an action on its own).
 - **Web app:**
   - Chat with any conversation, including the Telegram one.
@@ -201,6 +230,8 @@ MCP servers go in `~/.carl/mcp.json` (the same format as Claude Desktop). Give t
 
 ```
 carl gateway            run Telegram, Slack, Discord, the API, the web app and schedules
+carl setup              guided first run: channel, secrets, model, check
+carl update [--check|--rollback]  install the latest release, only check, or go back
 carl init               create ~/.carl with a starter carl.json
 carl login [provider]   list model providers, or sign in to one
 carl logout <provider>  remove a provider's stored credentials

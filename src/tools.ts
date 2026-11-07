@@ -1,18 +1,45 @@
 // Carl's own tools. Everything else comes from Pi (read, bash, edit, write), skills, extensions and MCP.
+import { readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import type { Psyche } from "./psyche.ts";
 import type { Scheduler } from "./scheduler.ts";
 import type { PostService } from "./post/service.ts";
+import { readSandboxedBytes } from "./sandbox.ts";
+
+export interface FileOutput {
+  name: string;
+  data: Uint8Array;
+}
 
 export interface Outbox {
-  /** Deliver text to a chat ("home" = the configured home chat). Returns a short receipt. */
-  send(target: string, text: string): Promise<string>;
+  /** Deliver text to a chat ("home" = the configured home chat), optionally with a file. Returns a short receipt. */
+  send(target: string, text: string, file?: FileOutput): Promise<string>;
+}
+
+const MAX_OUTBOUND_FILE_BYTES = 20 * 1024 * 1024;
+
+/** Read an outbound file under the shell sandbox profile, so the agent cannot send Carl's secrets. */
+function readOutboundFile(path: string, profile?: string): FileOutput {
+  return { name: basename(path), data: readSandboxedBytes(profile, path, MAX_OUTBOUND_FILE_BYTES) };
+}
+
+/** The current conversation key ("here"): the session folder holds the original key the gateway drives that chat with. */
+function conversationKey(ctx: unknown): string {
+  const dir = (ctx as any)?.sessionManager?.getSessionDir?.();
+  if (typeof dir === "string") {
+    try {
+      const key = readFileSync(join(dir, "key"), "utf8").trim();
+      if (key) return key;
+    } catch { /* not a session dir (in-memory session, say): nothing to send "here" from */ }
+  }
+  throw new Error('no active conversation to send to ("here")');
 }
 
 const ok = (text: string, details?: unknown) => ({ content: [{ type: "text" as const, text }], details });
 
-export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, post?: PostService): ToolDefinition[] {
+export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, post?: PostService, sandboxProfile?: string): ToolDefinition[] {
   const decisionLog = defineTool({
     name: "decision_log",
     label: "Decision log",
@@ -64,13 +91,15 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, 
     name: "send_message",
     label: "Send message",
     description:
-      "Send a message now, outside the current reply: progress on long work, an alert, or a result to the operator's home chat. target is \"home\" or a Telegram chat id. Your normal reply already reaches the current chat; do not duplicate it.",
+      'Send a message now, outside the current reply: progress on long work, an alert, or a result to the operator\'s home chat. target is "home", "here" (the current conversation), or a Telegram chat id / Slack or Discord channel. Your normal reply already reaches the current chat; do not duplicate it.',
     parameters: Type.Object({
-      target: Type.String({ description: '"home" or a numeric chat id' }),
+      target: Type.String({ description: '"home", "here" (this conversation), or a chat id/channel' }),
       text: Type.String({ description: "Markdown text" }),
+      file: Type.Optional(Type.String({ description: "Absolute path of a file or image to attach" })),
     }),
-    async execute(_id, p) {
-      return ok(await outbox.send(p.target, p.text));
+    async execute(_id, p, _signal, _update, ctx) {
+      const target = p.target === "here" ? conversationKey(ctx) : p.target;
+      return ok(await outbox.send(target, p.text, p.file !== undefined ? readOutboundFile(p.file, sandboxProfile) : undefined));
     },
   });
 

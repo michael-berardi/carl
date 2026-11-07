@@ -1,4 +1,5 @@
 // Portal API (/carl/*) and the static web app (/). The page is public; every API call needs the bearer key.
+import { availableUpdate } from "../update.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,6 +76,7 @@ export function mountPortal(api: ApiServer, gw: Gateway): void {
       conversationsOpen: brain.activeConversations(),
       schedules: scheduler.list().length,
       lessons: psyche.read("integrated.md").split("\n").filter((l) => l.trim().startsWith("-")).length,
+      updateAvailable: availableUpdate(cfg.home) ?? null,
     }));
 
   api.route("GET", /^\/carl\/conversations$/, (_q, res) => {

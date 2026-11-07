@@ -8,7 +8,7 @@
 //
 // Everything else keeps the operator's normal permissions: Carl is an agent that does real work, not a toy box.
 // Where Seatbelt is unavailable (Linux, Windows) the environment scrubbing still applies, and the gap is logged.
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -213,6 +213,40 @@ export function readSandboxed(profile: string, path: string, maxBytes = 1 << 20)
   if (r.error) throw new Error(`cannot read ${path}: ${r.error.message}`);
   if (r.status !== 0) throw new Error(`cannot read ${path}: ${String(r.stderr).trim() || `exit ${r.status}`}`);
   return String(r.stdout);
+}
+
+/** Read bounded binary data under the shell profile, or directly when no profile is available. */
+export function readSandboxedBytes(profile: string | undefined, path: string, maxBytes: number): Buffer {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("invalid file size limit");
+  const tooLarge = () => new Error(`file ${path} exceeds ${maxBytes} byte limit`);
+  if (profile) {
+    const r = spawnSync(SANDBOX_EXEC, ["-f", profile, "/bin/cat", path], { maxBuffer: Math.max(maxBytes + 1, 65536), timeout: 3_000, env: { PATH: "/usr/bin:/bin" } });
+    if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS" || r.stdout?.length > maxBytes) throw tooLarge();
+    if (r.error) throw new Error(`cannot read ${path}: ${r.error.message}`);
+    if (r.status !== 0) throw new Error(`cannot read ${path}: ${String(r.stderr).trim() || `exit ${r.status}`}`);
+    return r.stdout;
+  }
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    if (!fstatSync(fd).isFile()) throw new Error("not a regular file");
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total <= maxBytes) {
+      const chunk = Buffer.allocUnsafe(Math.min(65536, maxBytes + 1 - total));
+      const n = readSync(fd, chunk, 0, chunk.length, null);
+      if (!n) break;
+      total += n;
+      if (total > maxBytes) throw tooLarge();
+      chunks.push(chunk.subarray(0, n));
+    }
+    return Buffer.concat(chunks, total);
+  } catch (e) {
+    if ((e as Error).message === `file ${path} exceeds ${maxBytes} byte limit`) throw e;
+    throw new Error(`cannot read ${path}: ${(e as Error).message}`);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /** argv that runs a program under the profile (or as-is where Seatbelt is unavailable). */

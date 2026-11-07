@@ -142,6 +142,8 @@ export interface CarlConfig {
   agentWritable: string[];
   /** MCP servers (by name in pi/mcp.json) that run outside the sandbox: the operator's own control tools. */
   trustedMcp: string[];
+  /** Self-update (src/update.ts): a daily look at the latest GitHub release (check), and installing it without asking (auto). */
+  update: { check: boolean; auto: boolean };
 }
 
 export class ConfigError extends Error {
@@ -272,6 +274,10 @@ export function loadConfig(home = carlHome()): CarlConfig {
     shellEnv: strList(raw.shellEnv, "shellEnv"),
     agentWritable: strList(raw.agentWritable, "agentWritable").map((p) => abs(p, home)),
     trustedMcp: strList(raw.trustedMcp, "trustedMcp"),
+    update: {
+      check: raw.update?.check === undefined ? true : bool(raw.update.check, "update.check"),
+      auto: raw.update?.auto === undefined ? false : bool(raw.update.auto, "update.auto"),
+    },
     ultracompress: raw.ultracompress === "off" || raw.ultracompress === false ? "off" : "auto",
     hooks: hooksOf(raw.hooks),
     asks: raw.asks === undefined ? false : bool(raw.asks, "asks"),

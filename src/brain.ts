@@ -285,6 +285,9 @@ export class Brain extends EventEmitter {
   private mcpLoader?: (o: { agentDir: string; cwd: string; projectTrusted: boolean }) => any;
 
   async init(): Promise<void> {
+    // Offline (src/privacy.ts), the SDK skips a package extension that is not installed yet without a word: say so.
+    for (const p of this.cfg.extensions) if (/^(npm|git):/.test(p) && process.env.PI_OFFLINE)
+      this.log.warn("a package extension is not downloaded while Carl runs offline; install it once with PI_OFFLINE=0", { extension: p });
     mkdirSync(this.piDir, { recursive: true, mode: 0o700 });
     // Carl itself runs from a folder only it can write: its unsandboxed children (UltraTerm helpers, trusted MCP
     // servers, UltraCompress) never start in the agent's workspace, where a planted config file would be read.
@@ -462,7 +465,7 @@ export class Brain extends EventEmitter {
     }
     const model = this.model(this.sessionModelRef());
     const budget = Math.min(this.cfg.contextBudget, model.contextWindow || this.cfg.contextBudget);
-    const settingsManager = SettingsManager.inMemory({
+    const settingsManager = SettingsManager.inMemory({ enableInstallTelemetry: false,
       compaction: {
         enabled: true,
         // Pi compacts when context > window - reserve. Reserve the gap so Carl compacts at its own budget.
@@ -944,7 +947,7 @@ export class Brain extends EventEmitter {
       thinkingLevel: "medium",
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(this.cfg.workspace),
-      settingsManager: SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 } } as any),
+      settingsManager: SettingsManager.inMemory({ enableInstallTelemetry: false, retry: { enabled: true, maxRetries: 2 } } as any),
       tools: opts.tools ?? [],
     });
     try {

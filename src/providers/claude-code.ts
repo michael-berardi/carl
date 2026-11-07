@@ -12,6 +12,7 @@
 //     one upstream request. The relay captures the streamed response, which is authoritative.
 //   - Carl runs the agent loop, executes tools, compacts and persists; Claude Code is only the model client.
 import { type ChildProcess, spawn } from "node:child_process";
+import { CLAUDE_PRIVATE_ENV } from "../privacy.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -842,8 +843,8 @@ async function attemptOnce(
     DISABLE_AUTO_COMPACT: "1",
     DISABLE_COMPACT: "1",
     CLAUDE_CODE_TOTAL_TOKENS_REMINDER: "off",
-    DISABLE_AUTOUPDATER: "1",
-    DISABLE_FEEDBACK_COMMAND: "1",
+    // No usage metrics, error reports, surveys, update checks or other nonessential traffic from the CLI (src/privacy.ts).
+    ...CLAUDE_PRIVATE_ENV,
     // The relay is on loopback: never send it through a proxy.
     NO_PROXY: [env.NO_PROXY, "127.0.0.1", "localhost"].filter(Boolean).join(","),
     no_proxy: [env.no_proxy, "127.0.0.1", "localhost"].filter(Boolean).join(","),

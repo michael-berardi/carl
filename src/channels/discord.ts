@@ -4,6 +4,9 @@ import type { Brain } from "../brain.ts";
 import { visibleControls } from "./format.ts";
 import type { Log } from "../log.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
+import type { ImageContent } from "@earendil-works/pi-ai";
+import type { FileOutput } from "../tools.ts";
+import { downloadCapped, MAX_FILE_BYTES, saveMedia } from "./attachment.ts";
 
 export interface DiscordConfig {
   enabled: boolean;
@@ -35,12 +38,14 @@ export class DiscordChannel {
   private readonly brain: Brain;
   private readonly log: Log;
 
-  constructor(cfg: DiscordConfig, token: string, brain: Brain, log: Log) {
+  constructor(cfg: DiscordConfig, token: string, brain: Brain, log: Log, mediaDir: string) {
     this.cfg = cfg;
     this.token = token;
     this.brain = brain;
     this.log = log;
+    this.mediaDir = mediaDir;
   }
+  private readonly mediaDir: string;
 
   async rest<T = any>(method: string, path: string, body?: unknown): Promise<T> {
     for (let attempt = 0; ; attempt++) {
@@ -142,8 +147,23 @@ export class DiscordChannel {
     const isDm = !d.guild_id;
     if (!isDm && !(d.mentions ?? []).some((m: any) => m.id === this.botId)) return; // in servers, only when mentioned
     let text = String(d.content ?? "").replace(new RegExp(`<@!?${this.botId}>`, "g"), "").trim();
-    if (!text) return;
+    const images: ImageContent[] = [];
+    const notes: string[] = [];
+    for (const a of d.attachments ?? []) {
+      try {
+        if (!a.url) throw new Error("no downloadable url");
+        if (typeof a.size === "number" && a.size > MAX_FILE_BYTES) throw new Error(`attachment exceeds ${MAX_FILE_BYTES} byte limit`);
+        const data = await downloadCapped(a.url, MAX_FILE_BYTES);
+        const path = saveMedia(this.mediaDir, a.filename ?? "file", data);
+        if (a.content_type?.startsWith("image/")) images.push({ type: "image", data: data.toString("base64"), mimeType: a.content_type });
+        else notes.push(`[file received: ${path}]`);
+      } catch (e) {
+        notes.push(`[attachment could not be fetched: ${(e as Error).message}]`);
+      }
+    }
+    if (!text && !images.length && !notes.length) return;
     const key = `discord:${isDm ? "dm:" : ""}${d.channel_id}`;
+    if (notes.length || images.length) text = [...notes, text].filter(Boolean).join("\n");
     this.known.add(d.channel_id);
     if (isDm) this.dms.add(d.channel_id);
     if (/^stop$/i.test(text)) return void (await this.post(d.channel_id, (await this.brain.stop(key)) ? "Stopping." : "Nothing is running."));
@@ -165,7 +185,7 @@ export class DiscordChannel {
       if (!draft) draft = (await this.rest<{ id: string }>("POST", `/channels/${d.channel_id}/messages`, { content: body, message_reference: { message_id: d.id, fail_if_not_exists: false }, allowed_mentions: { parse: [] } })).id;
       else await this.rest("PATCH", `/channels/${d.channel_id}/messages/${draft}`, { content: body, allowed_mentions: { parse: [] } }).catch(() => {});
     };
-    const result = await this.brain.ask(key, { text, preface, source: "api" }, {
+    const result = await this.brain.ask(key, { text, preface, source: "api", images: images.length ? images : undefined }, {
       onText: (t) => {
         latest = t;
         if (timer) return;
@@ -188,13 +208,43 @@ export class DiscordChannel {
     return (await this.rest<{ id: string }>("POST", `/channels/${channel}/messages`, { content, components, allowed_mentions: { parse: [] } })).id;
   }
 
-  async deliver(target: string, markdown: string): Promise<number> {
+  async deliver(target: string, markdown: string, file?: FileOutput): Promise<number> {
     const channel = target === "home" ? this.cfg.homeChannel : target;
     if (!channel) throw new Error("discord.homeChannel is not configured");
     if (channel !== this.cfg.homeChannel && !this.known.has(channel)) throw new Error(`Discord channel ${channel} is not the home channel or a conversation an allowed user started`);
+    if (file) {
+      await this.sendFile(channel, file, markdown);
+      return 1;
+    }
     const chunks = splitDiscord(markdown);
     for (const c of chunks) await this.post(channel, c);
     return chunks.length;
+  }
+
+  /** Send a file: multipart POST with files[0] and payload_json. */
+  async sendFile(channel: string, file: FileOutput, content?: string): Promise<string> {
+    for (let attempt = 0; ; attempt++) {
+      const form = new FormData();
+      form.set("payload_json", JSON.stringify({ content, allowed_mentions: { parse: [] } }));
+      form.set("files[0]", new Blob([new Uint8Array(file.data)]), file.name);
+      const res = await fetch(`${this.cfg.apiBase}/channels/${channel}/messages`, {
+        method: "POST",
+        headers: { authorization: `Bot ${this.token}` },
+        body: form,
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (res.status === 429 && attempt < 3) {
+        const j: any = await res.json().catch(() => ({}));
+        await new Promise((r) => setTimeout(r, Math.ceil((j.retry_after ?? 1) * 1_000)));
+        continue;
+      }
+      if (!res.ok) {
+        const j: any = await res.json().catch(() => ({}));
+        throw new Error(`Discord POST /channels/${channel}/messages failed (${res.status}): ${j.message ?? "error"}`);
+      }
+      const json: any = await res.json();
+      return json.id as string;
+    }
   }
 
   async requestApproval(channel: string, command: string, reason: string): Promise<"approved" | "denied" | "timeout"> {

@@ -1,4 +1,5 @@
-// carl <command>: gateway | init | status | doctor | ask | send | reflect | schedules
+// carl <command>: gateway | setup | update | init | status | doctor | ask | send | reflect | schedules
+import "./privacy.ts"; // first: private defaults before any SDK module loads
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -22,6 +23,8 @@ import { spawnSync } from "node:child_process";
 const HELP = `carl ${VERSION}: the minimal bot gateway
 
   carl gateway [--verbose]          run the gateway (channels, API, webhooks, schedules)
+  carl setup                        interactive first-time setup
+  carl update [--check|--rollback]   check for a new Carl release, install it, or roll back
   carl init                         create CARL_HOME (${carlHome()}) with a starter carl.json
   carl status [--json]              the running gateway's status
   carl doctor                       check config, model, credentials and channels
@@ -55,7 +58,12 @@ async function main(argv: string[]): Promise<number> {
     case "gateway":
       return gateway(rest);
     case "init":
+      if (process.stdin.isTTY && process.stdout.isTTY) return (await import("./setup.ts")).setup({ init, doctor });
       return init();
+    case "setup":
+      return (await import("./setup.ts")).setup({ init, doctor });
+    case "update":
+      return (await import("./update.ts")).updateCommand(rest);
     case "status":
       return status(rest);
     case "doctor":
@@ -100,6 +108,25 @@ async function gateway(args: string[]): Promise<number> {
     await gw.stop(signal).catch((e) => console.error(`carl: stop failed: ${(e as Error).message}`));
     process.exit(gw.exitCode);
   };
+  // SIGUSR2 (sent by `carl update` and /update): restart on the installed code once nothing is running. The process
+  // re-executes its launcher in place, so the pid a supervisor watches stays the same; failing that, it exits 75 to be restarted.
+  process.on("SIGUSR2", () => {
+    if (exiting) return;
+    gw.log.info("restart for an update requested; waiting until nothing is running");
+    const wait = setInterval(async () => {
+      if (exiting || gw.brain.busyCount() || gw.scheduler.runningCount()) return;
+      clearInterval(wait);
+      exiting = true;
+      await gw.stop("restart for an update").catch((e) => console.error(`carl: stop failed: ${(e as Error).message}`));
+      const entry = process.env.CARL_ENTRY;
+      try {
+        if (entry && existsSync(entry)) process.execve!("/bin/sh", ["/bin/sh", entry, "gateway", ...args], process.env);
+      } catch (e) {
+        console.error(`carl: cannot re-execute ${entry}: ${(e as Error).message}`);
+      }
+      process.exit(75);
+    }, 2_000);
+  });
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGHUP", () => void shutdown("SIGHUP"));
@@ -163,7 +190,7 @@ Next:
   return 0;
 }
 
-function status(args: string[]): number {
+async function status(args: string[]): Promise<number> {
   const cfg = loadConfig();
   const file = join(cfg.home, "state", "status.json");
   if (!existsSync(file)) {
@@ -183,6 +210,9 @@ function status(args: string[]): number {
     console.log(`${alive && s.state === "running" ? "running" : "not running"} (pid ${s.pid}, updated ${age}s ago)
 model ${s.model} · runs ${s.activeRuns} · conversations ${s.conversations}
 telegram ${s.telegram?.state}${s.telegram?.error ? ` (${s.telegram.error})` : ""} · api ${s.api?.state}${s.api?.port ? ` :${s.api.port}` : ""}`);
+    const { availableUpdate } = await import("./update.ts");
+    const next = availableUpdate(cfg.home);
+    if (next) console.log(`update available: ${next} (you run ${s.version}); install with carl update`);
   }
   return alive && s.state === "running" ? 0 : 3;
 }
@@ -255,6 +285,33 @@ async function doctor(): Promise<number> {
       return `@${me.username} via ${new URL(c.telegram.apiBase).host}, ${c.telegram.allowFrom.length} allowed user(s)`;
     });
   }
+  if (c.slack.enabled) {
+    await check("slack", async () => {
+      const token = secret(c.home, c.slack.botTokenEnv, c.envFiles);
+      if (!token) throw new Error(`${c.slack.botTokenEnv} is not set`);
+      const app = secret(c.home, c.slack.appTokenEnv, c.envFiles);
+      if (!app) throw new Error(`${c.slack.appTokenEnv} is not set`);
+      const { slackCall } = await import("./setup.ts");
+      await slackCall(c.slack.apiBase, "auth.test", token);
+      await slackCall(c.slack.apiBase, "apps.connections.open", app);
+      return "tokens valid";
+    });
+  }
+  if (c.discord.enabled) {
+    await check("discord", async () => {
+      const token = secret(c.home, c.discord.tokenEnv, c.envFiles);
+      if (!token) throw new Error(`${c.discord.tokenEnv} is not set`);
+      const { discordMe } = await import("./setup.ts");
+      await discordMe(c.discord.apiBase, token);
+      return "token valid";
+    });
+  }
+  await check("updates", async () => {
+    const { checksEnabled, latestRelease, isNewer } = await import("./update.ts");
+    if (!checksEnabled(c)) return "checks off (update.check false or CARL_OFFLINE)";
+    const rel = await latestRelease();
+    return isNewer(rel.version, VERSION) ? `${rel.version} available (you run ${VERSION}): carl update` : `${VERSION} is the latest`;
+  }, true);
   if (c.api.enabled) {
     await check("api key", () => {
       const key = secret(c.home, c.api.keyEnv, c.envFiles);

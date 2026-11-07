@@ -10,19 +10,44 @@ export class FakeSlack {
   private ts = 1000;
   acks: string[] = [];
   port = 0;
+  /** Bytes posted to upload_url, in order. */
+  uploads: { id: string; data: Buffer }[] = [];
+  /** Files served to the channel as attachments (url_private_download). */
+  private media = new Map<string, Buffer>();
+  private uploadSeq = 1;
 
   async start(): Promise<void> {
     this.server = createServer((req, res) => {
+      const url = req.url ?? "";
+      if (url.startsWith("/upload/")) {
+        const chunks: Buffer[] = [];
+        req.on("data", (b: Buffer) => chunks.push(b));
+        req.on("end", () => { this.uploads.push({ id: url.slice(8), data: Buffer.concat(chunks) }); res.writeHead(200); res.end(); });
+        return;
+      }
+      if (url.startsWith("/download/")) {
+        const name = decodeURIComponent(url.slice(10));
+        const data = this.media.get(name);
+        if (!data) { res.writeHead(404); return res.end(); }
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        res.end(data);
+        return;
+      }
       let raw = "";
       req.on("data", (b) => (raw += b));
       req.on("end", () => {
-        const method = (req.url ?? "").split("/").pop()!;
+        const method = url.split("/").pop()!;
         const body = raw ? JSON.parse(raw) : {};
         this.calls.push({ method, body });
         const reply = (o: any) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true, ...o })); };
         if (method === "auth.test") return reply({ user_id: "UBOT" });
         if (method === "apps.connections.open") return reply({ url: `ws://127.0.0.1:${this.port}/socket` });
         if (method === "chat.postMessage") return reply({ ts: String(this.ts++) + ".0001", channel: body.channel });
+        if (method === "files.getUploadURLExternal") {
+          const fileId = "F" + String(this.uploadSeq++);
+          return reply({ upload_url: `http://127.0.0.1:${this.port}/upload/${fileId}`, file_id: fileId });
+        }
+        if (method === "files.completeUploadExternal") return reply({ file: { id: body.files?.[0]?.id ?? "F1" } });
         return reply({});
       });
     });
@@ -58,6 +83,9 @@ export class FakeSlack {
 
   get base(): string { return `http://127.0.0.1:${this.port}/api`; }
 
+  attach(name: string, data: Buffer): void { this.media.set(name, data); }
+  downloadUrl(name: string): string { return `http://127.0.0.1:${this.port}/download/${encodeURIComponent(name)}`; }
+
   push(frame: any): void {
     const data = Buffer.from(JSON.stringify(frame));
     const head = data.length < 126 ? Buffer.from([0x81, data.length]) : data.length < 65536 ? Buffer.from([0x81, 126, data.length >> 8, data.length & 255]) : Buffer.concat([Buffer.from([0x81, 127]), (() => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(data.length)); return b; })()]);
@@ -72,6 +100,13 @@ export class FakeSlack {
   message(user: string, text: string, channel = "D1", channelType = "im"): string {
     const envelope = `env-${Math.random().toString(36).slice(2)}`;
     this.push({ type: "events_api", envelope_id: envelope, payload: { event: { type: "message", user, text, channel, ts: `${this.ts++}.0002`, channel_type: channelType } } });
+    return envelope;
+  }
+
+  /** A file_share message event (subtype file_share) in a DM or channel. */
+  fileShare(user: string, files: { url_private_download?: string; mimetype?: string; name?: string; size?: number }[], text = "", channel = "D1", channelType = "im"): string {
+    const envelope = `env-${Math.random().toString(36).slice(2)}`;
+    this.push({ type: "events_api", envelope_id: envelope, payload: { event: { type: "message", subtype: "file_share", user, text, channel, ts: `${this.ts++}.0002`, channel_type: channelType, files } } });
     return envelope;
   }
 

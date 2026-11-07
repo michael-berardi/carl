@@ -13,6 +13,18 @@ async function runtime(cfg: CarlConfig): Promise<ModelRuntime> {
   return ModelRuntime.create({ authPath: join(cfg.agentDir, "auth.json"), modelsPath: join(cfg.agentDir, "models.json") });
 }
 
+/** Providers that already have a login, for setup's model step. */
+export async function configuredProviders(cfg: CarlConfig): Promise<string[]> {
+  const rt = await runtime(cfg);
+  return rt.getProviders().map((p: any) => p.id as string).filter((id: string) => rt.getProviderAuthStatus(id).configured).sort();
+}
+
+/** Model ids one provider offers (from the SDK's bundled catalog; nothing is fetched). */
+export async function providerModels(cfg: CarlConfig, provider: string): Promise<string[]> {
+  const rt = await runtime(cfg);
+  return rt.getModels(provider).map((model) => model.id);
+}
+
 /** A stable id for this installation, which some providers (OpenAI's Codex login) ask for. */
 function deviceId(cfg: CarlConfig): string {
   const file = join(cfg.home, "state", "device-id");
