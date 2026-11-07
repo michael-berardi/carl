@@ -53,7 +53,7 @@ const approve = async (r: ReturnType<typeof rig>, name: string) => { await r.svc
 const posted = (x: FakeX) => x.live.length;
 /** The operator's side: the card a request made is shown, and the operator answers it (as the gateway's Telegram buttons do). */
 async function operator(r: ReturnType<typeof rig>, kind: CardKind, name: string, o: { answer?: "approved" | "denied" | "timeout"; url?: string; between?: () => void } = {}) {
-  const asked = r.svc.requestCard(kind, name, { by: "operator", url: o.url });
+  const asked = r.svc.requestCard(kind, name, { by: "api", url: o.url });
   const shown: string[] = []; const told: string[] = [];
   const desk = new CardDesk(r.svc, (text) => { shown.push(text); o.between?.(); return Promise.resolve({ answer: o.answer ?? "approved", by: "4242" }); }, (m) => told.push(m));
   await desk.pump();
@@ -615,7 +615,7 @@ test("an approval is good for 24 h and for one post", async () => {
   assert.equal(posted(r3.x), 1);
 });
 
-test("C4(a): the sandbox profile denies the configured browser control directory and socket whenever posting is configured, and no approval key file exists to deny", () => {
+test("C4(a): the sandbox profile denies the configured browser control directory and socket whenever post.browser is set (with or without accounts), and no approval key file exists to deny", async () => {
   const home = mkdtempSync(join(tmpdir(), "carl-post-sb-"));
   process.env.HOME = home;
   const dir = join(canonical(home), "relay-runtime");
@@ -625,16 +625,34 @@ test("C4(a): the sandbox profile denies the configured browser control directory
   const cfg = loadConfig(home);
   const profile = buildProfile(cfg);
   assert.ok(profile.split("\n").some((l) => l.startsWith("(deny file-read* (subpath") && l.includes(`(subpath "${dir}")`)), "the browser control folder is unreadable");
-  assert.ok(profile.includes(`(remote unix-socket (subpath "${dir}"))`) || secretDirs(cfg).includes(join(home, "relay-runtime")));
+  assert.ok(profile.includes(`(remote unix-socket (subpath "${dir}"))`), "connecting to sockets in the folder is refused");
+  assert.ok(profile.split("\n").some((l) => l.startsWith("(deny file-write*") && l.includes(`(subpath "${dir}")`)), "the folder cannot be written (no socket swap)");
+  assert.ok(secretDirs(cfg).includes(join(home, "relay-runtime")));
   assert.ok(profile.includes('(deny network-outbound (remote unix-socket (path-regex #"relay[^/]*\\.sock$")))'), "the relay socket is refused by name");
   assert.ok(!profile.includes("post-approval"), "there is no approval key file to protect: it lives in the gateway's memory");
   assert.ok(!secretFiles(cfg).some((f) => f.includes("post-approval")));
   // Nothing is assumed: with no post.browser config no directory or socket name is invented.
   conf({ accounts: acct });
   assert.deepEqual(secretDirs(loadConfig(home)), []);
-  // Without accounts nothing about the browser is added.
+  // The live shape: post.browser set and NO accounts. The relay is closed all the same.
+  conf({ browser: { controlDirs: [join(home, "relay-runtime")], socketPattern: "relay[^/]*\\.sock$", commandPattern: "overseer-browser" } });
+  const live = loadConfig(home);
+  const liveProfile = buildProfile(live);
+  assert.ok(liveProfile.includes(`(remote unix-socket (subpath "${dir}"))`), "no accounts: the folder is still refused");
+  assert.ok(liveProfile.includes('(path-regex #"relay[^/]*\\.sock$")'), "no accounts: the socket pattern is still refused");
+  assert.ok(liveProfile.includes('(remote ip "localhost:9222")'), "no accounts: the debug port is still refused");
+  assert.ok(secretDirs(live).includes(join(home, "relay-runtime")));
+  const { Brain } = await import("../src/brain.ts");
+  assert.equal((Brain.prototype as any).browserCommandPattern.call({ cfg: live }), "overseer-browser", "no accounts: the command hardline still applies");
+  // With neither accounts nor post.browser nothing about the browser is added.
   writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b" }));
   assert.ok(!buildProfile(loadConfig(home)).includes("relay-runtime"));
+  assert.ok(!buildProfile(loadConfig(home)).includes("9222"));
+  // A pattern that is not a regular expression is refused at config load.
+  conf({ browser: { socketPattern: "(unclosed" } });
+  assert.throws(() => loadConfig(home), /post\.browser\.socketPattern is not a valid regular expression/);
+  conf({ browser: { commandPattern: "[bad" } });
+  assert.throws(() => loadConfig(home), /post\.browser\.commandPattern is not a valid regular expression/);
   // The guard: shell commands naming the configured browser tooling are a hardline refusal; unaffected when posting is not configured.
   const rules = { denyBrowserCommand: "overseer-browser", secretPaths: [dir] };
   for (const c of ["overseer-browser --session x eval 1", "~/.local/bin/overseer-browser sessions list"]) assert.equal(classifyCommand(c, rules).level, "hardline", c);
@@ -732,6 +750,7 @@ test("the CLI: clear-pending only asks; the pending record goes when the operato
   const denied = new CardDesk(r.svc, () => Promise.resolve({ answer: "denied" }), () => {});
   await denied.pump();
   assert.equal(readDraft(p).pendingPart, 0, "denied");
+  r.clock.now += 7 * 3600_000; // past the deny cool-down
   assert.equal(new CardStore(r.home, () => r.clock.now).list().length, 0, "an answered card is gone");
   await operator(r, "clear-pending", "cp");
   assert.equal(readDraft(p).pendingPart, undefined);
@@ -915,11 +934,12 @@ test("the CLI only asks the gateway: now/approve raise cards and post nothing; t
   assert.match(out.join("\n"), /cli\s+Scheduled\s+x\/main approved at 2026-03-10T15:00:00.000Z/);
   // `now` only raises a card: nothing is posted until the operator presses it, and a denied press posts nothing.
   assert.equal(await run("now", "cli"), 0);
-  assert.match(out.join("\n"), /waits for your answer.*\n?.*posted|waits for your answer/);
+  assert.match(out.join("\n"), /card \w+ \(post-now cli\.md\) waits for your answer on the operator channel.*Nothing is posted until you answer it/);
   assert.equal(posted(r.x), 0, "the CLI posted nothing");
   assert.equal(r.x.clicks, 0);
   await new CardDesk(r.svc, (text) => { assert.match(text, /POST NOW/); return Promise.resolve({ answer: "denied" }); }, () => {}).pump();
   assert.equal(posted(r.x), 0, "denied");
+  r.clock.now += 7 * 3600_000; // past the deny cool-down
   assert.equal(await run("now", "cli"), 0);
   const told: string[] = [];
   await new CardDesk(r.svc, () => Promise.resolve({ answer: "approved", by: "4242" }), (m) => told.push(m)).pump();
@@ -974,21 +994,22 @@ test("R1: the relay's runtime root, the descriptor folder and env-named override
   writeFileSync(descriptor, JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: root, token_sha256: "0".repeat(64) }));
   const accounts = { main: ACCOUNT };
   const b = { ...BROWSER, controlDirs: [join(home, "managed")], descriptors: [descriptor], descriptorEnv: ["RELAY_CONNECTION"], runtimeEnv: ["RELAY_RUNTIME"] };
-  const dirs = browserControlDirs(accounts, b, {}, home);
+  const dirs = browserControlDirs(b, {}, home);
   assert.ok(dirs.includes(root) || dirs.includes(canon(root)), `runtime_root is denied: ${dirs}`);
   assert.ok(dirs.includes(join(home, ".config", "relay")), "the descriptor folder is denied");
   assert.ok(dirs.includes(join(home, "managed")), "a configured folder is denied");
   // Env-named descriptors and runtimes are followed too.
   const other = join(home, "elsewhere"); mkdirSync(other);
   writeFileSync(join(other, "conn.json"), JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: join(home, ".root-two") }));
-  const more = browserControlDirs(accounts, b, { RELAY_CONNECTION: join(other, "conn.json"), RELAY_RUNTIME: join(home, ".root-three") }, home);
+  const more = browserControlDirs(b, { RELAY_CONNECTION: join(other, "conn.json"), RELAY_RUNTIME: join(home, ".root-three") }, home);
   for (const d of [".root-two", ".root-three"]) assert.ok(more.some((m) => m.endsWith(d)), d);
   assert.ok(more.includes(other));
-  assert.deepEqual(browserControlDirs({}, b, {}, home), [], "nothing without accounts");
-  assert.deepEqual(browserControlDirs(accounts, BROWSER, {}, home), [], "nothing is assumed without config");
+  assert.deepEqual(browserControlDirs(b, {}, home).sort(), browserControlDirs(b, {}, home).sort(), "stable");
+  assert.ok(browserControlDirs(b, {}, home).includes(join(home, "managed")), "applies with no accounts (the live shape)");
+  assert.deepEqual(browserControlDirs(BROWSER, {}, home), [], "nothing is assumed without config");
   // A descriptor that is garbage, or whose runtime_root is relative, adds nothing and breaks nothing.
   writeFileSync(descriptor, JSON.stringify({ runtime_root: "relative/path" }));
-  assert.ok(!browserControlDirs(accounts, b, {}, home).some((d) => d.endsWith("relative/path")));
+  assert.ok(!browserControlDirs(b, {}, home).some((d) => d.endsWith("relative/path")));
 });
 
 test("R1: under the rendered profile a client cannot connect to an overseer-browser socket, wherever it is", { skip: process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec") ? "needs macOS sandbox-exec" : false }, async () => {
@@ -1039,7 +1060,8 @@ test("R2: asking never approves; only the operator's answer to the card does, bo
   for (const answer of ["denied", "timeout"] as const) {
     await new CardDesk(r.svc, (text) => { shown.push(text); return Promise.resolve({ answer }); }, () => {}).pump();
     assert.equal(readDraft(p).approved, undefined, answer);
-    r.svc.requestCard("approve", "card", { by: "operator" });
+    r.clock.now += 7 * 3600_000; // past the deny cool-down
+    r.svc.requestCard("approve", "card", { by: "api" });
   }
   // The card carries the exact text, account, profile URL and text hash.
   assert.match(shown[0], /Exactly this/);
@@ -1090,10 +1112,11 @@ test("R4: a part already on the profile is never clicked again; record-live reco
   await assert.rejects(r.svc.postNow("known"), (e: any) => e.final === true && /already live at .*record-live/.test(e.message));
   assert.equal(r.x.clicks, 0);
   // record-live: the URL must be this account's status; the operator answers the card.
-  assert.throws(() => r.svc.requestCard("record-live", "known", { by: "operator", url: `https://x.com/${"someone"}/status/123` }), /not https:\/\/x\.com\/example\/status/);
-  assert.throws(() => r.svc.requestCard("record-live", "known", { by: "operator", url: "https://evil.example/example/status/123" }), /is not/);
+  assert.throws(() => r.svc.requestCard("record-live", "known", { by: "api", url: `https://x.com/${"someone"}/status/123` }), /not https:\/\/x\.com\/example\/status/);
+  assert.throws(() => r.svc.requestCard("record-live", "known", { by: "api", url: "https://evil.example/example/status/123" }), /is not/);
   const url = `https://x.com/example/status/${id}`;
   const denied = await operator(r, "record-live", "known", { url, answer: "denied" });
+  r.clock.now += 7 * 3600_000; // past the deny cool-down
   assert.equal(readDraft(p).status, "Ready");
   assert.match(denied.shown[0], new RegExp(url.replace(/[./]/g, "\\$&")));
   assert.match(denied.shown[0], /Posted by hand/);
@@ -1109,7 +1132,7 @@ test("R4: a part already on the profile is never clicked again; record-live reco
   await operator(r, "record-live", "thr", { url: `https://x.com/example/status/${id + 10n}` });
   assert.equal(readDraft(t).threadUrls.length, 1);
   assert.equal(readDraft(t).status, "Ready");
-  assert.throws(() => r.svc.requestCard("record-live", "thr", { by: "operator", url: `https://x.com/example/status/${id}` }), /not newer/);
+  assert.throws(() => r.svc.requestCard("record-live", "thr", { by: "api", url: `https://x.com/example/status/${id}` }), /not newer/);
   // Bare domains cannot be matched on a live post (X turns them into links): refused at render.
   r.write("bare", 'text: "Read example.org/story today"');
   await assert.rejects(r.svc.dryRun("bare", { offline: true }), /link without a scheme \(example\.org\)/);
@@ -1415,7 +1438,10 @@ test("F4: a post card is not collapsed, shows who asked, is never dropped when l
   const r = rig();
   r.write("who", 'text: "Who asked"');
   const asked = await operator(r, "approve", "who", { answer: "denied" });
-  assert.match(asked.shown[0], /Asked by: you/);
+  assert.match(asked.shown[0], /Asked by: API \(carl post\)/);
+  assert.doesNotMatch(asked.shown[0], /Asked by: you/);
+  assert.throws(() => r.svc.requestCard("approve", "who", { by: "api" }), /denied this request .* not asked again/, "the cool-down covers API-raised cards too");
+  r.clock.now += 7 * 3600_000;
   r.svc.requestCard("approve", "who", { by: "agent" });
   const agent = new CardDesk(r.svc, (text) => { agent.seen.push(text); return Promise.resolve({ answer: "denied" as const }); }, () => {}) as CardDesk & { seen: string[] };
   agent.seen = [];
@@ -1437,7 +1463,7 @@ test("F4: a post card is not collapsed, shows who asked, is never dropped when l
 test("F5: a card whose message could not be sent is shown again after a back-off, not stranded", async () => {
   const r = rig();
   r.write("flaky", 'text: "Flaky"');
-  r.svc.requestCard("approve", "flaky", { by: "operator" });
+  r.svc.requestCard("approve", "flaky", { by: "api" });
   let sends = 0; const told: string[] = [];
   const desk = new CardDesk(r.svc, () => { sends++; return sends === 1 ? Promise.reject(new Error("telegram down")) : Promise.resolve({ answer: "approved" as const, by: "4242" }); }, (m) => { told.push(m); });
   await desk.pump();
@@ -1466,7 +1492,7 @@ test("F6: the ledger's hashes are checked: a part live with other text is refuse
   let text = readFileSync(p, "utf8").replace('"Two"', '"Two edited"');
   writeFileSync(p, text);
   await assert.rejects(r.svc.approve("thr6", "alice"), /part 2 went live with different text/);
-  assert.throws(() => r.svc.requestCard("approve", "thr6", { by: "operator" }), /part 2 went live with different text/);
+  assert.throws(() => r.svc.requestCard("approve", "thr6", { by: "api" }), /part 2 went live with different text/);
   await assert.rejects(r.svc.postNow("thr6"), /edited after it was approved/);
   // Reposting identical text from the same path under a new approval is refused, not marked Posted with the old URL.
   const q = r.write("again", 'text: "Same text"');
@@ -1574,7 +1600,7 @@ test("F5: a permanent Telegram refusal of a card stops the retries and says so o
   const r = rig();
   r.write("perm", 'text: "Perm"');
   await approve(r, "perm");
-  r.svc.requestCard("approve", "perm", { by: "operator" });
+  r.svc.requestCard("approve", "perm", { by: "api" });
   const told: string[] = []; let tries = 0;
   const desk = new CardDesk(r.svc, () => { tries++; return Promise.reject(new TelegramError("sendMessage", 400, "Bad Request: chat not found")); }, (m) => told.push(m));
   await desk.pump();
@@ -1601,4 +1627,45 @@ test("docs: POSTING.md describes the gateway-only post guard, names no coordinat
   assert.doesNotMatch(doc, /guard\.operatorTools.*OFF|posting\s+is OFF/s);
   assert.equal(doc.split("request** an approval card").length, 2, "the duplicate paragraph is gone");
   assert.doesNotMatch(doc, /never clicked\./);
+});
+
+test("0.9.2: a POST NOW card shows a skipped dry run; an API-set slot notifies the operator; the CLI sends absolute draft paths", async () => {
+  const r = rig();
+  r.write("sk", 'text: "Skip it"');
+  await r.svc.approve("sk", "alice");
+  await r.svc.dryRun("sk");
+  r.svc.requestCard("post-now", "sk", { by: "api", skipDryRun: true });
+  const shown: string[] = [];
+  await new CardDesk(r.svc, (text) => { shown.push(text); return Promise.resolve({ answer: "denied" as const }); }, () => {}).pump();
+  assert.match(shown[0], /SKIPS THE LIVE DRY RUN/);
+  assert.match(shown[0], /Asked by: API \(carl post\)/);
+  r.clock.now += 7 * 3600_000;
+  // A slot set through the API tells the operator, as the agent's does.
+  const notes: string[] = [];
+  const svc = sibling(r.svc, { ...r.svc.deps, notify: (m) => { notes.push(m); } });
+  r.write("sl", 'text: "Slot"');
+  await svc.approve("sl", "alice"); await svc.dryRun("sl");
+  const reply = await handlePost(svc, { cmd: "schedule", draft: "sl", at: new Date(r.clock.now + 3600_000).toISOString() });
+  assert.equal(reply.ok, true, reply.text);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /API caller .* scheduled sl\.md/);
+  // `carl post now ./x.md` resolves against the caller's folder; a bare name stays a name.
+  const seen: string[] = [];
+  const io: PostCliIo = { out: () => {}, err: () => {} };
+  const api = async (q: any) => { seen.push(q.draft); return { ok: true, text: "" }; };
+  await postCommand(["now", "./x.md"], io, api); await postCommand(["now", "name"], io, api);
+  assert.equal(seen[0], join(process.cwd(), "x.md"));
+  assert.equal(seen[1], "name");
+});
+
+test("0.9.2: a live readOnlyHint false overrides a cached true; an unlisted tool falls back to the cache", async () => {
+  const { Brain } = await import("../src/brain.ts");
+  const mk = (hint: boolean | undefined) => ({
+    cfg: { trustedMcp: ["srv"] },
+    conversations: new Map(hint === undefined ? [] : [["k", { session: { getAllTools: () => [{ name: "mcp__srv__lookup", annotations: { readOnlyHint: hint } }] } }]]),
+  });
+  const hinted = (hint: boolean | undefined) => (Brain.prototype as any).hintedReadOnly.call(mk(hint), "srv/lookup");
+  assert.equal(hinted(false), false);
+  assert.equal(hinted(true), true);
+  assert.equal(hinted(undefined), undefined);
 });

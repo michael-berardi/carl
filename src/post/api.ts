@@ -21,16 +21,16 @@ export async function handlePost(svc: PostService, req: PostApiRequest): Promise
     switch (req.cmd) {
       case "status": return { ok: true, text: svc.status() };
       case "dry-run": return { ok: true, text: await svc.dryRun(need(), { offline: req.offline }) };
-      case "now": return { ok: true, text: svc.requestCard("post-now", need(), { by: "operator", skipDryRun: req.skipDryRun }) };
+      case "now": return { ok: true, text: svc.requestCard("post-now", need(), { by: "api", skipDryRun: req.skipDryRun }) };
       case "approve":
-      case "clear-pending": return { ok: true, text: svc.requestCard(req.cmd, need(), { by: "operator" }) };
+      case "clear-pending": return { ok: true, text: svc.requestCard(req.cmd, need(), { by: "api" }) };
       case "record-live":
         if (!req.url) throw new PostError("carl post record-live <draft> <url>: give the post's URL", true);
-        return { ok: true, text: svc.requestCard("record-live", need(), { by: "operator", url: req.url }) };
+        return { ok: true, text: svc.requestCard("record-live", need(), { by: "api", url: req.url }) };
       case "schedule": {
         if (!req.at) throw new PostError("carl post schedule needs --at <ISO time>", true);
         if (req.late !== undefined && req.late !== "post" && req.late !== "skip") throw new PostError('--late is "post" or "skip"', true);
-        return { ok: true, text: (await svc.schedule(need(), req.at, { late: req.late as "post" | "skip" | undefined, skipDryRun: req.skipDryRun })).text };
+        return { ok: true, text: (await svc.schedule(need(), req.at, { late: req.late as "post" | "skip" | undefined, api: true, skipDryRun: req.skipDryRun })).text };
       }
     }
     throw new PostError(`unknown post command "${req.cmd}"`, true);
