@@ -217,7 +217,12 @@ async function doctor(): Promise<number> {
     return `${c.model} (window ${m.contextWindow.toLocaleString()} tokens; Carl compacts at ${Math.min(c.contextBudget, m.contextWindow).toLocaleString()})`;
   });
   for (const [i, ref] of [c.model, ...c.fallbackModels].entries()) {
-    const provider = ref.split("/")[0];
+    const provider = ref.split("/")[0].trim();
+    if (!provider) {
+      if (i === 0) console.log('skip  login: set "model" first; then sign in with `carl login <provider>`');
+      else console.log(`warn  login: fallbackModels[${i - 1}] has no provider`);
+      continue;
+    }
     await check(`login ${provider}`, async () => {
       if (provider === "claude-code") {
         const dirs = c.claude.configDirs.length ? c.claude.configDirs : [undefined];
