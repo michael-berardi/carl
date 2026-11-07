@@ -264,6 +264,8 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     `(deny file-read* ${secrets.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
     ...(secretDirs(cfg).length ? [`(deny file-read* ${secretDirs(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`] : []),
     `(deny file-write* ${[...secrets, ...secrets.flatMap(ancestors)].map(sbLiterals).join(" ")})`,
+    // The approval key is refused by name in any CARL_HOME (a sibling instance's profile, a read tool): it must not reach a transcript.
+    `(deny file-read* (regex #"/post-approval\\.key$"))`,
     `(deny process-exec ${NO_EXEC.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
     "(deny appleevent-send)",
     // No signals to processes outside this command (Carl itself, the operator's programs); its own children are fine.
@@ -281,7 +283,7 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
       .map((re) => `(deny network-outbound (remote unix-socket (path-regex ${re})))`),
     // overseer-browser's control socket, wherever its runtime lives (the managed one or an operator-relay's runtime_root): refused by
     // name, so a descriptor that points somewhere new, or a copy of the socket, gains nothing. Only while posting is configured.
-    ...(Object.keys(cfg.post.accounts).length ? [`(deny network-outbound (remote unix-socket (path-regex #"overseer-browser[^/]*\\.sock$")))`] : []),
+    ...(Object.keys(cfg.post.accounts).length ? [`(deny network-outbound (remote unix-socket (path-regex #"overseer-browser[^/]*\\.sock$")))`, `(deny network-outbound (remote ip "localhost:9222"))`] : []),
     ...["/.gnupg", "/.ssh", "/Library/Group Containers", "/Library/Containers", "/.orbstack", "/.local/share/containers", "/.lima", "/.rd"]
       .map((d) => `(deny network-outbound (remote unix-socket (subpath ${sbString(homedir() + d)})))`),
     `(deny file-read* ${credentialStores(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,

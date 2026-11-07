@@ -689,10 +689,12 @@ export class TelegramChannel {
   }
 
   private readonly approvals = new Map<string, (answer: "approved" | "denied", by?: string) => void>();
+  /** The message each post card's buttons are on: a press must come from that message. */
+  private readonly approvalMsgs = new Map<string, number>();
 
   /** Ask the operator to approve a dangerous command with buttons. Fails closed after 5 minutes. */
   async requestApproval(chatId: number, command: string, reason: string): Promise<"approved" | "denied" | "timeout"> {
-    const id = Math.random().toString(36).slice(2, 10);
+    const id = randomBytes(6).toString("hex");
     if (!this.callbacks.has("ca")) await this.requestApprovalSetup();
     // Shown exactly, escaped, with invisible and direction-changing characters made visible; never truncated:
     // a command too long to read in chat is not approvable in chat.
@@ -704,9 +706,10 @@ export class TelegramChannel {
       return "denied";
     }
     const msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: "Run once", callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
+    this.approvalMsgs.set(id, msg.message_id);
     const answer = await new Promise<"approved" | "denied" | "timeout">((resolve) => {
-      const timer = setTimeout(() => { this.approvals.delete(id); resolve("timeout"); }, 300_000);
-      this.approvals.set(id, (a) => { clearTimeout(timer); this.approvals.delete(id); resolve(a); });
+      const timer = setTimeout(() => { this.approvals.delete(id); this.approvalMsgs.delete(id); resolve("timeout"); }, 300_000);
+      this.approvals.set(id, (a) => { clearTimeout(timer); this.approvals.delete(id); this.approvalMsgs.delete(id); resolve(a); });
     });
     const mark = answer === "approved" ? "✅ approved" : answer === "denied" ? "⛔ denied" : "⌛ expired (not run)";
     await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: msg.message_id, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
@@ -720,21 +723,25 @@ export class TelegramChannel {
    * 6 hours and then expires unanswered.
    */
   async requestCard(chatId: number, text: string, yes: string): Promise<{ answer: "approved" | "denied" | "timeout"; by?: string }> {
-    const id = Math.random().toString(36).slice(2, 10);
+    const id = randomBytes(6).toString("hex");
     if (!this.callbacks.has("ca")) await this.requestApprovalSetup();
-    const html = `<b>Post approval</b>\n<blockquote expandable><pre>${escapeHtml(visibleControls(text))}</pre></blockquote>`;
-    if (html.length > 4_000) {
-      await this.api.sendMessage(chatId, "Refused without asking: this card is too long to review here. Shorten the draft.").catch(() => {});
-      return { answer: "denied" };
+    // Never collapsed and never dropped: the whole card is shown, in as many messages as it takes, buttons on the last.
+    const pieces = splitCard(visibleControls(text), 3000);
+    let msg: TgMessage | undefined;
+    for (let i = 0; i < pieces.length; i++) {
+      const last = i === pieces.length - 1;
+      const html = `<b>Post approval${pieces.length > 1 ? ` (${i + 1}/${pieces.length})` : ""}</b>\n<pre>${escapeHtml(pieces[i])}</pre>`;
+      msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", ...(last ? { buttons: [[{ text: yes, callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] } : {}) });
     }
-    const msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: yes, callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
+    const buttonMsg = msg!;
+    this.approvalMsgs.set(id, buttonMsg.message_id);
     const result = await new Promise<{ answer: "approved" | "denied" | "timeout"; by?: string }>((resolve) => {
-      const timer = setTimeout(() => { this.approvals.delete(id); resolve({ answer: "timeout" }); }, 6 * 3600_000);
-      this.approvals.set(id, (a, by) => { clearTimeout(timer); this.approvals.delete(id); resolve({ answer: a, by }); });
+      const timer = setTimeout(() => { this.approvals.delete(id); this.approvalMsgs.delete(id); resolve({ answer: "timeout" }); }, 6 * 3600_000);
+      this.approvals.set(id, (a, by) => { clearTimeout(timer); this.approvals.delete(id); this.approvalMsgs.delete(id); resolve({ answer: a, by }); });
     });
     const mark = result.answer === "approved" ? "✅ allowed" : result.answer === "denied" ? "⛔ denied" : "⌛ expired (nothing done)";
-    await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: msg.message_id, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
-    await this.api.sendMessage(chatId, mark, { replyTo: msg.message_id, silent: true }).catch(() => {});
+    await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: buttonMsg.message_id, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
+    await this.api.sendMessage(chatId, mark, { replyTo: buttonMsg.message_id, silent: true }).catch(() => {});
     return result;
   }
 
@@ -743,6 +750,8 @@ export class TelegramChannel {
       const [, reqId, choice] = data.split(":");
       const resolve = this.approvals.get(reqId);
       if (!resolve) return "This approval has expired.";
+      const bound = this.approvalMsgs.get(reqId);
+      if (bound !== undefined && q.message?.message_id !== bound) return "This button is not on that card.";
       resolve(choice === "yes" ? "approved" : "denied", String(q.from.id));
       return choice === "yes" ? "Allowed" : "Denied";
     });
@@ -879,4 +888,19 @@ class Draft {
       this.chunksSent++;
     }
   }
+}
+
+/** Split a card's text into pieces of at most `max` characters, on blank lines or line ends where it can (a single longer line is cut). */
+export function splitCard(text: string, max: number): string[] {
+  const out: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf("\n\n", max);
+    if (cut < max / 2) cut = rest.lastIndexOf("\n", max);
+    if (cut < max / 2) cut = max;
+    out.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).replace(/^\n+/, "");
+  }
+  out.push(rest);
+  return out;
 }

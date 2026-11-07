@@ -97,11 +97,12 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, 
           return ok(`Scheduled ${job.id} (${job.when}); next run ${new Date(job.nextRunAt!).toLocaleString()}.`);
         }
         case "remove":
+          if (scheduler.get(need(p.id)).post) throw new Error("that is a scheduled post: only the operator can remove it (`carl post`, the portal); an operator's slot is not yours to cancel unseen");
           return ok(scheduler.remove(need(p.id)) ? "Removed." : `No job ${p.id}.`);
         case "pause":
         case "resume":
           // A post job is the operator's: resuming one would fire it, so only the operator (`carl post`, the portal) can.
-          if (p.action === "resume" && scheduler.get(need(p.id)).post) throw new Error("that is a scheduled post: only the operator can resume or run it (`carl post schedule`)");
+          if (scheduler.get(need(p.id)).post) throw new Error("that is a scheduled post: only the operator can pause or resume it (`carl post schedule`)");
           scheduler.setEnabled(need(p.id), p.action === "resume");
           return ok(p.action === "pause" ? "Paused." : "Resumed.");
         case "run": {
