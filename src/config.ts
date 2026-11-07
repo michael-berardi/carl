@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { agentCanWrite } from "./post/key.ts";
-import { postingBlockedReason } from "./post/safety.ts";
+import { postingBlockedReason, readOnlyCache } from "./post/safety.ts";
 
 export interface TelegramConfig {
   enabled: boolean;
@@ -112,7 +112,7 @@ export interface CarlConfig {
   /** The asks module (src/asks.ts): put questions to people in a chat and hand their answers on. Off by default. */
   asks: boolean;
   /** The work module (src/work.ts): the operator's argv that queues a work request (JSON on stdin). Off when unset. */
-  work?: { command: string[] };
+  work?: { command: string[]; /** The operator states the queue script runs its jobs in a sandbox; Carl cannot check. Without it posting stays off while a work group exists. */ sandboxed?: boolean };
   /** The post primitive (src/post): where drafts live, the accounts they may post to, and the missed-slot window.
    *  Accounts exist only here: a draft names a key, never a login or profile. */
   post: PostConfig;
@@ -275,7 +275,12 @@ export function loadConfig(home = carlHome()): CarlConfig {
     throw new ConfigError(`trustedMcp: "${n}" must be 1-32 letters, digits, - or _ (longer names get shortened tool names the guard could not attribute)`);
   if ((cfg.home + "/").startsWith(cfg.workspace.replace(/\/+$/, "") + "/"))
     throw new ConfigError(`workspace (${cfg.workspace}) must not contain CARL_HOME (${cfg.home}): the agent would be able to rewrite Carl's own configuration`);
-  cfg.post.blocked = postingBlockedReason(cfg.post.accounts, cfg.guard.allowTools, cfg.trustedMcp);
+  const listed = readOnlyCache(cfg.home);
+  cfg.post.blocked = postingBlockedReason({
+    accounts: cfg.post.accounts, allowTools: cfg.guard.allowTools, operatorTools: cfg.guard.operatorTools, trustedMcp: cfg.trustedMcp,
+    readOnly: listed.readOnly, listed: listed.listed,
+    workGroup: !!cfg.work && cfg.telegram.groups.some((g) => g.work), workSandboxed: cfg.work?.sandboxed === true,
+  });
   cfg.post.agentWritable = [cfg.workspace, join(cfg.home, "memory"), join(cfg.home, "media"), join(cfg.home, "spill"), ...cfg.agentWritable];
   if (agentCanWrite(cfg.post.draftsDir, cfg.post.agentWritable, cfg.home))
     throw new ConfigError(`post.draftsDir (${cfg.post.draftsDir}) is in a folder the agent can write (workspace, memory, media, spill or agentWritable): it could forge an approval or edit a scheduled draft. Choose a folder outside the agent's areas`);
@@ -370,13 +375,13 @@ function hooksOf(v: unknown): Record<string, { prompt: string; deliver: string; 
   return out;
 }
 
-function workOf(v: unknown, home: string): { command: string[] } | undefined {
+function workOf(v: unknown, home: string): { command: string[]; sandboxed?: boolean } | undefined {
   if (v === undefined || v === null || v === false) return undefined;
   const cmd = (v as any)?.command;
   if (!Array.isArray(cmd) || !cmd.length || cmd.some((s) => typeof s !== "string" || !s)) throw new ConfigError("work.command must be an argv list of strings");
   const first = abs(cmd[0], home);
   if (!isAbsolute(first)) throw new ConfigError("work.command[0] must be an absolute path");
-  return { command: [first, ...cmd.slice(1)] };
+  return { command: [first, ...cmd.slice(1)], ...((v as any).sandboxed === true ? { sandboxed: true } : {}) };
 }
 
 function postOf(v: unknown, home: string): PostConfig {

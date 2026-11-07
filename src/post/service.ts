@@ -295,7 +295,7 @@ export class PostService {
       urls = led.live;
       // The same approval that posted them: a stale editor save lost the record. A different approval of the same text from the same
       // file is a repost (the old post may have been deleted): Carl will not tell the two apart on its own.
-      if ((led.approved ?? "") !== (d.approved ?? "")) recoverBlock = `Carl's own record shows ${led.live.length} part(s) of this exact text already posted from this file under an earlier approval (${led.live[0]}). If that post was deleted and you want it posted again, save the draft under a new name or change the text; if the draft only lost its record, run \`carl post record-live\` for the part after the ones it lists`;
+      if ((led.approved ?? "") !== (d.approved ?? "")) recoverBlock = `Carl's own record shows ${led.live.length} part(s) of this exact text already posted from this file under an earlier approval (${led.live[0]}). If that post was deleted and you want it posted again, save the draft under a new name or change the text; if the draft only lost its record, open the profile and restore it by hand: put the live URLs in the draft's thread_urls (comma-separated, in order), their hashes in part_hashes, and status: Posted when every part is live (\`carl post record-live\` records only the next part, so it cannot help when that part is not live or every part already is)`;
     }
     for (let i = 0; i < led.hashes.length && i < rendered.sequence.length; i++) {
       if (led.hashes[i] !== partHash(rendered.sequence[i])) throw new PostError(`${name}: part ${i + 1} went live with different text than the draft holds now (Carl's own record, state/post-ledger.jsonl); restore the text that is live (the later parts reply to it)`, true);
@@ -353,7 +353,7 @@ export class PostService {
       if (!eff.pending) throw new PostError(`${name} has no pending part`, true);
       const part = eff.pending.part;
       return {
-        text: `A click on part ${part + 1} of ${name} was started${eff.pending.at ? ` at ${eff.pending.at}` : ""} and never recorded.\nAccount ${where}\n${asked}\n\n${parts}\n\nOnly allow this if part ${part + 1} is CERTAINLY NOT on the profile. Clearing lets Carl click Post for it again.`,
+        text: `A click on part ${part + 1} of ${name} was started${eff.pending.at ? ` at ${eff.pending.at}` : ""} and never recorded.\nAccount ${where}\n${asked}\n\n${parts}\n\nOnly allow this if part ${part + 1} is CERTAINLY NOT on the profile. Clearing removes the record of the started click; the next run looks for the part on the profile first and clicks Post for it only if it is not there.`,
         bind: this.mac("card", d, { kind: "clear-pending", part, at: eff.pending.at ?? null, baseline: eff.pending.baseline ?? null }),
         hash: d.textHash,
       };

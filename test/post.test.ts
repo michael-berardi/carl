@@ -19,8 +19,8 @@ import { postCommand, type PostCliIo } from "../src/post/cli.ts";
 import { normText, PAGE_TEXT, pickPart, statusTime, xHandle, xLength } from "../src/post/adapters/x.ts";
 import { carlTools } from "../src/tools.ts";
 import { loadConfig } from "../src/config.ts";
-import { postingBlockedReason, UNSANDBOXED_TOOLS, unsafeAllowTools } from "../src/post/safety.ts";
-import { DEFAULT_TRUSTED_READONLY } from "../src/guard.ts";
+import { postingBlockedReason, readOnlyCache, UNSANDBOXED_TOOLS, writeReadOnlyCache } from "../src/post/safety.ts";
+import { DEFAULT_TRUSTED_READONLY, mcpVerdict } from "../src/guard.ts";
 import { splitCard } from "../src/channels/telegram.ts";
 import { type FakeX, fakeX } from "./post-fake.ts";
 
@@ -1247,22 +1247,49 @@ test("Low: a pending part cannot be re-approved with edited text; dropped thread
 
 // ===================== Round 4: the third review (F1-F6 and the Lows) =====================
 
-test("F1: posting is refused while allowTools auto-allows a tool that can type into a terminal or run unsandboxed", async () => {
-  // The set covers what the review named, and the built-in read-only allow list never matches it.
-  for (const t of ["overseer_send", "overseer_job_add", "overseer_message"]) assert.ok(UNSANDBOXED_TOOLS.includes(t), t);
-  for (const t of UNSANDBOXED_TOOLS) for (const [src] of DEFAULT_TRUSTED_READONLY) assert.equal(new RegExp(src).test(`overseer/${t}`), false, `${t} must not be read-only`);
-  assert.deepEqual(unsafeAllowTools([["^overseer/overseer_status$", "x"]], ["overseer"]), []);
-  assert.equal(unsafeAllowTools([["^overseer/overseer_(send|job_add)$", "queued work"]], ["overseer"])[0].tools.join(), "overseer_send,overseer_job_add");
-  assert.ok(unsafeAllowTools([[".*", "everything"]], [])[0].tools.length === UNSANDBOXED_TOOLS.length, "a catch-all allows them too");
-  assert.equal(postingBlockedReason({}, [[".*", "x"]], []), undefined, "no accounts, nothing to refuse");
+test("F1/B1: posting is refused unless every allowTools and operatorTools entry matches only verifiably read-only tools", async () => {
+  const blocked = (allow: string[], op: string[] = [], extra: Record<string, unknown> = {}) =>
+    postingBlockedReason({ accounts: { main: {} }, allowTools: allow.map((a) => [a, "x"] as [string, string]), operatorTools: op.map((a) => [a, "x"] as [string, string]), trustedMcp: ["overseer"], ...extra });
+  for (const verb of ["send", "relay", "message", "job_add", "job_dispatch", "job_approve", "schedule_add", "open", "close", "decide", "job_note", "job_wake", "job_redrive", "job_reroute", "job_switch", "job_correct"])
+    for (const prefix of ["overseer_", "coordinator_"]) assert.match(blocked([`^overseer/${prefix}${verb}$`])!, /Posting is OFF/, prefix + verb);
+  // Broad patterns match a canary and fail closed, including the real server's prefix.
+  for (const broad of [".*", "^overseer/.*", "^overseer/coordinator_.*", "^overseer/coordinator_(send|job_add)$|^overseer/coordinator_.*"]) assert.match(blocked([broad])!, /Posting is OFF/, broad);
+  assert.match(blocked([".*"])!, /any future tool/);
+  // operatorTools count (the quoted-words shortcut runs them unasked).
+  assert.match(blocked([], ["^overseer/coordinator_job_add$"])!, /guard\.operatorTools/);
+  // Read-only names pass; so does an empty config.
+  assert.equal(blocked(["^overseer/coordinator_job_list$", "^overseer/coordinator_status$"]), undefined);
+  assert.equal(blocked([], []), undefined);
+  assert.equal(postingBlockedReason({ accounts: {}, allowTools: [[".*", "x"]], trustedMcp: [] }), undefined, "no accounts, nothing to refuse");
+  // A listed tool without readOnlyHint is not verifiably read-only; with the hint it is.
+  assert.match(blocked(["^overseer/coordinator_widget$"], [], { listed: ["overseer/coordinator_widget"], readOnly: new Set() })!, /coordinator_widget/);
+  assert.equal(blocked(["^overseer/coordinator_widget$"], [], { listed: ["overseer/coordinator_widget"], readOnly: new Set(["overseer/coordinator_widget"]) }), undefined);
+  // The hint cache round-trips and loadConfig reads it.
   const home = mkdtempSync(join(tmpdir(), "carl-post-f1-"));
   process.env.HOME = home;
   const acct = { platform: "x", profile: "https://x.com/example" };
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", trustedMcp: ["overseer"], guard: { allowTools: [["^overseer/overseer_(send|job_add|message)$", "queued work"]] }, post: { accounts: { main: acct } } }));
+  const conf = (guard: object, extra: object = {}) => writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", trustedMcp: ["overseer"], guard, post: { accounts: { main: acct } }, ...extra }));
+  conf({ allowTools: [["^overseer/coordinator_(send|job_add)$", "queued work"]] });
   const cfg = loadConfig(home);
   assert.match(cfg.post.blocked!, /Posting is OFF/);
-  assert.match(cfg.post.blocked!, /Remove that entry from guard\.allowTools/);
-  assert.match(cfg.post.blocked!, /overseer_send, overseer_message, overseer_job_add/);
+  assert.match(cfg.post.blocked!, /Remove that entry/);
+  assert.match(cfg.post.blocked!, /coordinator_send/);
+  mkdirSync(join(home, "state"), { recursive: true });
+  writeReadOnlyCache(home, { "overseer/coordinator_widget": true, "overseer/coordinator_gadget": false });
+  assert.deepEqual(readOnlyCache(home).listed.sort(), ["overseer/coordinator_gadget", "overseer/coordinator_widget"]);
+  conf({ allowTools: [["^overseer/coordinator_widget$", "r"]] });
+  assert.equal(loadConfig(home).post.blocked, undefined);
+  conf({ allowTools: [["^overseer/coordinator_gadget$", "r"]] });
+  assert.match(loadConfig(home).post.blocked!, /coordinator_gadget/);
+  // B2: operatorTools in the real config, and the work module.
+  conf({ operatorTools: [["^overseer/coordinator_(job_add|job_approve|job_dispatch)$", "x"]] });
+  assert.match(loadConfig(home).post.blocked!, /guard\.operatorTools/);
+  conf({}, { work: { command: ["/bin/true"] }, telegram: { enabled: true, token: "t", allowFrom: [1], groups: [{ chat: -5, work: { project: "p" } }] } });
+  assert.match(loadConfig(home).post.blocked!, /work module/);
+  conf({}, { work: { command: ["/bin/true"], sandboxed: true }, telegram: { enabled: true, token: "t", allowFrom: [1], groups: [{ chat: -5, work: { project: "p" } }] } });
+  assert.equal(loadConfig(home).post.blocked, undefined);
+  conf({}, { work: { command: ["/bin/true"] } });
+  assert.equal(loadConfig(home).post.blocked, undefined, "no work group, no work_queue tool");
   // Every operation refuses, `status` says why, and the agent gets no post tool.
   const r = rig();
   const svc = new PostService({ ...r.svc.deps, config: { ...r.svc.deps.config, blocked: cfg.post.blocked } });
@@ -1271,9 +1298,16 @@ test("F1: posting is refused while allowTools auto-allows a tool that can type i
   assert.throws(() => svc.requestCard("approve", "off", { by: "operator" }), /Posting is OFF/);
   assert.match(svc.status(), /^POSTING IS OFF: Posting is OFF/);
   assert.equal(r.x.calls.length, 0);
-  // Moving the tools to ask (removing them from allowTools) turns it on.
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", trustedMcp: ["overseer"], guard: { allowTools: [] }, post: { accounts: { main: acct } } }));
-  assert.equal(loadConfig(home).post.blocked, undefined);
+});
+
+test("B1: the built-in read-only list covers the real coordinator_ reads and the old overseer_ ones, and no dangerous verb", () => {
+  const ro = (n: string) => DEFAULT_TRUSTED_READONLY.some(([src]) => new RegExp(src).test(`overseer/${n}`));
+  for (const n of ["status", "job_list", "job_get", "events", "terminals", "digest", "schedule_list", "decisions_pending"])
+    for (const p of ["coordinator_", "overseer_"]) assert.ok(ro(p + n), p + n);
+  for (const t of UNSANDBOXED_TOOLS) assert.equal(ro(t), false, `${t} must not be read-only`);
+  const rules = { trustedMcp: ["overseer"] };
+  assert.equal(mcpVerdict("mcp__overseer__coordinator_job_list", rules).level, "ok");
+  assert.equal(mcpVerdict("mcp__overseer__coordinator_relay", rules).level, "dangerous");
 });
 
 test("F1: the approval key is a 0600 file; the docs say plainly that an unsandboxed process of the user can read it", () => {
@@ -1486,4 +1520,58 @@ test("Low: the sandbox refuses the approval key by name anywhere and the loopbac
   assert.ok(profile.includes('(deny network-outbound (remote ip "localhost:9222"))'));
   writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b" }));
   assert.ok(!buildProfile(loadConfig(home)).includes("9222"));
+});
+
+// ===================== Round 5: the fourth review (B1-B3 and the F2-F6 leftovers) =====================
+
+test("B3: the operator notice goes straight to Telegram with no queue, so a failing channel leaves no slot", async () => {
+  const { Gateway } = await import("../src/gateway.ts");
+  const queued: unknown[] = [];
+  const failing = { sendMarkdown: async () => { throw new Error("Telegram sendMessage failed (500): down"); }, enqueue: (...a: unknown[]) => { queued.push(a); } };
+  const fake = { telegram: failing, cfg: { telegram: { homeChat: 77 } } };
+  const sendDirect = (Gateway.prototype as any).sendDirect;
+  await assert.rejects(sendDirect.call(fake, "home", "notice"), /down/);
+  assert.equal(queued.length, 0, "a failed notice is never queued behind the slot");
+  await assert.rejects(sendDirect.call({ ...fake, cfg: { telegram: {} } }, "home", "n"), /homeChat/);
+  // ...and the service removes the slot when that notice throws.
+  const r = rig();
+  r.write("b3", 'text: "B3"');
+  await approve(r, "b3");
+  const svc = new PostService({ ...r.svc.deps, notify: (m) => sendDirect.call(fake, "home", m) });
+  await assert.rejects(svc.schedule("b3", "2026-03-11T12:00:00Z", { agent: true }), /could not be told.*not kept/);
+  assert.equal(r.scheduler.list().filter((j) => j.post && j.enabled).length, 0);
+});
+
+test("F5: a permanent Telegram refusal of a card stops the retries and says so once", async () => {
+  const { TelegramError } = await import("../src/channels/telegram-api.ts");
+  const r = rig();
+  r.write("perm", 'text: "Perm"');
+  await approve(r, "perm");
+  r.svc.requestCard("approve", "perm", { by: "operator" });
+  const told: string[] = []; let tries = 0;
+  const desk = new CardDesk(r.svc, () => { tries++; return Promise.reject(new TelegramError("sendMessage", 400, "Bad Request: chat not found")); }, (m) => told.push(m));
+  await desk.pump();
+  await desk.pump();
+  assert.equal(tries, 1, "no retry");
+  assert.equal(told.length, 1);
+  assert.match(told[0], /could not be delivered and will not be retried/);
+  assert.equal(new CardStore(r.home).list().length, 0, "the card is dropped");
+});
+
+test("F6: the clear-pending card does not promise a re-click; the recoverBlock message names a way out", async () => {
+  const svc = readFileSync(new URL("../src/post/service.ts", import.meta.url), "utf8");
+  assert.match(svc, /looks for the part on the profile first and clicks Post for it only if it is not there/);
+  assert.doesNotMatch(svc, /Clearing lets Carl click Post for it again/);
+  assert.match(svc, /thread_urls \(comma-separated, in order\)/);
+});
+
+test("docs: POSTING.md states the structural rule, names the real tools and has one agent-permissions paragraph", () => {
+  const doc = readFileSync(new URL("../docs/POSTING.md", import.meta.url), "utf8");
+  assert.match(doc, /readOnlyHint: true/);
+  assert.match(doc, /coordinator_/);
+  assert.match(doc, /guard\.operatorTools/);
+  assert.match(doc, /work\.command/);
+  assert.equal(doc.split("request** an approval card").length, 2, "the duplicate paragraph is gone");
+  assert.doesNotMatch(doc, /never clicked\./);
+  assert.doesNotMatch(doc, /OverSeer\s+MCP server/);
 });

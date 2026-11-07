@@ -1,7 +1,7 @@
 # Posting
 
 Carl can publish a social post from a draft file, now or at a time you choose. Carl's own code posts only text you
-approved on your operator channel, and only while the safe configuration below holds (otherwise posting is off). It does
+approved on your operator channel, and only while the checks in "Requirements" pass (otherwise posting is off). Those checks cover Carl's own configuration; they cannot see a program you run yourself or a tool the checks cannot name. It does
 not stop a program that runs **outside** Carl's sandbox as your user: such a program can read the approval key or drive
 the browser itself (see "Requirements"). Carl does not click Post a second time for a part it recorded a click for: the
 click is recorded before it happens, and anything that goes wrong after it stops for you to check instead of retrying.
@@ -23,7 +23,7 @@ A post moves through the same steps on every platform:
    to the account's profile URL, and is signed with a key kept in a 0600 file (below).
 4. **Post.** Carl posts it, now or at the scheduled time. Before each click it writes `pending_part` (with the newest
    status id on the profile) into the draft and into Carl's own ledger, fsynced; if either write fails, nothing is
-   clicked. A part whose exact text is already on the profile (posted after the approval) is never clicked.
+   clicked. A part whose exact text is already on the profile (posted after the approval) is not clicked when the page shows it (a best-effort check, not a guarantee).
 5. **Verify.** Carl finds the live post on the account's profile and takes its URL from there. The post must have the
    whole text (not a prefix), be created no earlier than your approval, have an id newer than anything on the profile
    before the click and newer than the previous part, and not be a URL already recorded.
@@ -168,28 +168,37 @@ approval cards cannot be answered, and cards wait. Slack and Discord are not use
 
 ### What the agent can and cannot do
 
-The agent's `post_draft` tool can draft, dry-run, **request** an approval card, and give an approved draft its **first**
-slot at least 15 minutes away (the operator gets a message in the home chat when it does). It cannot approve, answer a
-card, post at once, change or replace a slot, choose `late`, or run or resume a scheduled post (the `schedule` tool
-refuses `run` and `resume` for post jobs). A scheduled post fires at its slot; run before its slot without force, the job
-does nothing and changes no state (no attempt is used). Only the portal's operator route forces it. UltraTerm's Run
-button does not force, so it cannot fire a post early either.
-
 ### Requirements: what must hold for posting to be on
 
 The card stops anything that can only type `carl post approve` and `y`. It does **not** bind a program that runs outside
 the sandbox as your user: that program can run `carl post now`, read `~/.carl/post-approval.key` and compute an approval,
-or call `overseer-browser` directly. The tools that start such programs are `overseer_send` (types into a terminal),
-`overseer_message`, `overseer_job_add` and the other OverSeer tools that act outside the sandbox (`overseer_open`,
-`overseer_close`, `overseer_job_dispatch`, `overseer_job_approve`, `overseer_schedule_add`).
+or call `overseer-browser` directly. Tools that start such programs are, for the OverSeer/UltraTerm control server, the ones
+that type into a terminal, open or message a worker, or queue, approve or redirect work: `send`, `relay`, `message`,
+`job_add`, `job_dispatch`, `job_approve`, `schedule_add`, `open`, `close`, `decide`, `job_note`, `job_wake`, `job_redrive`,
+`job_reroute`, `job_switch` and `job_correct`, under both the `coordinator_` and the older `overseer_` prefix.
 
-So when `post.accounts` is configured, **Carl refuses to enable posting while any `guard.allowTools` entry auto-allows
-one of those tools.** Posting stays off: the gateway does not give the agent the `post_draft` tool or show cards, every
-`carl post` command except `status` fails with the reason, `carl post status` begins with `POSTING IS OFF: ...`, and the
-gateway sends the reason to the home chat when it starts. The fix is to remove those entries from `guard.allowTools` in
-`~/.carl/carl.json` (the tools then ask you each time, as an unlisted tool of a trusted server does) and restart Carl. A
-broad pattern such as `.*` counts. This holds only as long as the configuration says so; it does not stop you, or a
-program you run yourself, from doing the same by hand, and it cannot see a tool that is not on this list.
+The rule is structural, so it does not depend on that list staying complete. When `post.accounts` is configured, **posting
+is OFF unless every `guard.allowTools` and every `guard.operatorTools` entry can only match tools that are verifiably
+read-only.** A tool is verifiably read-only if it is on Carl's built-in read-only list, or its MCP tool listing carried
+`readOnlyHint: true` (Carl records the hints of trusted servers' tools in `state/mcp-readonly.json` when a session starts,
+so a first start with no record fails closed). Each entry is also tried against made-up tool names such as
+`overseer/coordinator_brand_new_tool`: an entry that matches one (`.*`, `^overseer/coordinator_.*`) could match a tool added
+later, and is refused. The dangerous names above are a second check. An entry that names only tools Carl cannot classify
+and that matches no made-up name (for example an exact name of a tool that has not been listed yet) is not refused by
+this check; list only read-only tools in these keys. `operatorTools` counts because its entries run without asking whenever the agent
+quotes eight characters of your latest message.
+
+Posting is also OFF when the work module is on (`work.command` set and a Telegram group with a `work` project): the agent's
+`work_queue` tool runs with no ask and the job it queues may run outside the sandbox. Carl cannot tell whether your
+`work.command` jobs are sandboxed, so this is blocked by default; set `"sandboxed": true` inside `work` only if you know
+the jobs run in a sandbox that closes the approval key and the browser relay (Carl takes your word).
+
+When posting is off the gateway does not give the agent the `post_draft` tool or show cards, every `carl post` command
+except `status` fails with the reason, `carl post status` begins with `POSTING IS OFF: ...`, and the gateway sends the reason
+to the home chat when it starts. Remove the entries named (the tools then ask you each time; a tool on `operatorTools` asks
+instead of using the quoted-words shortcut only when it is removed from there), restart Carl, and posting turns on. The
+decision is made when Carl starts: a `carl.json` edited without a restart can make the CLI and a running gateway disagree. This holds only as long as the
+configuration says so; it does not stop you, or a program you run yourself, from doing the same by hand.
 
 The approval key stays in the 0600 file `~/.carl/post-approval.key`. **An unsandboxed process of the same user can read
 it.** Moving it to the macOS login Keychain would not change that: an item made with `security add-generic-password` can be
@@ -198,8 +207,8 @@ it to Carl's own binary, which Carl does not set up, so it is not done. The key 
 (by path, and by the name `post-approval.key` in any Carl home's profile).
 
 The agent's `post_draft` tool can draft, dry-run, **request** an approval card, and give an approved draft its **first**
-slot at least 15 minutes away. The operator gets a message in the home chat when it does; if that message cannot be
-delivered the slot is not kept. It cannot approve, answer a card, post at once, change or replace a slot, choose `late`,
+slot at least 15 minutes away. The operator gets a message in the home chat when it does; that message is sent straight to Telegram (not queued), and if it
+cannot be delivered the slot is removed. It cannot approve, answer a card, post at once, change or replace a slot, choose `late`,
 or run, resume, pause or remove a scheduled post (the `schedule` tool refuses all four for post jobs). A scheduled post
 fires at its slot; run before its slot without force, the job does nothing and changes no state (no attempt is used).
 Only the portal's operator route forces it. UltraTerm's Run button does not force, so it cannot fire a post early either.
@@ -212,13 +221,12 @@ The agent's shell runs in a Seatbelt sandbox. Whenever `post.accounts` is config
   Support/OverSeer/browser/`, `~/.config/overseer-browser/` (the relay descriptor), the `runtime_root` that
   `active-connection.json` names (or `$OVERSEER_BROWSER_CONNECTION`'s descriptor) and `$OVERSEER_BROWSER_RUNTIME`. These
   hold the browser control token, socket and CLI runtime. The folders are read when Carl starts: if you select a different
-  relay later, restart Carl: posting and live dry runs refuse once the descriptor differs from what Carl read at start.
+  relay later, restart Carl: the gateway refuses to post or run a live dry run once the descriptor differs from what Carl read at start (the CLI takes a fresh baseline on each run).
   Both the default descriptor and the one this process's environment names are closed. Independent of location, any unix
   socket whose name matches `overseer-browser*.sock` is refused by name; the rule matches the name only, so a hard link
   under another name to a socket in a folder that is not closed would not be matched. `overseer-browser` is also a hardline refusal in the shell guard.
   Without this a sandboxed command could drive your signed-in browser and post straight past the gate. Posting runs from
-  the gateway, which is not sandboxed. If the agent needs a browser it uses its own session through the trusted OverSeer
-  MCP server (the `overseer` entry in `trustedMcp`), which is unaffected.
+  the gateway, which is not sandboxed. The agent has no browser tool of its own through Carl for posting.
 - reads and writes of `~/.carl/post-approval.key`, and reads of any file named `post-approval.key`;
 - connections to loopback port 9222 (a browser debugging port). Other debugging ports are not closed.
 
@@ -273,8 +281,8 @@ You can also rerun `carl post now <draft>` yourself at any point; it resumes the
   ledger says a part went live with text other than the draft's now, Carl refuses. The ledger is keyed by the draft's path
   and its first part, so a draft saved under the same name with identical text after its post was deleted is refused
   with a message (save it under a new name or change the text) instead of being marked Posted. A ledger that cannot be
-  read stops posting. A write-ahead record that cannot be written clears its own click event, so nothing is stranded.
-  A live dry run takes the draft's lock, so it waits out (refuses during) a post.
+  read stops posting. A write-ahead record that cannot be written appends a `cleared` event so no click is assumed; if that append also fails, a click event remains and `carl post clear-pending` recovers it.
+  A live dry run takes the draft's lock, so it refuses while a post holds the lock.
 - Before a click Carl looks for the exact text on the profile for up to ten seconds; a timeline that never drew is a
   retryable refusal. Only X's own "nothing here" state lets a click proceed on an empty profile.
 - The freshness checks allow two minutes of difference between this machine's clock and X's.
