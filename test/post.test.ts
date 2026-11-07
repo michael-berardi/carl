@@ -3,17 +3,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Scheduler } from "../src/scheduler.ts";
 import { defaultRegistry } from "../src/post/registry.ts";
 import { DraftStore, parseDraft, parseFront, readDraft, setFields, sha256, visible } from "../src/post/draft.ts";
-import { canon } from "../src/post/key.ts";
+import { browserControlDirs, canon, sessionProblems } from "../src/post/key.ts";
 import { sessionPrograms } from "../src/post/key.ts";
 import { childEnv, realRunner } from "../src/post/runner.ts";
 import { adoptTrustedPath, buildProfile, canonical, secretDirs, secretFiles } from "../src/sandbox.ts";
 import { classifyCommand, readVerdict } from "../src/guard.ts";
 import { PostService } from "../src/post/service.ts";
+import { CardDesk, CardStore, type CardKind } from "../src/post/cards.ts";
 import { postCommand, type PostCliIo } from "../src/post/cli.ts";
 import { normText, PAGE_TEXT, pickPart, statusTime, xHandle, xLength } from "../src/post/adapters/x.ts";
 import { carlTools } from "../src/tools.ts";
@@ -24,13 +25,13 @@ const log = { info() {}, warn() {}, error() {}, debug() {} } as any;
 const T0 = Date.parse("2026-03-10T12:00:00Z");
 const ACCOUNT = { platform: "x", profile: "https://x.com/example", session: { command: "overseer-browser", timeoutSeconds: 75, namePrefix: "carl-post" } };
 
-function rig(opts: { retex?: FakeX["retex"]; now?: number; window?: number } = {}) {
+function rig(opts: { retex?: FakeX["retex"]; now?: number; window?: number; skew?: number } = {}) {
   const home = mkdtempSync(join(tmpdir(), "carl-post-"));
   process.env.HOME = home;
   const draftsDir = join(home, "posts");
   mkdirSync(draftsDir, { recursive: true });
   const clock = { now: opts.now ?? T0 };
-  const x = fakeX({ retex: opts.retex, clock: () => clock.now });
+  const x = fakeX({ retex: opts.retex, clock: () => clock.now - (opts.skew ?? 0) }); // skew: X's clock runs behind this machine's
   const scheduler = new Scheduler(home, log, { prompt: async () => "", builtin: {}, deliver: async () => {} } as any);
   const svc = new PostService({
     home, run: x.run, registry: defaultRegistry(), scheduler, now: () => clock.now, sleep: async () => {}, id: () => "t1",
@@ -42,6 +43,14 @@ function rig(opts: { retex?: FakeX["retex"]; now?: number; window?: number } = {
 /** What the operator does before anything can post: approve the exact text, and a live dry run of it. */
 const approve = async (r: ReturnType<typeof rig>, name: string) => { await r.svc.approve(name, "alice"); await r.svc.dryRun(name); };
 const posted = (x: FakeX) => x.live.length;
+/** The operator's side: the card a request made is shown, and the operator answers it (as the gateway's Telegram buttons do). */
+async function operator(r: ReturnType<typeof rig>, kind: CardKind, name: string, o: { answer?: "approved" | "denied" | "timeout"; url?: string; between?: () => void } = {}) {
+  const asked = r.svc.requestCard(kind, name, { by: "operator", url: o.url });
+  const shown: string[] = []; const told: string[] = [];
+  const desk = new CardDesk(r.svc, (text) => { shown.push(text); o.between?.(); return Promise.resolve({ answer: o.answer ?? "approved", by: "4242" }); }, (m) => told.push(m));
+  await desk.pump();
+  return { asked, shown, told };
+}
 
 test("contract: a draft renders and validates with no side effects, and a dry run fills the composer then posts nothing", async () => {
   const r = rig();
@@ -204,7 +213,7 @@ test("C1: a click whose post is not found is final, never retried, and a rerun r
   assert.match(r.svc.status(), /PENDING part 1/);
   // Only the operator clears it (after looking). Then it posts again.
   r.x.hideNew = false;
-  assert.match(await r.svc.clearPending("miss1"), /Cleared the pending record for part 1/);
+  assert.match((await operator(r, "clear-pending", "miss1")).told.join(), /Cleared the pending record for part 1/);
   assert.equal(readDraft(p).pendingPart, undefined);
   await r.svc.postNow("miss1");
   assert.equal(r.x.clicks, 2);
@@ -287,7 +296,8 @@ test("C2/H5: an older or different post is never recorded as this one", async ()
   r4.write("dup", 'text: "Same again."');
   await approve(r4, "dup");
   r4.x.hideNew = true;
-  await assert.rejects(r4.svc.postNow("dup"), /probably posted/);
+  await assert.rejects(r4.svc.postNow("dup"), (e: any) => e.final === true && /already live at/.test(e.message), "R4: found before the click, so it is never clicked a second time");
+  assert.equal(r4.x.clicks, 0);
   assert.equal(readDraft(join(r4.draftsDir, "dup.md")).status, "Ready", "not recorded as Posted");
   // Parts: an earlier part's post cannot stand in for a later part (strictly increasing ids, no duplicates).
   const r5 = rig();
@@ -353,15 +363,11 @@ test("H2/H3: approval covers exactly what was shown, and control characters cann
   await assert.rejects(r.svc.approve("shown", "alice", shown), /changed after it was shown to you/);
   assert.equal(readDraft(p).approved, undefined);
   await r.svc.approve("shown", "alice", readDraft(p).textHash);
-  // The CLI passes the hash of what it displayed: an edit while the prompt is open is refused.
-  const out: string[] = []; const err: string[] = [];
+  // The card binds the answer to what it showed: an edit while the card is open means nothing is approved.
   r.write("race", 'text: "Displayed"');
-  const io: PostCliIo = {
-    isTTY: () => true, out: (s) => out.push(s), err: (s) => err.push(s),
-    confirm: async () => { writeFileSync(join(r.draftsDir, "race.md"), readFileSync(join(r.draftsDir, "race.md"), "utf8").replace("Displayed", "Swapped")); return true; },
-  };
-  assert.equal(await postCommand(["approve", "race", "--by", "alice"], io, () => r.svc), 2);
-  assert.match(err.join(""), /changed after it was shown/);
+  const raced = await operator(r, "approve", "race", { between: () => writeFileSync(join(r.draftsDir, "race.md"), readFileSync(join(r.draftsDir, "race.md"), "utf8").replace("Displayed", "Swapped")) });
+  assert.match(raced.shown[0], /Displayed/);
+  assert.match(raced.told.join(), /changed after the card was shown/);
   assert.equal(readDraft(join(r.draftsDir, "race.md")).approved, undefined);
   // Control and bidi characters are refused when the draft is rendered; the agent cannot even create such a draft.
   for (const bad of ["\u001b[2Kfake", "a\rb", "x\u202eevil", "tab\there", "\u0085next"]) {
@@ -522,7 +528,6 @@ test("M7/C3: the agent cannot post at once, change a slot, post late, or run or 
   assert.equal(r.x.clicks, 0);
   // runScheduled before the slot refuses unless the operator forces it.
   await assert.rejects(r.svc.runScheduled(r.scheduler.get(jobId)), /has not arrived/);
-  await assert.rejects(new Scheduler(r.home, log, { prompt: async () => "", builtin: { post: (j: any, o: any) => r.svc.runScheduled(j, o) }, deliver: async () => {} } as any).runNow(jobId), /has not arrived|no schedule/).catch(() => {});
   assert.equal(r.x.clicks, 0);
   assert.match(await r.svc.runScheduled(r.scheduler.get(jobId), { force: true }), /Posted ag/);
   assert.equal(r.x.clicks, 1);
@@ -575,20 +580,22 @@ test("C4(a): the sandbox profile denies the browser control directory, its socke
   const cfg = loadConfig(home);
   const dir = join(canonical(home), "Library", "Application Support", "OverSeer", "browser");
   const profile = buildProfile(cfg);
-  assert.ok(profile.includes(`(deny file-read* (subpath "${dir}"))`), profile);
+  assert.ok(profile.split("\n").some((l) => l.startsWith("(deny file-read* (subpath") && l.includes(`(subpath "${dir}")`)), "the browser control folder is unreadable");
   assert.ok(profile.includes(`(remote unix-socket (subpath "${dir}"))`), "the control socket is unreachable");
   assert.ok(new RegExp(`\\(deny file-write\\* [^\n]*\\(subpath "${dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\)`).test(profile), "and cannot be replaced");
   assert.ok(profile.includes(`(literal "${join(canonical(home), "post-approval.key")}")`), "the approval key is unreadable");
   assert.ok(secretFiles(cfg).includes(join(home, "post-approval.key")));
-  assert.deepEqual(secretDirs(cfg), [join(home, "Library", "Application Support", "OverSeer", "browser")]);
+  assert.ok(secretDirs(cfg).includes(join(home, "Library", "Application Support", "OverSeer", "browser")));
+  assert.ok(secretDirs(cfg).includes(join(home, ".config", "overseer-browser")));
   // Without accounts nothing about the browser is added (the general tooling is untouched).
   writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b" }));
   assert.ok(!buildProfile(loadConfig(home)).includes("OverSeer"));
   // The guard: the CLI is a hardline refusal for the agent's shell and its files are unreadable to its file tools.
   const rules = { denyBrowserCli: true, secretPaths: secretDirs(cfg) };
+  const managed = join(home, "Library", "Application Support", "OverSeer", "browser");
   for (const c of ["overseer-browser --session x eval 1", "~/.local/bin/overseer-browser sessions list", 'cat "$HOME/Library/Application Support/OverSeer/browser/agent-v1/token"']) assert.equal(classifyCommand(c, rules).level, "hardline", c);
   assert.equal(classifyCommand("overseer-browser --help", {}).level, "ok", "unaffected when posting is not configured");
-  assert.equal(readVerdict(join(secretDirs(cfg)[0], "agent-v1", "token"), rules).level, "hardline");
+  assert.equal(readVerdict(join(managed, "agent-v1", "token"), rules).level, "hardline");
 });
 
 test("H1: the gateway's trusted PATH finds the session command (resolved from the operator's PATH at init)", async (t) => {
@@ -618,7 +625,7 @@ test("Low: media and a thread's reply are refused; inline lists parse; X length 
   r.write("med", 'text: "pic"\nmedia: ["a.png"]');
   await assert.rejects(r.svc.dryRun("med", { offline: true }), /media is not supported/);
   r.write("tr", 'thread:\n  - "a"\n  - "b"\nreply: "lost"');
-  await assert.rejects(r.svc.dryRun("tr", { offline: true }), /thread's `reply` is not posted/);
+  await assert.rejects(r.svc.dryRun("tr", { offline: true }), /`reply` would not be posted/);
   const parsed = parseDraft('---\ntext: [beta] note [x]\nthread_urls: ["https://a/1", "https://a/2"]\n---\n', "/x.md");
   assert.equal(parsed.parts[0], "[beta] note [x]");
   assert.deepEqual(parseFront(["thread: [\"one, two\", 'three', four]"]).thread, ["one, two", "three", "four"]);
@@ -670,20 +677,20 @@ test("Low: the composer is re-read at click time; a changed composer is not post
   assert.equal(r.x.clicks, 0);
 });
 
-test("the CLI: clear-pending is operator-only and asks", async () => {
+test("the CLI: clear-pending only asks; the pending record goes when the operator answers the card", async () => {
   const r = rig();
   const p = r.write("cp", 'text: "pending"');
   writeFileSync(p, setFields(readFileSync(p, "utf8"), { pending_part: "0", pending_at: "2026-03-10T11:00:00.000Z" }));
   const out: string[] = []; const err: string[] = [];
-  let tty = false; let yes = false;
-  const io: PostCliIo = { isTTY: () => tty, confirm: async () => yes, out: (s) => out.push(s), err: (s) => err.push(s) };
-  assert.equal(await postCommand(["clear-pending", "cp"], io, () => r.svc), 2);
-  assert.match(err.join(""), /operator-only/);
-  tty = true;
-  assert.equal(await postCommand(["clear-pending", "cp"], io, () => r.svc), 1);
-  assert.equal(readDraft(p).pendingPart, 0);
-  yes = true;
+  const io: PostCliIo = { out: (s) => out.push(s), err: (s) => err.push(s) };
   assert.equal(await postCommand(["clear-pending", "cp"], io, () => r.svc), 0);
+  assert.match(out.join(), /waits for your answer/);
+  assert.equal(readDraft(p).pendingPart, 0, "the CLI cleared nothing");
+  const denied = new CardDesk(r.svc, () => Promise.resolve({ answer: "denied" }), () => {});
+  await denied.pump();
+  assert.equal(readDraft(p).pendingPart, 0, "denied");
+  assert.equal(new CardStore(r.home, () => r.clock.now).list().length, 0, "an answered card is gone");
+  await operator(r, "clear-pending", "cp");
   assert.equal(readDraft(p).pendingPart, undefined);
 });
 test("a schedule is durable: it survives a restart, fires on time, and posts once", async () => {
@@ -816,8 +823,8 @@ test("the agent's tool can draft, dry-run and schedule, and has no way to approv
   const tool: any = tools.find((t) => t.name === "post_draft");
   assert.ok(tool);
   const props = JSON.stringify(tool.parameters);
-  assert.doesNotMatch(props, /approv/i);
-  assert.deepEqual((tool.parameters.properties.action.anyOf as { const: string }[]).map((a) => a.const).sort(), ["draft", "dry_run", "schedule", "status"]);
+  assert.doesNotMatch(props, /approved|approved_hash/i);
+  assert.deepEqual((tool.parameters.properties.action.anyOf as { const: string }[]).map((a) => a.const).sort(), ["draft", "dry_run", "request_approval", "schedule", "status"]);
   const run = (p: object) => tool.execute("id", p);
   const made = await run({ action: "draft", name: "agent-one", platform: "x", account: "main", text: "Drafted by the agent", approved: "mallory 2026-03-10T00:00:00Z", approved_hash: "x" });
   assert.match(made.content[0].text, /needs the operator's approval/);
@@ -842,23 +849,20 @@ test("the agent's tool can draft, dry-run and schedule, and has no way to approv
   assert.equal(carlTools({} as any, r.scheduler, { send: async () => "" }).some((t) => t.name === "post_draft"), false, "no accounts, no tool");
 });
 
-test("the CLI: approve is operator-only (needs a terminal and a yes), now/schedule/dry-run/status work", async () => {
+test("the CLI: approve only creates a card (no terminal, no yes); now/schedule/dry-run/status work", async () => {
   const r = rig();
   r.write("cli", 'text: "From the CLI"');
   const out: string[] = []; const err: string[] = [];
-  let tty = false; let yes = true;
-  const io: PostCliIo = { isTTY: () => tty, confirm: async () => yes, out: (s) => out.push(s), err: (s) => err.push(s) };
+  const io: PostCliIo = { out: (s) => out.push(s), err: (s) => err.push(s) };
   const run = (...a: string[]) => postCommand(a, io, () => r.svc);
-  assert.equal(await run("approve", "cli"), 2);
-  assert.match(err.join("\n"), /operator-only/);
   assert.equal(await run("now", "cli"), 2);
   assert.match(err.join("\n"), /no operator approval/);
-  tty = true; yes = false;
-  assert.equal(await run("approve", "cli"), 1);
-  assert.equal(readDraft(join(r.draftsDir, "cli.md")).approved, undefined);
-  yes = true;
-  assert.equal(await run("approve", "cli", "--by", "alice"), 0);
-  assert.match(readDraft(join(r.draftsDir, "cli.md")).approved!, /^alice 2026-03-10T12:00:00/);
+  assert.equal(await run("approve", "cli"), 0);
+  assert.match(out.join("\n"), /waits for your answer on the operator channel/);
+  assert.equal(readDraft(join(r.draftsDir, "cli.md")).approved, undefined, "asking is not approving");
+  assert.equal(await run("now", "cli"), 2, "still refused");
+  const answered = await new CardDesk(r.svc, (text) => Promise.resolve({ answer: "approved", by: "4242" }), () => {}).pump();
+  assert.match(readDraft(join(r.draftsDir, "cli.md")).approved!, /^operator 4242 2026-03-10T12:00:00/);
   assert.equal(await run("dry-run", "cli"), 0);
   assert.equal(await run("schedule", "cli"), 2);
   assert.equal(await run("schedule", "cli", "--at", "2026-03-09T00:00:00Z"), 2);
@@ -881,4 +885,359 @@ test("config: post accounts are validated and live only in carl.json", () => {
   writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "nope" } } } }));
   assert.throws(() => loadConfig(home), /profile must be a URL/);
   assert.equal(existsSync(join(home, "posts")), false);
+});
+
+// ===================== Round 3: the second review (R1-R10 and the Lows) =====================
+
+test("R1: the relay's runtime root, the descriptor folder and the socket name are closed to the agent's shell", () => {
+  const home = mkdtempSync(join(tmpdir(), "carl-post-r1-"));
+  process.env.HOME = home;
+  const saved = { c: process.env.OVERSEER_BROWSER_CONNECTION, r: process.env.OVERSEER_BROWSER_RUNTIME };
+  delete process.env.OVERSEER_BROWSER_CONNECTION; delete process.env.OVERSEER_BROWSER_RUNTIME;
+  try {
+    // A descriptor fixture shaped like overseer-browser's runtime discovery reads it: version 1, operator-relay, an absolute runtime_root.
+    const root = join(home, ".osr-relay");
+    mkdirSync(root, { recursive: true });
+    mkdirSync(join(home, ".config", "overseer-browser"), { recursive: true });
+    writeFileSync(join(home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: root, token_sha256: "0".repeat(64) }));
+    const accounts = { main: ACCOUNT };
+    const dirs = browserControlDirs(accounts, {}, home);
+    assert.ok(dirs.includes(root) || dirs.includes(canon(root)), `runtime_root is denied: ${dirs}`);
+    assert.ok(dirs.includes(join(home, ".config", "overseer-browser")), "the descriptor folder is denied");
+    assert.ok(dirs.includes(join(home, "Library", "Application Support", "OverSeer", "browser")), "the managed runtime stays denied");
+    // OVERSEER_BROWSER_RUNTIME and an OVERSEER_BROWSER_CONNECTION descriptor elsewhere are followed too.
+    const other = join(home, "elsewhere"); mkdirSync(other);
+    writeFileSync(join(other, "conn.json"), JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: join(home, ".osr-two") }));
+    const env = { OVERSEER_BROWSER_CONNECTION: join(other, "conn.json"), OVERSEER_BROWSER_RUNTIME: join(home, ".osr-three") };
+    const more = browserControlDirs(accounts, env, home);
+    for (const d of [".osr-two", ".osr-three"]) assert.ok(more.some((m) => m.endsWith(d)), d);
+    assert.ok(more.includes(other));
+    assert.deepEqual(browserControlDirs({}, {}, home), [], "nothing without accounts");
+    // A descriptor that is garbage, or whose runtime_root is relative, adds nothing and breaks nothing.
+    writeFileSync(join(home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ runtime_root: "relative/path" }));
+    assert.ok(!browserControlDirs(accounts, {}, home).some((d) => d.endsWith("relative/path")));
+    // The profile: the root is read-denied and its sockets unreachable; any overseer-browser socket is refused by name.
+    writeFileSync(join(home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: root }));
+    writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example" } } } }));
+    const profile = buildProfile(loadConfig(home));
+    assert.ok(profile.includes(`(subpath "${canonical(root)}")`), "runtime_root in the profile");
+    assert.ok(profile.includes(`(remote unix-socket (subpath "${canonical(root)}"))`), "and its socket");
+    assert.ok(profile.includes('(deny network-outbound (remote unix-socket (path-regex #"overseer-browser[^/]*\\.sock$")))'), "the socket name is refused wherever it lives");
+    writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b" }));
+    assert.ok(!buildProfile(loadConfig(home)).includes("overseer-browser"), "unchanged without posting");
+  } finally {
+    if (saved.c !== undefined) process.env.OVERSEER_BROWSER_CONNECTION = saved.c;
+    if (saved.r !== undefined) process.env.OVERSEER_BROWSER_RUNTIME = saved.r;
+  }
+});
+
+test("R1: under the rendered profile a client cannot connect to an overseer-browser socket, wherever it is", { skip: process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec") ? "needs macOS sandbox-exec" : false }, async () => {
+  const { execFile } = await import("node:child_process");
+  const { createServer } = await import("node:net");
+  const home = mkdtempSync(join(tmpdir(), "carl-post-sbx-"));
+  process.env.HOME = home;
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example" } } } }));
+  const profile = join(home, "p.sb");
+  writeFileSync(profile, buildProfile(loadConfig(home)));
+  const dir = mkdtempSync("/tmp/cpsb-"); // short: unix socket paths are limited to ~104 bytes
+  const client = join(home, "client.cjs");
+  writeFileSync(client, "const s=require('net').connect(process.argv[2]);s.on('connect',()=>{console.log('CONNECTED');process.exit(0)});s.on('error',e=>{console.log('REFUSED '+e.code);process.exit(0)});");
+  const servers: { close: () => void }[] = [];
+  const listen = (path: string) => new Promise<void>((ok) => { const s = createServer(() => {}); servers.push(s); s.listen(path, ok); });
+  const tryConnect = (path: string) => new Promise<string>((ok) => execFile("/usr/bin/sandbox-exec", ["-f", profile, process.execPath, client, path], { timeout: 20_000 }, (_e, out) => ok(out.trim())));
+  try {
+    await listen(join(dir, "ordinary.sock"));
+    mkdirSync(join(dir, "relay"));
+    await listen(join(dir, "relay", "overseer-browser.sock"));
+    assert.equal(await tryConnect(join(dir, "ordinary.sock")), "CONNECTED", "control: an ordinary socket is reachable, so the profile runs and refuses selectively");
+    assert.match(await tryConnect(join(dir, "relay", "overseer-browser.sock")), /REFUSED/, "the relay's socket is refused");
+  } finally {
+    for (const s of servers) s.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R2: asking never approves; only the operator's answer to the card does, bound to what the card showed", async () => {
+  const r = rig();
+  const p = r.write("card", 'text: "Exactly this"');
+  // The CLI, the agent's tool and a hand-written card file can all only ask.
+  const out: string[] = [];
+  assert.equal(await postCommand(["approve", "card"], { out: (s) => out.push(s), err: (s) => out.push(s) }, () => r.svc), 0);
+  const tools = carlTools({} as any, r.scheduler, { send: async () => "" }, r.svc);
+  const tool: any = tools.find((t) => t.name === "post_draft");
+  assert.match((await tool.execute("id", { action: "request_approval", name: "card" })).content[0].text, /Already asked|waits for your answer/);
+  assert.equal(new CardStore(r.home, () => r.clock.now).list().length, 1, "asking twice is one card");
+  const file = readdirSync(new CardStore(r.home, () => r.clock.now).dir).find((f) => f.endsWith(".json"))!;
+  const forged = JSON.parse(readFileSync(join(new CardStore(r.home, () => r.clock.now).dir, file), "utf8"));
+  writeFileSync(join(new CardStore(r.home, () => r.clock.now).dir, file), JSON.stringify({ ...forged, status: "approved", approved: true, answer: "approved", by: "mallory" }));
+  assert.equal(readDraft(p).approved, undefined);
+  // No operator channel: the card waits, nothing is approved. Denied or expired: dropped, nothing approved.
+  const shown: string[] = [];
+  await new CardDesk(r.svc, () => undefined, () => {}).pump();
+  assert.equal(readDraft(p).approved, undefined);
+  assert.equal(new CardStore(r.home, () => r.clock.now).list().length, 1);
+  for (const answer of ["denied", "timeout"] as const) {
+    await new CardDesk(r.svc, (text) => { shown.push(text); return Promise.resolve({ answer }); }, () => {}).pump();
+    assert.equal(readDraft(p).approved, undefined, answer);
+    r.svc.requestCard("approve", "card", { by: "agent" });
+  }
+  // The card carries the exact text, account, profile URL and text hash.
+  assert.match(shown[0], /Exactly this/);
+  assert.match(shown[0], /x\/main \(https:\/\/x\.com\/example\)/);
+  assert.ok(shown[0].includes(readDraft(p).textHash.slice(0, 12)));
+  const told: string[] = [];
+  await new CardDesk(r.svc, () => Promise.resolve({ answer: "approved", by: "4242" }), (m) => told.push(m)).pump();
+  assert.match(readDraft(p).approved!, /^operator 4242 /);
+  assert.equal(r.svc.problem(readDraft(p)), undefined);
+  // There is no tool action and no CLI flag that answers a card, and no TTY path left.
+  assert.equal(JSON.stringify(tool.parameters).includes("answer"), false);
+  assert.equal(readFileSync(new URL("../src/post/cli.ts", import.meta.url), "utf8").includes("isTTY"), false);
+  // A card for an invalid draft is refused when asked, not later.
+  r.write("toolong", `text: "${"x".repeat(300)}"`);
+  assert.throws(() => r.svc.requestCard("approve", "toolong", { by: "agent" }), /limit 280/);
+  assert.throws(() => r.svc.requestCard("approve", "../etc", { named: true, by: "agent" }), /draft names are/);
+});
+
+test("R3: a dry run's hash is not an approval, and the approved stamp is signed", async () => {
+  const r = rig();
+  const p = r.write("copy", 'text: "Copy attack"');
+  await r.svc.dryRun("copy"); // no approval at all: the agent can do this
+  const dry = readDraft(p).dryRunHash!;
+  assert.ok(dry);
+  writeFileSync(p, setFields(readFileSync(p, "utf8"), { approved: "mallory 2026-03-10T11:00:00Z", approved_hash: dry }));
+  assert.match(r.svc.problem(readDraft(p))!, /edited after it was approved/);
+  await assert.rejects(r.svc.postNow("copy"), /edited after it was approved|no operator approval/);
+  assert.equal(r.x.clicks, 0);
+  // A real approval, then the stamp altered (a name or a date): void.
+  await r.svc.approve("copy", "alice");
+  assert.equal(r.svc.problem(readDraft(p)), undefined);
+  const good = readFileSync(p, "utf8");
+  writeFileSync(p, good.replace(/approved: "?alice 2026-03-10T12:00:00\.000Z"?/, "approved: bob 2026-03-10T12:00:00.000Z"));
+  assert.match(r.svc.problem(readDraft(p))!, /edited after it was approved/);
+  writeFileSync(p, good.replace("2026-03-10T12:00:00.000Z", "2026-03-10T11:59:00.000Z"));
+  assert.match(r.svc.problem(readDraft(p))!, /edited after it was approved/);
+  // And an approval hash is not a dry-run hash.
+  writeFileSync(p, setFields(good, { dry_run_hash: readDraft(p).approvedHash! }));
+  await assert.rejects(r.svc.postNow("copy"), /no live dry run/);
+});
+
+test("R4: a part already on the profile is never clicked again; record-live records it by card; bare domains are refused", async () => {
+  const r = rig();
+  const p = r.write("known", 'text: "Posted by hand"');
+  await approve(r, "known");
+  const id = ((BigInt(T0 + 5000) - 1288834974657n) << 22n);
+  r.x.live.push({ url: `https://x.com/example/status/${id}`, text: "Posted by hand" });
+  await assert.rejects(r.svc.postNow("known"), (e: any) => e.final === true && /already live at .*record-live/.test(e.message));
+  assert.equal(r.x.clicks, 0);
+  // record-live: the URL must be this account's status; the operator answers the card.
+  assert.throws(() => r.svc.requestCard("record-live", "known", { by: "operator", url: `https://x.com/${"someone"}/status/123` }), /not https:\/\/x\.com\/example\/status/);
+  assert.throws(() => r.svc.requestCard("record-live", "known", { by: "operator", url: "https://evil.example/example/status/123" }), /is not/);
+  const url = `https://x.com/example/status/${id}`;
+  const denied = await operator(r, "record-live", "known", { url, answer: "denied" });
+  assert.equal(readDraft(p).status, "Ready");
+  assert.match(denied.shown[0], new RegExp(url.replace(/[./]/g, "\\$&")));
+  assert.match(denied.shown[0], /Posted by hand/);
+  const done = await operator(r, "record-live", "known", { url });
+  assert.match(done.told.join(), /Recorded part 1/);
+  const d = readDraft(p);
+  assert.equal(d.status, "Posted");
+  assert.equal(d.postUrl, url);
+  await assert.rejects(r.svc.postNow("known"), /already marked Posted/);
+  // A thread: a record older than the part before it is refused, and a half-recorded thread continues from the next part.
+  const t = r.write("thr", 'thread:\n  - "One"\n  - "Two"');
+  await approve(r, "thr");
+  await operator(r, "record-live", "thr", { url: `https://x.com/example/status/${id + 10n}` });
+  assert.equal(readDraft(t).threadUrls.length, 1);
+  assert.equal(readDraft(t).status, "Ready");
+  assert.throws(() => r.svc.requestCard("record-live", "thr", { by: "operator", url: `https://x.com/example/status/${id}` }), /not newer/);
+  // Bare domains cannot be matched on a live post (X turns them into links): refused at render.
+  r.write("bare", 'text: "Read example.org/story today"');
+  await assert.rejects(r.svc.dryRun("bare", { offline: true }), /link without a scheme \(example\.org\)/);
+  r.write("scheme", 'text: "Read https://example.org/story today, mail me@example.org, see v2.0 and file.txt"');
+  assert.match(await r.svc.dryRun("scheme", { offline: true }), /sizes/);
+});
+
+test("R5: a session command that does not resolve is reported (status flag), ~ expands, an absolute command works", async () => {
+  const root = mkdtempSync(join(tmpdir(), "carl-post-r5-"));
+  const bin = join(root, "ob"); writeFileSync(bin, "#!/bin/sh\n", { mode: 0o755 });
+  const acc = (command: string) => ({ main: { session: { command } } });
+  assert.equal(sessionProblems(acc("overseer-browser"), {}).length, 1);
+  assert.match(sessionProblems(acc("overseer-browser"), {})[0], /was not found on the PATH Carl started with.*absolute path/);
+  assert.deepEqual(sessionProblems(acc("overseer-browser"), { "overseer-browser": bin }), []);
+  assert.match(sessionProblems(acc(join(root, "missing")), {})[0], /not an executable file/);
+  assert.deepEqual(sessionProblems(acc(bin), {}), []);
+  writeFileSync(join(root, "plain"), "x", { mode: 0o644 });
+  assert.equal(sessionProblems(acc(join(root, "plain")), {}).length, 1, "not executable");
+  // ~ is expanded when the configuration loads.
+  const home = mkdtempSync(join(tmpdir(), "carl-post-cfg5-"));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example", session: { command: "~/.local/bin/overseer-browser" } } } } }));
+  assert.equal(loadConfig(home).post.accounts.main.session.command, join(homedir(), ".local", "bin", "overseer-browser"));
+  assert.deepEqual(sessionPrograms({ a: { session: { command: "~/.local/bin/ob" } } }), { ob: join(homedir(), ".local", "bin", "ob") });
+  // `carl post status` flags it.
+  const r = rig();
+  const svc = new PostService({ ...r.svc.deps, sessionProblems: () => sessionProblems(acc("overseer-browser"), {}) });
+  assert.match(svc.status(), /^SESSION COMMAND PROBLEM: account "main"/);
+  assert.doesNotMatch(r.svc.status(), /SESSION COMMAND PROBLEM/);
+});
+
+test("R6: a few seconds of clock difference between this machine and X does not reject a live post, and a rerun does not depend on clocks", async () => {
+  // X's clock is 30 s behind this machine: the post's snowflake time is before the approval time.
+  const r = rig({ skew: 30_000 });
+  const p = r.write("skew", 'text: "Clocks differ"');
+  await approve(r, "skew");
+  await r.svc.postNow("skew");
+  assert.equal(readDraft(p).status, "Posted", "the normal path accepts it");
+  // The write-ahead record carries the profile's newest id before the click; the ledger keeps it too.
+  const q = r.write("base", 'text: "Baseline"');
+  await approve(r, "base");
+  r.x.hideNew = true;
+  await assert.rejects(r.svc.postNow("base"), /probably posted/);
+  assert.match(String(readDraft(q).fields.pending_baseline), /^\d+$/);
+  // The post then appears (X was slow); X's stamp is 30 s behind the click: the rerun finds it by the baseline.
+  const id = ((BigInt(r.clock.now - 30_000) - 1288834974657n) << 22n) + 99n;
+  r.x.live.push({ url: `https://x.com/example/status/${id}`, text: "Baseline" });
+  r.x.hideNew = false;
+  await r.svc.postNow("base");
+  assert.equal(readDraft(q).postUrl, `https://x.com/example/status/${id}`);
+  assert.equal(r.x.clicks, 2, "the rerun only looked");
+});
+
+test("R7: the agent cannot schedule inside 15 minutes, and the operator is told when it schedules", async () => {
+  const r = rig();
+  const notes: string[] = [];
+  const svc = new PostService({ ...r.svc.deps, notify: (m) => notes.push(m) });
+  r.write("lead", 'text: "Soon"');
+  await svc.approve("lead", "alice"); await svc.dryRun("lead");
+  const tool: any = carlTools({} as any, r.scheduler, { send: async () => "" }, svc).find((t) => t.name === "post_draft");
+  await assert.rejects(tool.execute("id", { action: "schedule", name: "lead", at: new Date(T0 + 1000).toISOString() }), /at least 15 minutes away/);
+  await assert.rejects(tool.execute("id", { action: "schedule", name: "lead", at: new Date(T0 + 14 * 60_000).toISOString() }), /at least 15 minutes away/);
+  assert.equal(notes.length, 0);
+  assert.match((await tool.execute("id", { action: "schedule", name: "lead", at: new Date(T0 + 16 * 60_000).toISOString() })).content[0].text, /Scheduled lead/);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /agent scheduled lead/);
+  // The operator is not held to the lead time.
+  r.write("op", 'text: "Operator soon"');
+  await svc.approve("op", "alice"); await svc.dryRun("op");
+  await svc.schedule("op", new Date(T0 + 1000).toISOString());
+});
+
+test("R8: running a post job before its slot without force does nothing and changes no state; forced, it posts", async () => {
+  const r = rig();
+  r.write("early", 'text: "Not yet"');
+  await approve(r, "early");
+  const { job } = await r.svc.schedule("early", "2099-01-01T00:00:00Z");
+  const s = new Scheduler(r.home, log, { prompt: async () => "", builtin: { post: (j: any, o: any) => r.svc.runScheduled(j, o) }, deliver: async () => { throw new Error("nothing should be delivered"); } } as any);
+  for (let i = 0; i < 7; i++) await s.runNow(job.id); // more than the five attempts a failing job gets
+  const j = s.get(job.id);
+  assert.equal(j.enabled, true);
+  assert.equal(j.attempts, undefined);
+  assert.equal(j.lastStatus, undefined);
+  assert.equal(j.lastRunAt, undefined);
+  assert.equal(j.nextRunAt, Date.parse("2099-01-01T00:00:00Z"));
+  assert.equal(r.x.clicks, 0);
+  await s.runNow(job.id, { force: true });
+  assert.equal(r.x.clicks, 1);
+});
+
+test("R9: a profile link that never drew is retryable; a different handle is final", async () => {
+  const r = rig();
+  r.write("slow", 'text: "Slow page"');
+  await approve(r, "slow");
+  r.x.noProfileLink = true;
+  await assert.rejects(r.svc.postNow("slow"), (e: any) => e.final !== true && /did not show the signed-in account's profile link/.test(e.message));
+  assert.equal(r.x.clicks, 0);
+  r.x.noProfileLink = false; r.x.signedIn = "someone";
+  await assert.rejects(r.svc.postNow("slow"), (e: any) => e.final === true && /not signed in to @example/.test(e.message));
+});
+
+test("R10: Carl's own ledger survives a stale editor save of the draft (no second click, no lost post)", async () => {
+  const r = rig();
+  const p = r.write("led", 'text: "Ledger"');
+  await approve(r, "led");
+  r.x.hideNew = true;
+  await assert.rejects(r.svc.postNow("led"), /probably posted/);
+  const ledger = join(r.home, "state", "post-ledger.jsonl");
+  assert.match(readFileSync(ledger, "utf8"), /"event":"click"/);
+  // An editor saves an older copy: the pending record is gone from the draft.
+  writeFileSync(p, setFields(readFileSync(p, "utf8"), { pending_part: undefined, pending_at: undefined, pending_baseline: undefined, last_error: undefined }));
+  assert.equal(readDraft(p).pendingPart, undefined);
+  await assert.rejects(r.svc.postNow("led"), /check @example's profile/);
+  assert.equal(r.x.clicks, 1, "still only looked");
+  // After a real post, a stale save drops the live record and the Posted status: the ledger puts them back, with no click.
+  const q = r.write("led2", 'text: "Ledger two"');
+  await approve(r, "led2");
+  r.x.hideNew = false;
+  await r.svc.postNow("led2");
+  const url = readDraft(q).postUrl!;
+  writeFileSync(q, setFields(readFileSync(q, "utf8"), { status: "Ready", thread_urls: undefined, post_url: undefined, part_hashes: undefined, posted_at: undefined }));
+  const clicks = r.x.clicks;
+  assert.match(await r.svc.postNow("led2"), /Posted led2/);
+  assert.equal(r.x.clicks, clicks, "not posted twice");
+  assert.equal(readDraft(q).postUrl, url);
+  assert.equal(readDraft(q).status, "Posted");
+});
+
+test("Low: an adopted job is tracked, so a later removal by the CLI is noticed", () => {
+  const home = mkdtempSync(join(tmpdir(), "carl-post-adopt-"));
+  const runners = { prompt: async () => "", builtin: {}, deliver: async () => {} } as any;
+  const gateway = new Scheduler(home, log, runners);
+  const cli = new Scheduler(home, log, runners, { passive: true });
+  const job = cli.add({ name: "post a", when: "once 2099-01-01T00:00:00Z", post: { draft: "/tmp/a.md" }, deliver: "home" });
+  (gateway as any).adoptExternal();
+  assert.ok(gateway.list().some((j) => j.id === job.id), "adopted");
+  cli.remove(job.id);
+  (gateway as any).adoptExternal(); // before the gateway's own next save
+  assert.equal(gateway.list().some((j) => j.id === job.id), false, "the removal is noticed, not undone");
+});
+
+test("Low: a lock is taken over only when its owner is dead, however old it is", async () => {
+  const r = rig();
+  const p = r.write("lock", 'text: "Locked"');
+  await approve(r, "lock");
+  const dir = join(r.home, "state", "post-locks"); mkdirSync(dir, { recursive: true });
+  const lock = join(dir, `${sha256(canon(p)).slice(0, 16)}.lock`);
+  const { utimesSync } = await import("node:fs");
+  writeFileSync(lock, `${process.pid} 0\n`);
+  utimesSync(lock, new Date(Date.now() - 3 * 3600_000), new Date(Date.now() - 3 * 3600_000));
+  await assert.rejects(r.svc.postNow("lock"), /being posted by another run/);
+  assert.equal(r.x.clicks, 0);
+  // A dead owner's lock (any age) is taken over.
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  writeFileSync(lock, `${dead} 0\n`);
+  await r.svc.postNow("lock");
+  assert.equal(r.x.clicks, 1);
+});
+
+test("Low: invisible characters are refused; a ZWJ emoji is not", async () => {
+  const r = rig();
+  for (const [name, ch] of [["ls", " "], ["ps", " "], ["zws", "​"], ["zwnj", "‌"], ["bom", "﻿"], ["word", "⁠"], ["shy", "­"], ["tag", "\u{e0041}"]] as const) {
+    r.write(name, `text: ${JSON.stringify(`a${ch}b`).replace(/[\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16)}`)}`); // JSON-escaped: a raw U+2028 ends a "line" for the YAML reader's .
+    await assert.rejects(r.svc.dryRun(name, { offline: true }), /control or bidirectional/, name);
+  }
+  assert.equal(visible("a b\u{e0041}"), "a\\u2028b\\ue0041");
+  r.write("family", `text: ${JSON.stringify("Family \u{1F468}‍\u{1F469}‍\u{1F467}")}`);
+  assert.match(await r.svc.dryRun("family", { offline: true }), /sizes/);
+});
+
+test("Low: a pending part cannot be re-approved with edited text; dropped thread text and a second skip flag are handled", async () => {
+  const r = rig();
+  const p = r.write("pend", 'text: "Original"');
+  await approve(r, "pend");
+  writeFileSync(p, setFields(readFileSync(p, "utf8"), { pending_part: "0", pending_at: "2026-03-10T12:00:00.000Z" }).replace("Original", "Edited"));
+  await assert.rejects(r.svc.approve("pend", "alice"), /settle it first/);
+  assert.throws(() => r.svc.requestCard("approve", "pend", { by: "agent" }), /settle it first/);
+  // A thread's first_reply, `## First reply` section or text would be dropped silently: refused.
+  r.write("t1", 'thread:\n  - "One"\n  - "Two"\nfirst_reply: "Lost"');
+  await assert.rejects(r.svc.dryRun("t1", { offline: true }), /`first_reply` would not be posted/);
+  r.write("t2", 'thread:\n  - "One"\n  - "Two"', "## First reply\n\nLost");
+  await assert.rejects(r.svc.dryRun("t2", { offline: true }), /First reply` section would not be posted/);
+  r.write("t3", 'thread:\n  - "One"\n  - "Two"\ntext: "Lost"');
+  await assert.rejects(r.svc.dryRun("t3", { offline: true }), /`text` .* would not be posted/);
+  // A re-approval ends an earlier --skip-dry-run on the scheduled job.
+  r.write("skip", 'text: "Skip"');
+  await r.svc.approve("skip", "alice");
+  const { job } = await r.svc.schedule("skip", "2026-03-10T14:00:00Z", { skipDryRun: true });
+  assert.equal(r.scheduler.get(job.id).post!.skipDryRun, true);
+  await r.svc.approve("skip", "alice");
+  assert.equal(r.scheduler.get(job.id).post!.skipDryRun, undefined);
 });

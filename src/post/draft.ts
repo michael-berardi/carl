@@ -1,7 +1,8 @@
 // A draft is a Markdown file with YAML front matter. Reads are tolerant (the front matter may have been written by a
 // notes vault); writes change only the keys they name, with a compare-and-set so nobody's concurrent edit is lost.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { dirname } from "node:path";
 import type { DraftContent, Runner } from "./types.ts";
 import { PostError } from "./types.ts";
 
@@ -23,16 +24,24 @@ export interface Draft extends DraftContent {
   /** Write-ahead record: a click on this part (0-based) started and was not recorded as live. */
   pendingPart?: number;
   pendingAt?: string;
+  /** The newest status id on the profile just before that click: a rerun looks only for posts newer than it, whatever the clocks say. */
+  pendingBaseline?: string;
+  /** Text the draft carries that would not be posted (a thread's `reply` or `first_reply`, a `## First reply` section): the draft is refused while it exists. */
+  droppedText: string[];
   /** Hashes of the texts that went live, per part (an edit of a live part is refused). */
   partHashes: string[];
   /** The binding hash a successful live dry run covered. */
   dryRunHash?: string;
 }
 
-/** Control and bidi characters: a terminal can show different text from what is hashed and posted. \n alone is allowed. */
-export const BAD_CHARS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+/**
+ * Characters a terminal or chat can show differently from what is hashed and posted, or not show at all: C0/C1 controls (\n
+ * alone is allowed), bidi controls, line and paragraph separators, soft hyphen, zero-width space/non-joiner, the invisible
+ * math operators, the byte-order mark and the tag characters. (The zero-width joiner stays: emoji sequences need it.)
+ */
+export const BAD_CHARS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u00ad\u061c\u200b\u200c\u200e\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u;
 /** The same text with every such character shown as \\uXXXX. */
-export const visible = (s: string) => s.replace(new RegExp(BAD_CHARS.source, "g"), (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+export const visible = (s: string) => s.replace(new RegExp(BAD_CHARS.source, "gu"), (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, "0")}`);
 
 export const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -113,6 +122,14 @@ export function parseDraft(raw: string, path: string): Draft {
   const text = str(fields.text) || section(body, "Post");
   const reply = str(fields.reply) || str(fields.first_reply) || section(body, "First reply") || undefined;
   const isThread = thread.length > 0;
+  // Text the file carries that the thread form would drop silently: refused by the service so nothing is lost unseen.
+  const droppedText: string[] = [];
+  if (isThread) {
+    if (str(fields.reply)) droppedText.push("`reply`");
+    if (str(fields.first_reply)) droppedText.push("`first_reply`");
+    if (section(body, "First reply")) droppedText.push("the `## First reply` section");
+    if (str(fields.text) || section(body, "Post")) droppedText.push("`text` / the `## Post` section");
+  }
   const parts = isThread ? thread : text ? [text] : [];
   const platform = str(fields.platform);
   const account = str(fields.account);
@@ -130,6 +147,8 @@ export function parseDraft(raw: string, path: string): Draft {
     threadUrls,
     pendingPart: /^\d+$/.test(str(fields.pending_part)) ? Number(str(fields.pending_part)) : undefined,
     pendingAt: str(fields.pending_at) || undefined,
+    pendingBaseline: /^\d+$/.test(str(fields.pending_baseline)) ? str(fields.pending_baseline) : undefined,
+    droppedText,
     partHashes: str(fields.part_hashes).split(",").map((h) => h.trim()).filter(Boolean),
     dryRunHash: str(fields.dry_run_hash) || undefined,
   };
@@ -165,6 +184,11 @@ export function setFields(raw: string, props: Record<string, string | undefined>
     if (at >= 0) lines.splice(at, end - at + 1, line); else lines.push(line);
   }
   return head + lines.join("\n") + tail;
+}
+
+/** fsync a folder so a rename or a new file in it is durable. */
+export function syncDir(dir: string): void {
+  try { const fd = openSync(dir, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } } catch {}
 }
 
 /**
@@ -205,10 +229,12 @@ export class DraftStore {
     const next = setFields(before, props);
     const tmp = `${path}.tmp-${process.pid}`;
     try {
-      writeFileSync(tmp, next, { mode: 0o600 });
+      const fd = openSync(tmp, "w", 0o600);
+      try { writeSync(fd, next); fsyncSync(fd); } finally { closeSync(fd); }
       // Check-then-rename: the window is a few microseconds, and a lost race is reported, not hidden.
       if (sha256(readFileSync(path, "utf8")) !== sha256(before)) throw new PostError(`${path} changed while it was being updated; nothing was overwritten`);
       renameSync(tmp, path);
+      syncDir(dirname(path)); // the rename itself must survive a power loss: the write-ahead record depends on it
     } finally {
       rmSync(tmp, { force: true });
     }

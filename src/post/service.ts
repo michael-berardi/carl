@@ -1,14 +1,15 @@
 // The post pipeline: draft record -> render and validate (dry run) -> post -> verify the live URL -> record the outcome.
 // Approval is a hard gate in front of every live or scheduled post, and is bound to the draft's current text.
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import type { PostConfig } from "../config.ts";
 import type { Job, Scheduler } from "../scheduler.ts";
-import { BAD_CHARS, type Draft, DraftStore, readDraft, sha256, textHash, visible } from "./draft.ts";
+import { BAD_CHARS, type Draft, DraftStore, readDraft, sha256, syncDir, textHash, visible } from "./draft.ts";
 import { agentCanWrite, canon, ensureKey, hmac } from "./key.ts";
 import type { AdapterRegistry } from "./registry.ts";
+import { type CardKind, type CardRequest, CardStore } from "./cards.ts";
 import { type AdapterContext, type PostAccount, PostError, type PostRun, type Rendered, type Runner } from "./types.ts";
 
 export interface PostDeps {
@@ -20,7 +21,14 @@ export interface PostDeps {
   sleep?: (ms: number) => Promise<void>;
   id?: () => string;
   scheduler?: Scheduler;
+  /** Told when the agent sets a slot (the operator must know a post is coming). */
+  notify?: (message: string) => void;
+  /** Session-command problems found at start (the gateway's own PATH check); `carl post status` shows them. */
+  sessionProblems?: () => string[];
 }
+
+/** An agent may not schedule closer than this: the operator needs time to look. */
+export const AGENT_MIN_LEAD_MS = 15 * 60_000;
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const ISO_DATE = /\d{4}-\d{2}-\d{2}/;
@@ -62,13 +70,16 @@ export class PostService {
   /** The approval key, created (0600) on first use. The gateway creates it at start. */
   ensureKey(): string { return (this.keyCache ??= ensureKey(this.deps.home)); }
 
-  /** What approval and the dry run are bound to: where (platform, account, profile) and what (every part, the reply), keyed. */
-  bind(d: Draft): string {
+  /**
+   * Where (platform, account, profile) and what (every part, the reply) a keyed hash covers. `purpose` keeps the hashes apart:
+   * a dry run's hash is not an approval, and the approval's covers the approved stamp itself, so a stamp cannot be copied or edited.
+   */
+  mac(purpose: "approve" | "dry-run" | "card", d: Draft, extra: unknown = null): string {
     const profile = this.deps.config.accounts[d.account]?.profile ?? "";
-    return hmac(this.ensureKey(), JSON.stringify({ v: 2, platform: d.platform, account: d.account, profile, parts: d.parts.map((p) => p.trim()), thread: d.isThread, reply: d.reply?.trim() ?? null }));
+    return hmac(this.ensureKey(), JSON.stringify({ v: 3, purpose, platform: d.platform, account: d.account, profile, parts: d.parts.map((p) => p.trim()), thread: d.isThread, reply: d.reply?.trim() ?? null, extra }));
   }
   /** Why this draft may not be posted (approval, keyed). */
-  problem(d: Draft): string | undefined { return approvalProblem(d, this.bind(d)); }
+  problem(d: Draft): string | undefined { return approvalProblem(d, this.mac("approve", d, d.approved ?? "")); }
 
   /** A draft by name (in the drafts folder) or, for the operator's CLI, by path. The agent's tool passes `named` only. */
   resolve(ref: string, opts: { named?: boolean } = {}): string {
@@ -95,7 +106,7 @@ export class PostService {
     if (!account) throw new PostError(`${n}: account "${d.account}" is not in carl.json post.accounts`, true);
     if (account.platform !== d.platform) throw new PostError(`${n}: the draft says platform "${d.platform}" but account "${d.account}" is "${account.platform}"`, true);
     if (String(Array.isArray(d.fields.media) ? d.fields.media.join("") : (d.fields.media ?? "")).trim()) throw new PostError(`${n}: media is not supported yet and would be dropped silently; remove \`media:\``, true);
-    if (d.isThread && d.fields.reply !== undefined && String(d.fields.reply).trim()) throw new PostError(`${n}: a thread's \`reply\` is not posted; put it in the thread as another part`, true);
+    if (d.droppedText.length) throw new PostError(`${n}: ${d.droppedText.join(", ")} would not be posted (a thread posts only its parts) and would be dropped silently; put it in the thread as another part or remove it`, true);
     const adapter = this.deps.registry.get(d.platform);
     const rendered = adapter.render(d, account);
     const bad = rendered.sequence.findIndex((t) => BAD_CHARS.test(t));
@@ -131,7 +142,7 @@ export class PostService {
       const report = await adapter.dryRun(ctx, rendered);
       lines.push(...report.lines);
       if (report.ok && d.status.toLowerCase() !== "posted") {
-        await this.store.set(d.path, { dry_run_hash: this.bind(d) }, d.fileHash);
+        await this.store.set(d.path, { dry_run_hash: this.mac("dry-run", d) }, d.fileHash);
         lines.push("dry run recorded for this exact text");
       }
     }
@@ -139,7 +150,7 @@ export class PostService {
   }
 
   private dryRunProblem(d: Draft): string | undefined {
-    return d.dryRunHash && d.dryRunHash === this.bind(d) ? undefined : `no live dry run covers this exact text; run \`carl post dry-run ${basename(d.path, ".md")}\` (not --offline) first, or pass --skip-dry-run`;
+    return d.dryRunHash && d.dryRunHash === this.mac("dry-run", d) ? undefined : `no live dry run covers this exact text; run \`carl post dry-run ${basename(d.path, ".md")}\` (not --offline) first, or pass --skip-dry-run`;
   }
 
   /** Post now. Refuses without a current approval and a live dry run. Resumes a half-posted thread; never reposts a part already live. */
@@ -161,28 +172,48 @@ export class PostService {
         const dry = this.dryRunProblem(d);
         if (dry) throw new PostError(`refused: ${name}: ${dry}`, true);
       }
+      // Carl's own record (state/post-ledger.jsonl) backs the draft's: an editor's stale save of the draft cannot erase a click or a live post.
+      const key = this.ledgerKey(path, rendered.sequence[0]);
+      const led = this.ledgerRead(key);
+      let done = d.threadUrls;
+      if (led.live.length > done.length) {
+        if (!done.every((u, i) => led.live[i] === u)) throw new PostError(`refused: ${name}: the draft's recorded URLs disagree with Carl's own record (state/post-ledger.jsonl); check the profile and fix the draft with \`carl post record-live\``, true);
+        done = led.live;
+      }
+      const pendingPart = d.pendingPart ?? (led.pending && led.pending.part === done.length ? led.pending.part : undefined);
+      const pendingAt = d.pendingPart !== undefined ? Date.parse(d.pendingAt ?? "") || 0 : led.pending?.atMs ?? 0;
+      const pendingBaseline = d.pendingPart !== undefined ? d.pendingBaseline : led.pending?.baseline;
       let token = d.fileHash;
       const set = async (props: Record<string, string | undefined>) => { token = await this.store.set(path, props, token); };
       const stamp = () => new Date(this.now()).toISOString();
-      const resumed = d.threadUrls.length;
+      const resumed = done.length;
       try {
         // Every part was already recorded live (a run died between the last part and the Posted record): just record it.
-        const urls = d.threadUrls.length >= rendered.sequence.length && d.pendingPart === undefined
-          ? d.threadUrls
+        const urls = done.length >= rendered.sequence.length && pendingPart === undefined
+          ? done
           : await adapter.post(ctx, rendered, {
-            done: d.threadUrls,
+            done,
             approvedAtMs: approvedAt(d),
-            pending: d.pendingPart !== undefined ? { part: d.pendingPart, atMs: Date.parse(d.pendingAt ?? "") || 0 } : undefined,
-            onBeforeClick: (part) => set({ pending_part: String(part), pending_at: stamp() }),
+            pending: pendingPart !== undefined ? { part: pendingPart, atMs: pendingAt, baseline: pendingBaseline } : undefined,
+            onBeforeClick: async (part, baseline) => {
+              this.ledgerAppend({ key, event: "click", part, atMs: this.now(), baseline });
+              await set({ pending_part: String(part), pending_at: stamp(), pending_baseline: baseline });
+            },
             onPart: (urls) => {
+              const hashes = urls.map((_, i) => partHash(rendered.sequence[i]));
+              this.ledgerAppend({ key, event: "live", urls, hashes });
               const props: Record<string, string | undefined> = {
-                thread_urls: urls.join(","), post_url: urls[0], part_hashes: urls.map((_, i) => partHash(rendered.sequence[i])).join(","),
-                pending_part: undefined, pending_at: undefined,
+                thread_urls: urls.join(","), post_url: urls[0], part_hashes: hashes.join(","),
+                pending_part: undefined, pending_at: undefined, pending_baseline: undefined,
               };
               if (!d.isThread && urls[1]) props.reply_url = urls[1];
               return set(props);
             },
           } satisfies PostRun);
+        if (urls.length > d.threadUrls.length && done === urls) {
+          // Recovered from the ledger: put the draft's own record right too.
+          await set({ thread_urls: urls.join(","), post_url: urls[0], part_hashes: urls.map((_, i) => partHash(rendered.sequence[i])).join(","), pending_part: undefined, pending_at: undefined, pending_baseline: undefined });
+        }
         await set({ status: "Posted", posted_at: stamp(), last_error: undefined, schedule_note: undefined });
         return `Posted ${name}${opts.note ? ` (${opts.note})` : ""}:\n${urls.join("\n")}${resumed ? `\n(resumed after ${resumed} part(s) already live)` : ""}`;
       } catch (e) {
@@ -192,13 +223,42 @@ export class PostService {
     });
   }
 
+  // ---- Carl's own durable record of clicks and live posts (the draft file can be overwritten by a stale editor save) ----
+
+  private ledgerFile = () => join(this.deps.home, "state", "post-ledger.jsonl");
+  private ledgerKey = (path: string, first: string) => sha256(`${canon(path)}\0${partHash(first)}`).slice(0, 16);
+  private ledgerAppend(e: Record<string, unknown>): void {
+    const file = this.ledgerFile();
+    mkdirSync(join(this.deps.home, "state"), { recursive: true, mode: 0o700 });
+    const fresh = !existsSync(file);
+    const fd = openSync(file, "a", 0o600);
+    try { appendFileSync(fd, JSON.stringify({ at: new Date(this.now()).toISOString(), ...e }) + "\n"); fsyncSync(fd); } finally { closeSync(fd); }
+    if (fresh) syncDir(join(this.deps.home, "state"));
+  }
+  private ledgerRead(key: string): { pending?: { part: number; atMs: number; baseline?: string }; live: string[]; hashes: string[] } {
+    const out: ReturnType<PostService["ledgerRead"]> = { live: [], hashes: [] };
+    let raw = "";
+    try { raw = readFileSync(this.ledgerFile(), "utf8"); } catch { return out; }
+    for (const line of raw.split("\n")) {
+      let e: any;
+      try { e = JSON.parse(line); } catch { continue; }
+      if (e?.key !== key) continue;
+      if (e.event === "click") out.pending = { part: e.part, atMs: e.atMs, baseline: e.baseline };
+      else if (e.event === "cleared") out.pending = undefined;
+      else if (e.event === "live" && Array.isArray(e.urls)) { out.live = e.urls; out.hashes = e.hashes ?? []; out.pending = undefined; }
+    }
+    return out;
+  }
+
   /**
-   * The operator records approval of the draft's current text. Only the CLI calls this; the agent's tool has no way to.
-   * `expected` is the text hash of what the operator was shown: if the file is anything else now, nothing is approved.
+   * Record the operator's approval of the draft's current text. Called only after the operator answered an approval card
+   * (see cards.ts); the agent's tool and the CLI have no path to it. `expected` is the text hash of what the operator was shown:
+   * if the file is anything else now, nothing is approved.
    */
   async approve(ref: string, by: string, expected?: string): Promise<string> {
     const d = this.load(ref);
     if (d.status.toLowerCase() === "posted") throw new PostError(`${basename(d.path)} is already Posted`, true);
+    if (d.pendingPart !== undefined) throw new PostError(`${basename(d.path)}: a click on part ${d.pendingPart + 1} was started and never recorded; settle it first (\`carl post record-live\` or \`carl post clear-pending\`), then approve`, true);
     if (expected !== undefined && d.textHash !== expected) throw new PostError(`${basename(d.path)} changed after it was shown to you; nothing was approved. Read it again and approve again`, true);
     const { rendered } = this.prepare(d); // an invalid draft is not approved
     const edited = this.liveEdit(d, rendered);
@@ -206,18 +266,70 @@ export class PostService {
     const who = by.trim();
     if (!who || ISO_DATE.test(who)) throw new PostError("approval needs a name (--by <name>)", true);
     const stamp = `${who} ${new Date(this.now()).toISOString()}`;
-    await this.store.set(d.path, { approved: stamp, approved_hash: this.bind(d), status: d.status === "Draft" ? "Ready" : d.status }, d.fileHash);
+    await this.store.set(d.path, { approved: stamp, approved_hash: this.mac("approve", d, stamp), status: d.status === "Draft" ? "Ready" : d.status }, d.fileHash);
+    this.deps.scheduler?.clearSkipDryRun(d.path); // an earlier --skip-dry-run belonged to the earlier approval
     return `Approved ${basename(d.path)}: ${stamp}\ntext hash ${d.textHash.slice(0, 12)}; editing the draft clears this approval.`;
   }
 
-  /** Operator only: the operator checked the account and the pending part is not live; allow the draft to click again. */
-  async clearPending(ref: string): Promise<string> {
-    const path = this.resolve(ref);
+  // ---- Operator cards: approve, clear-pending and record-live are decided on an operator channel, never by a caller ----
+
+  /** What the operator is shown for a card, and the keyed value the answer is bound to. Throws a final PostError when the card cannot be acted on. */
+  describeCard(card: CardRequest): { text: string; bind: string } {
+    const d = readDraft(card.draft);
+    const name = basename(d.path);
+    const { rendered, adapter, account } = this.prepare(d);
+    const where = `${d.platform}/${d.account} (${account.profile})`;
+    const parts = rendered.sequence.map((t, i) => `[${i + 1}]${i < d.partHashes.length ? " (ALREADY LIVE, cannot be changed)" : ""} ${visible(t)}`).join("\n\n");
+    if (d.status.toLowerCase() === "posted") throw new PostError(`${name} is already Posted`, true);
+    if (card.kind === "approve") {
+      if (d.pendingPart !== undefined) throw new PostError(`${name}: a click on part ${d.pendingPart + 1} was started and never recorded; settle it first (record-live or clear-pending)`, true);
+      const edited = this.liveEdit(d, rendered);
+      if (edited) throw new PostError(`${name}: ${edited}`, true);
+      return { text: `Approve posting to ${where}\nDraft ${name}, text hash ${d.textHash.slice(0, 12)}\n\n${parts}`, bind: this.mac("card", d, { kind: "approve", hash: d.textHash }) };
+    }
+    if (d.pendingPart === undefined && card.kind === "clear-pending") throw new PostError(`${name} has no pending part`, true);
+    if (card.kind === "clear-pending") {
+      const part = d.pendingPart!;
+      return {
+        text: `A click on part ${part + 1} of ${name} was started${d.pendingAt ? ` at ${d.pendingAt}` : ""} and never recorded.\nAccount ${where}\n\n${parts}\n\nOnly allow this if part ${part + 1} is CERTAINLY NOT on the profile. Clearing lets Carl click Post for it again.`,
+        bind: this.mac("card", d, { kind: "clear-pending", part, at: d.pendingAt ?? null, baseline: d.pendingBaseline ?? null }),
+      };
+    }
+    // record-live
+    const url = card.url ?? "";
+    const part = d.threadUrls.length;
+    if (part >= rendered.sequence.length) throw new PostError(`${name}: every part is already recorded live`, true);
+    const bad = adapter.checkLiveUrl(account, url, d.threadUrls);
+    if (bad) throw new PostError(`${name}: ${bad}`, true);
+    return {
+      text: `Record part ${part + 1} of ${name} as already live\nAccount ${where}\nURL ${url}\n\n[${part + 1}] ${visible(rendered.sequence[part])}\n\nOnly allow this if that URL really is this exact text, posted by this account.`,
+      bind: this.mac("card", d, { kind: "record-live", part, url }),
+    };
+  }
+
+  /** Carry out a card the operator answered yes to. The bound value must still match what is on disk now. */
+  async applyCard(card: CardRequest, bind: string, by: string): Promise<string> {
+    const now = this.describeCard(card);
+    if (now.bind !== bind) throw new PostError("the draft changed after the card was shown to you; nothing was done. Ask again", true);
+    const path = card.draft;
+    if (card.kind === "approve") return this.approve(path, by, readDraft(path).textHash);
     return this.withLock(path, async () => {
       const d = readDraft(path);
-      if (d.pendingPart === undefined) return `${basename(path)} has no pending part.`;
-      await this.store.set(path, { pending_part: undefined, pending_at: undefined }, d.fileHash);
-      return `Cleared the pending record for part ${d.pendingPart + 1} of ${basename(path)}. The next run will post it if it is not live.`;
+      if (this.describeCard(card).bind !== bind) throw new PostError("the draft changed after the card was shown to you; nothing was done. Ask again", true);
+      const { rendered } = this.prepare(d);
+      const key = this.ledgerKey(path, rendered.sequence[0]);
+      if (card.kind === "clear-pending") {
+        this.ledgerAppend({ key, event: "cleared", by });
+        await this.store.set(path, { pending_part: undefined, pending_at: undefined, pending_baseline: undefined }, d.fileHash);
+        return `Cleared the pending record for part ${d.pendingPart! + 1} of ${basename(path)}. The next run will post it if it is not live.`;
+      }
+      const urls = [...d.threadUrls, card.url!];
+      const hashes = urls.map((_, i) => partHash(rendered.sequence[i]));
+      this.ledgerAppend({ key, event: "live", urls, hashes, by });
+      const props: Record<string, string | undefined> = { thread_urls: urls.join(","), post_url: urls[0], part_hashes: hashes.join(","), pending_part: undefined, pending_at: undefined, pending_baseline: undefined };
+      if (urls.length >= rendered.sequence.length) { props.status = "Posted"; props.posted_at = new Date(this.now()).toISOString(); props.last_error = undefined; props.schedule_note = undefined; }
+      await this.store.set(path, props, d.fileHash);
+      return `Recorded part ${urls.length} of ${basename(path)} as live: ${card.url}${urls.length >= rendered.sequence.length ? "\nEvery part is live; the draft is marked Posted." : ""}`;
     });
   }
 
@@ -242,6 +354,7 @@ export class PostService {
     const when = Date.parse(at);
     if (Number.isNaN(when)) throw new PostError(`--at "${at}" is not an ISO time (for example 2026-01-31T09:00:00Z)`, true);
     if (when <= this.now()) throw new PostError(`--at ${at} is in the past; use \`carl post now\` to post immediately`, true);
+    if (opts.agent && when < this.now() + AGENT_MIN_LEAD_MS) throw new PostError(`a slot the agent sets must be at least ${AGENT_MIN_LEAD_MS / 60_000} minutes away, so the operator can look first (got ${dur(when - this.now())}); pick a later time`, true);
     const iso = new Date(when).toISOString();
     for (const old of scheduler.list()) if (old.post?.draft === d.path && old.enabled) scheduler.remove(old.id);
     const job = scheduler.add({ name: `post ${basename(d.path, ".md")}`, when: `once ${iso}`, post: { draft: d.path, ...(opts.late === "post" ? { late: "post" as const } : {}), ...(opts.skipDryRun ? { skipDryRun: true } : {}) }, deliver: "home" });
@@ -251,6 +364,7 @@ export class PostService {
       scheduler.remove(job.id);
       throw e;
     }
+    if (opts.agent) this.deps.notify?.(`The agent scheduled ${name} to post to ${d.platform}/${d.account} at ${iso}. The text is the one you approved. To stop it, remove the schedule or edit the draft (an edit voids the approval).`);
     const policy = opts.late === "post" ? "posts late if the slot is missed" : `skips the slot if missed by more than ${dur(this.deps.config.missedWindowMinutes * 60_000)}`;
     return { job, text: `Scheduled ${name} for ${iso} (${policy}). Job ${job.id}.` };
   }
@@ -281,6 +395,16 @@ export class PostService {
       return `Skipped ${name}: it was scheduled for ${new Date(slot).toISOString()} and Carl could not post it until ${dur(late)} later, past the ${dur(window)} window. It is still Scheduled and was NOT posted. Reschedule it with \`carl post schedule\` or post it with \`carl post now\`.`;
     }
     return this.publish(path, { note: late > 60_000 && !started ? `${dur(late)} late` : undefined, skipDryRun: job.post.skipDryRun });
+  }
+
+  /** Put a card in front of the operator (it is shown on their channel by the gateway). It records nothing by itself. */
+  requestCard(kind: CardKind, ref: string, opts: { named?: boolean; url?: string; by: "operator" | "agent" }): string {
+    const draft = this.resolve(ref, { named: opts.named });
+    if (!existsSync(draft)) throw new PostError(`no draft at ${draft}`, true);
+    const card = { id: "", kind, draft, ...(opts.url ? { url: opts.url } : {}), by: opts.by, at: new Date(this.now()).toISOString() };
+    this.describeCard(card); // refuses now what could never be approved
+    const made = new CardStore(this.deps.home, () => this.now()).add(card);
+    return `${made.fresh ? "Asked" : "Already asked"}: card ${made.card.id} (${kind} ${basename(draft)}) waits for your answer on the operator channel (Telegram, the home chat). Nothing is ${kind === "approve" ? "approved" : "changed"} until you answer it.`;
   }
 
   /** The agent's tool: a new draft. It cannot carry approval; the operator approves with the CLI. */
@@ -316,13 +440,15 @@ export class PostService {
         const d = readDraft(join(dir, f));
         const gate = this.problem(d);
         const late = d.status === "Scheduled" && d.scheduledAt && Date.parse(d.scheduledAt) < this.now() ? " (slot passed)" : "";
-        out.push(`${f.replace(/\.md$/, "").padEnd(28)} ${d.status.padEnd(10)} ${d.platform}/${d.account} ${gate ? "unapproved" : "approved"}${d.scheduledAt ? ` at ${d.scheduledAt}${late}` : ""}${d.threadUrls.length ? ` live ${d.threadUrls.length}/${d.isThread ? d.parts.length : d.parts.length + (d.reply ? 1 : 0)}` : ""}${d.pendingPart !== undefined ? ` [PENDING part ${d.pendingPart + 1}: a click was started; check the profile, then carl post clear-pending]` : ""}${d.fields.schedule_note ? ` [${d.fields.schedule_note}]` : ""}${d.fields.last_error ? ` [error: ${String(d.fields.last_error).slice(0, 80)}]` : ""}`);
+        out.push(`${f.replace(/\.md$/, "").padEnd(28)} ${d.status.padEnd(10)} ${d.platform}/${d.account} ${gate ? "unapproved" : "approved"}${d.scheduledAt ? ` at ${d.scheduledAt}${late}` : ""}${d.threadUrls.length ? ` live ${d.threadUrls.length}/${d.isThread ? d.parts.length : d.parts.length + (d.reply ? 1 : 0)}` : ""}${d.pendingPart !== undefined ? ` [PENDING part ${d.pendingPart + 1}: a click was started; check the profile, then carl post record-live or clear-pending]` : ""}${d.fields.schedule_note ? ` [${d.fields.schedule_note}]` : ""}${d.fields.last_error ? ` [error: ${String(d.fields.last_error).slice(0, 80)}]` : ""}`);
       } catch (e) {
         out.push(`${f}: unreadable (${(e as Error).message})`);
       }
     }
+    const cards = new CardStore(this.deps.home, () => this.now()).list();
+    const problems = this.deps.sessionProblems?.() ?? [];
     const jobs = (this.deps.scheduler?.list() ?? []).filter((j) => j.post);
-    return [out.length ? out.join("\n") : `No drafts in ${dir}.`, ...(jobs.length ? ["", "Scheduled posts:", ...jobs.map((j) => `${j.id} ${j.enabled ? "on " : "off"} ${basename(j.post!.draft)} ${j.when} last=${j.lastStatus ?? "-"}${j.lastError ? ` (${j.lastError.slice(0, 80)})` : ""}${j.post!.late === "post" ? " late:post" : ""}`)] : [])].join("\n");
+    return [...problems.map((p) => `SESSION COMMAND PROBLEM: ${p}`), out.length ? out.join("\n") : `No drafts in ${dir}.`, ...(cards.length ? ["", "Waiting for your answer on the operator channel:", ...cards.map((c) => `${c.id} ${c.kind} ${basename(c.draft)}${c.url ? ` ${c.url}` : ""}`)] : []), ...(jobs.length ? ["", "Scheduled posts:", ...jobs.map((j) => `${j.id} ${j.enabled ? "on " : "off"} ${basename(j.post!.draft)} ${j.when} last=${j.lastStatus ?? "-"}${j.lastError ? ` (${j.lastError.slice(0, 80)})` : ""}${j.post!.late === "post" ? " late:post" : ""}`)] : [])].join("\n");
   }
 
   /** One run per draft at a time (the CLI and the scheduler could otherwise both post it). */
@@ -338,7 +464,8 @@ export class PostService {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       let seen = ""; let age = Infinity;
       try { seen = readFileSync(lock, "utf8"); age = Date.now() - statSync(lock).mtimeMs; } catch {}
-      if (seen && age < 45 * 60_000 && alive(Number(seen.split(" ")[0]))) throw busy();
+      // Only a dead owner's lock is taken over; a long run (a slow browser) keeps it. A lock still being written is given a moment.
+      if (seen ? alive(Number(seen.split(" ")[0])) : age < 10_000) throw busy();
       // Take over a stale lock atomically: renaming it aside succeeds for one contender only, and a lock that turns out
       // to be a fresh one (another contender won first) is put back.
       const aside = `${lock}.stale-${process.pid}-${randomBytes(3).toString("hex")}`;

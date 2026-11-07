@@ -157,14 +157,15 @@ Carl publishes a social post from a draft file, now or on a schedule, and never 
 
 ```
 carl post dry-run <draft>      render, validate and prove the exact text fits the composer; posts nothing
-carl post approve <draft>      you approve the exact text (needs a terminal; editing the draft clears it)
+carl post approve <draft>      asks: a card with the exact text appears in your Telegram home chat; the approval is recorded only when you press Allow there (editing the draft clears it)
 carl post now <draft>          post it (needs approval and a live dry run); a failure after the click stops for you to check, it never re-clicks
 carl post schedule <draft> --at <ISO> [--late post]
-carl post clear-pending <draft>  after you checked the profile and a pending part is not live
+carl post clear-pending <draft>  (a card) after you checked the profile and a pending part is not live
+carl post record-live <draft> <url>  (a card) a pending part is live at that URL
 carl post status
 ```
 
-Scheduled posts survive restarts. A slot missed by more than three hours (`post.missedWindowMinutes`) is skipped, the draft stays Scheduled and the delivered message says so, unless you chose `--late post`. The agent can draft, dry-run and give an approved draft its first slot through its `post_draft` tool but cannot approve, post at once, change a slot, or run a scheduled post; the approval is an HMAC with a key the sandbox denies. See [docs/POSTING.md](docs/POSTING.md).
+Scheduled posts survive restarts. A slot missed by more than three hours (`post.missedWindowMinutes`) is skipped, the draft stays Scheduled and the delivered message says so, unless you chose `--late post`. The agent can draft, dry-run and give an approved draft its first slot through its `post_draft` tool but cannot approve, answer a card, post at once, schedule closer than 15 minutes, change a slot, or run a scheduled post; the approval is an HMAC with a key the sandbox denies, and it is recorded only when you answer the card on your own channel. See [docs/POSTING.md](docs/POSTING.md).
 
 ## Configuration
 

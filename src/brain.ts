@@ -257,6 +257,8 @@ export class Brain extends EventEmitter {
   private sandboxProfile?: string;
   private claudeBin?: string;
   private trusted: Record<string, string> = {};
+  /** Programs the gateway resolved from the operator's PATH at init (for the post primitive's session-command check). */
+  get resolvedPrograms(): Record<string, string> { return this.trusted; }
   private readonly opts: { shared?: boolean };
   private get stateDir(): string { return this.opts.shared ? join(this.cfg.home, "state") : join(this.cfg.home, "state", "run", String(process.pid)); }
   /** The shell sandbox profile, for helpers that run agent-influenced programs (undefined without Seatbelt). */

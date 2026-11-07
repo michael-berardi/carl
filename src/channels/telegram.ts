@@ -688,20 +688,12 @@ export class TelegramChannel {
     });
   }
 
-  private readonly approvals = new Map<string, (answer: "approved" | "denied") => void>();
+  private readonly approvals = new Map<string, (answer: "approved" | "denied", by?: string) => void>();
 
   /** Ask the operator to approve a dangerous command with buttons. Fails closed after 5 minutes. */
   async requestApproval(chatId: number, command: string, reason: string): Promise<"approved" | "denied" | "timeout"> {
     const id = Math.random().toString(36).slice(2, 10);
-    if (!this.callbacks.has("ca")) {
-      this.callbacks.set("ca", async (q, data) => {
-        const [, reqId, choice] = data.split(":");
-        const resolve = this.approvals.get(reqId);
-        if (!resolve) return "This approval has expired.";
-        resolve(choice === "yes" ? "approved" : "denied");
-        return choice === "yes" ? "Approved" : "Denied";
-      });
-    }
+    if (!this.callbacks.has("ca")) await this.requestApprovalSetup();
     // Shown exactly, escaped, with invisible and direction-changing characters made visible; never truncated:
     // a command too long to read in chat is not approvable in chat.
     const visible = visibleControls(command);
@@ -720,6 +712,40 @@ export class TelegramChannel {
     await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: msg.message_id, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
     await this.api.sendMessage(chatId, mark, { replyTo: msg.message_id, silent: true }).catch(() => {});
     return answer;
+  }
+
+  /**
+   * An operator card for the post primitive: the exact text, shown escaped with invisible characters made visible and never
+   * truncated, with Allow / Deny buttons. Only an allowed user's button press answers it (onCallback checks); it waits up to
+   * 6 hours and then expires unanswered.
+   */
+  async requestCard(chatId: number, text: string, yes: string): Promise<{ answer: "approved" | "denied" | "timeout"; by?: string }> {
+    const id = Math.random().toString(36).slice(2, 10);
+    if (!this.callbacks.has("ca")) await this.requestApprovalSetup();
+    const html = `<b>Post approval</b>\n<blockquote expandable><pre>${escapeHtml(visibleControls(text))}</pre></blockquote>`;
+    if (html.length > 4_000) {
+      await this.api.sendMessage(chatId, "Refused without asking: this card is too long to review here. Shorten the draft.").catch(() => {});
+      return { answer: "denied" };
+    }
+    const msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", buttons: [[{ text: yes, callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] });
+    const result = await new Promise<{ answer: "approved" | "denied" | "timeout"; by?: string }>((resolve) => {
+      const timer = setTimeout(() => { this.approvals.delete(id); resolve({ answer: "timeout" }); }, 6 * 3600_000);
+      this.approvals.set(id, (a, by) => { clearTimeout(timer); this.approvals.delete(id); resolve({ answer: a, by }); });
+    });
+    const mark = result.answer === "approved" ? "✅ allowed" : result.answer === "denied" ? "⛔ denied" : "⌛ expired (nothing done)";
+    await this.api.call("editMessageReplyMarkup", { chat_id: chatId, message_id: msg.message_id, reply_markup: { inline_keyboard: [] } }, { retries: 0 }).catch(() => {});
+    await this.api.sendMessage(chatId, mark, { replyTo: msg.message_id, silent: true }).catch(() => {});
+    return result;
+  }
+
+  private async requestApprovalSetup(): Promise<void> {
+    this.callbacks.set("ca", async (q, data) => {
+      const [, reqId, choice] = data.split(":");
+      const resolve = this.approvals.get(reqId);
+      if (!resolve) return "This approval has expired.";
+      resolve(choice === "yes" ? "approved" : "denied", String(q.from.id));
+      return choice === "yes" ? "Allowed" : "Denied";
+    });
   }
 
   /** Send Markdown as Telegram HTML, chunked; falls back to plain text when Telegram rejects the HTML. */
