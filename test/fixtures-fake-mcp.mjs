@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 const log = process.argv[2];
 const tools = [
-  { name: "overseer_status", description: "Read the status.", inputSchema: { type: "object", properties: {} } },
+  { name: "overseer_status", description: "Read the status.", annotations: { readOnlyHint: true }, inputSchema: { type: "object", properties: {} } },
   { name: "overseer_send", description: "Type text into a terminal.", inputSchema: { type: "object", properties: { text: { type: "string" } } } },
 ];
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");

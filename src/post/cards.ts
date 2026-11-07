@@ -2,14 +2,15 @@
 // them can be done by whoever can run a command or type into a terminal. A request (the CLI, the agent's tool) only writes a card
 // file; the gateway shows the card on the operator's channel with the exact text, account, profile URL and text hash, and the
 // action is carried out only when the operator answers that card there. The answer arrives as a channel callback in the gateway's
-// memory, bound to the keyed hash of what was shown; nothing on disk can make a card "approved".
+// memory, bound to the keyed hash of what was shown; nothing on disk can make a card "approved". "post-now" is the one card
+// that also posts: the press approves the exact text and the gateway posts it in the same breath.
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { PostService } from "./service.ts";
 import { permanentSendFailure } from "../channels/telegram.ts";
 
-export type CardKind = "approve" | "clear-pending" | "record-live";
+export type CardKind = "approve" | "post-now" | "clear-pending" | "record-live";
 
 export interface CardRequest {
   id: string;
@@ -18,12 +19,14 @@ export interface CardRequest {
   draft: string;
   /** record-live: the URL of the post. */
   url?: string;
+  /** post-now: the operator asked to post without the live dry run. */
+  skipDryRun?: boolean;
   /** Who asked (informational: it decides nothing). */
   by: "operator" | "agent";
   at: string;
 }
 
-const KINDS = new Set<string>(["approve", "clear-pending", "record-live"]);
+const KINDS = new Set<string>(["approve", "post-now", "clear-pending", "record-live"]);
 const MAX_PENDING = 8;
 const MAX_AGE_MS = 48 * 3600_000;
 /** After the operator denies a card the agent asked for, the agent cannot ask for the same thing again for this long. */
@@ -46,7 +49,7 @@ export class CardStore {
       try {
         const c = JSON.parse(readFileSync(join(this.dir, f), "utf8")) as CardRequest;
         const fresh = Date.parse(c.at) > now - MAX_AGE_MS;
-        if (c.id === f.slice(0, -5) && KINDS.has(c.kind) && typeof c.draft === "string" && c.draft.startsWith("/") && (c.url === undefined || typeof c.url === "string") && fresh) out.push(c);
+        if (c.id === f.slice(0, -5) && KINDS.has(c.kind) && typeof c.draft === "string" && c.draft.startsWith("/") && (c.url === undefined || typeof c.url === "string") && (c.skipDryRun === undefined || typeof c.skipDryRun === "boolean") && fresh) out.push(c);
         else rmSync(join(this.dir, f), { force: true });
       } catch { /* unreadable: ignored */ }
     }

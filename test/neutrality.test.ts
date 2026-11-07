@@ -52,3 +52,11 @@ test("the post primitive ships no account, handle or platform preference: accoun
     .map(([f, n, line]) => `${f.slice(root.length)}:${n}: ${line.trim().slice(0, 120)}`);
   assert.deepEqual(hits, []);
 });
+
+test("src names no coordinator: no overseer or coordinator_ literal anywhere in the source", () => {
+  const hits = files(join(root, "src"))
+    .flatMap((f) => readFileSync(f, "utf8").split("\n").map((line, i) => [f, i + 1, line] as const))
+    .filter(([, , line]) => /overseer|coordinator_/i.test(line))
+    .map(([f, n, line]) => `${f.slice(root.length)}:${n}: ${line.trim().slice(0, 120)}`);
+  assert.deepEqual(hits, []);
+});

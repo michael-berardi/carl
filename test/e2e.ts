@@ -50,7 +50,7 @@ writeFileSync(join(home, "carl.json"), JSON.stringify({
   tools: ["read", "bash"],
   telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: true },
   api: { port },
-  ultraterm: { home: hermes, overseerBin: overseer },
+  ultraterm: { home: hermes, controlBin: overseer },
   hooks: { deploy: { prompt: "A deploy event arrived: {{payload}} Reply with exactly: hook-<the service name from the event>", deliver: "home", secretEnv: "HOOK_SECRET" } },
 }));
 const workspaceProbe = join(root, "carl", "workspace", "doomed");

@@ -13,7 +13,7 @@ function compat(t: any) {
   // An arbitrary synthetic authority-shaped value ensures no allowlist silently strips future launcher identity.
   writeFileSync(bin, `#!${process.execPath}\nconst expected = ["decision-answer", "--id", "D-test", "--choice", "2", "--user", "42", "--callback", "synthetic-callback"];\nif (process.env.CARL_TEST_AUTHORITY !== "synthetic-launch-identity" || JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expected)) process.exit(4);\nconsole.log(JSON.stringify({accepted:true,result:"Synthetic answer accepted"}));\n`);
   chmodSync(bin, 0o700);
-  const plugin = new UltraTermCompat({ home, overseerBin: bin });
+  const plugin = new UltraTermCompat({ home, controlBin: bin });
   const edits: string[] = [];
   (plugin as any).gw = { telegram: { api: { editMessageText: async (_chat: number, _id: number, text: string) => edits.push(text) } }, log: { warn: () => {} } };
   return { plugin, edits };
