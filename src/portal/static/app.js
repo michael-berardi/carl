@@ -235,7 +235,7 @@ $("#reflect").addEventListener("click", async () => {
 async function loadStatus() {
   const [s, logs] = await Promise.all([api("/carl/status"), api("/carl/logs?lines=120")]);
   const facts = [
-    ["Version", s.version], ["Model", s.primary], ["Fallbacks", s.fallbacks.join(", ") || "none"],
+    ["Version", s.updateAvailable ? `${s.version} (${s.updateAvailable} available: carl update or /update)` : s.version], ["Model", s.primary], ["Fallbacks", s.fallbacks.join(", ") || "none"],
     ["At its limit", Object.entries(s.limits).map(([m, until]) => `${m} until ${time(until)}`).join("; ") || "none"],
     ["Telegram", `${s.telegram.state}${s.telegram.error ? ` (${s.telegram.error})` : ""}`], ["API", `${s.api.state} :${s.api.port}`],
     ["Runs active", s.activeRuns], ["Conversations open", s.conversations], ["Schedules", s.schedules], ["Lessons", s.lessons], ["Started", time(s.startedAt)],

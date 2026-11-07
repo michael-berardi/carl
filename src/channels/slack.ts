@@ -5,6 +5,9 @@ import type { Brain } from "../brain.ts";
 import { visibleControls } from "./format.ts";
 import type { Log } from "../log.ts";
 import { MIRROR_INSTRUCTION } from "../psyche.ts";
+import type { ImageContent } from "@earendil-works/pi-ai";
+import type { FileOutput } from "../tools.ts";
+import { downloadCapped, MAX_FILE_BYTES, saveMedia } from "./attachment.ts";
 
 export interface SlackConfig {
   enabled: boolean;
@@ -16,7 +19,7 @@ export interface SlackConfig {
   apiBase: string;
 }
 
-export interface SlackEvent { type: string; user?: string; text?: string; channel?: string; ts?: string; thread_ts?: string; channel_type?: string; bot_id?: string; subtype?: string }
+export interface SlackEvent { type: string; user?: string; text?: string; channel?: string; ts?: string; thread_ts?: string; channel_type?: string; bot_id?: string; subtype?: string; files?: { url_private_download?: string; mimetype?: string; name?: string; size?: number }[] }
 
 const EDIT_INTERVAL_MS = 1_500;
 const CHUNK = 12_000;
@@ -52,13 +55,15 @@ export class SlackChannel {
   /** Channels an allowed user has talked in: the only places Carl may deliver to besides home. */
   readonly known = new Set<string>();
 
-  constructor(cfg: SlackConfig, appToken: string, botToken: string, brain: Brain, log: Log) {
+  constructor(cfg: SlackConfig, appToken: string, botToken: string, brain: Brain, log: Log, mediaDir: string) {
     this.cfg = cfg;
     this.appToken = appToken;
     this.botToken = botToken;
     this.brain = brain;
     this.log = log;
+    this.mediaDir = mediaDir;
   }
+  private readonly mediaDir: string;
 
   async api<T = any>(method: string, body: Record<string, unknown>, token = this.botToken): Promise<T> {
     for (let attempt = 0; ; attempt++) {
@@ -133,7 +138,7 @@ export class SlackChannel {
       const ev: SlackEvent = frame.payload?.event ?? {};
       // One post, one run: DMs arrive as "message", channel mentions as "app_mention" (Slack sends both for a mention).
       const wanted = ev.type === "message" ? ev.channel_type === "im" : ev.type === "app_mention";
-      if (wanted && !ev.bot_id && !ev.subtype && ev.user !== this.botUser) await this.onMessage(ev);
+      if (wanted && !ev.bot_id && (!ev.subtype || ev.subtype === "file_share") && ev.user !== this.botUser) await this.onMessage(ev);
     } else if (frame.type === "interactive") {
       const p = frame.payload;
       const action = p?.actions?.[0];
@@ -154,7 +159,23 @@ export class SlackChannel {
       return;
     }
     let text = (ev.text ?? "").replace(new RegExp(`<@${this.botUser}>`, "g"), "").trim();
-    if (!text) return;
+    const images: ImageContent[] = [];
+    const notes: string[] = [];
+    for (const file of ev.files ?? []) {
+      try {
+        if (!file.url_private_download) throw new Error("no downloadable url");
+        // The bot token goes only to Slack's own file host (or the configured API host, a relay or test fixture).
+        const host = new URL(file.url_private_download).hostname;
+        if (host !== "files.slack.com" && host !== new URL(this.cfg.apiBase).hostname) throw new Error(`file URL host ${host} is not Slack's`);
+        const data = await downloadCapped(file.url_private_download, MAX_FILE_BYTES, { headers: { authorization: `Bearer ${this.botToken}` } });
+        const path = saveMedia(this.mediaDir, file.name ?? "file", data);
+        if (file.mimetype?.startsWith("image/")) images.push({ type: "image", data: data.toString("base64"), mimeType: file.mimetype });
+        else notes.push(`[file received: ${path}]`);
+      } catch (e) {
+        notes.push(`[attachment could not be fetched: ${(e as Error).message}]`);
+      }
+    }
+    if (!text && !images.length && !notes.length) return;
     const key = SlackChannel.conversationKey(ev);
     this.known.add(ev.channel!);
     const thread = ev.channel_type === "im" ? undefined : ev.thread_ts ?? ev.ts;
@@ -163,6 +184,7 @@ export class SlackChannel {
     let preface: string | undefined;
     const mirror = text.match(/^mirror\s+([\s\S]+)/i);
     if (mirror) { preface = MIRROR_INSTRUCTION; text = mirror[1]; }
+    if (notes.length || images.length) text = [...notes, text].filter(Boolean).join("\n");
     let draftTs: string | undefined;
     let shown = "";
     let last = 0;
@@ -176,7 +198,7 @@ export class SlackChannel {
       else await this.api("chat.update", { channel: ev.channel, ts: draftTs, text: toMrkdwn(body) }).catch(() => {});
     };
     let latest = "";
-    const result = await this.brain.ask(key, { text, preface, source: "api" }, {
+    const result = await this.brain.ask(key, { text, preface, source: "api", images: images.length ? images : undefined }, {
       onText: (t) => {
         latest = t;
         if (timer) return;
@@ -199,14 +221,36 @@ export class SlackChannel {
     return (await this.api<{ ts: string }>("chat.postMessage", { channel, text: formatted ? text : toMrkdwn(text), thread_ts: thread })).ts;
   }
 
-  /** Deliver Markdown to a channel id or "home". */
-  async send(target: string, markdown: string): Promise<number> {
+  /** Deliver Markdown to a channel id or "home", optionally in a thread, optionally with a file. */
+  async send(target: string, markdown: string, thread?: string, file?: FileOutput): Promise<number> {
     const channel = target === "home" ? this.cfg.homeChannel : target;
     if (!channel) throw new Error("slack.homeChannel is not configured");
     if (channel !== this.cfg.homeChannel && !this.known.has(channel)) throw new Error(`Slack channel ${channel} is not the home channel or a conversation an allowed user started`);
+    if (file) {
+      await this.sendFile(channel, file, markdown, thread);
+      return 1;
+    }
     const chunks = splitChunks(toMrkdwn(markdown));
-    for (const c of chunks) await this.post(channel, c, undefined, true);
+    for (const c of chunks) await this.post(channel, c, thread, true);
     return chunks.length;
+  }
+
+  /** Upload a file and post it: getUploadURLExternal -> bytes to upload_url -> completeUploadExternal. */
+  async sendFile(channel: string, file: FileOutput, comment?: string, thread?: string): Promise<string> {
+    const up = await this.api<{ upload_url: string; file_id: string }>("files.getUploadURLExternal", { filename: file.name, length: file.data.byteLength });
+    const res = await fetch(up.upload_url, {
+      method: "POST",
+      body: new Blob([new Uint8Array(file.data)]),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) throw new Error(`Slack file upload failed: HTTP ${res.status}`);
+    const done = await this.api<{ file?: { id: string } }>("files.completeUploadExternal", {
+      files: [{ id: up.file_id, title: file.name }],
+      channel_id: channel,
+      thread_ts: thread,
+      initial_comment: comment,
+    });
+    return done.file?.id ?? up.file_id;
   }
 
   /** Ask in the conversation's channel with Block Kit buttons; fails closed after 5 minutes. */

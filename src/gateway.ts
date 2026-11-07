@@ -14,7 +14,7 @@ import { individuationPrompt, parseIndividuation, Psyche, readJsonl } from "./ps
 import { type Job, Scheduler } from "./scheduler.ts";
 import { cleanEnv, sandboxArgv } from "./sandbox.ts";
 import { ApiServer, json } from "./server.ts";
-import { carlTools, type Outbox } from "./tools.ts";
+import { carlTools, type FileOutput, type Outbox } from "./tools.ts";
 import { GroupArchive, groupHistoryTool } from "./group-archive.ts";
 import { WorkLedger, workTools } from "./work.ts";
 import { COMMIT, VERSION } from "./version.ts";
@@ -30,6 +30,41 @@ export interface GatewayPlugin {
   name: string;
   start(gw: Gateway): Promise<void> | void;
   stop?(): Promise<void> | void;
+}
+
+export type SendTarget =
+  | { kind: "none" }
+  | { kind: "telegram"; chatId: number; threadId?: number }
+  | { kind: "slack"; channel: string; thread?: string }
+  | { kind: "discord"; channel: string };
+
+/**
+ * Resolve a send target: a conversation key ("telegram:dm:<id>", "telegram:group:<id>[:<thread>]",
+ * "slack:<channel>[:<thread_ts>]", "slack:dm:<channel>", "discord:<channel>", "discord:dm:<channel>").
+ * "home"/"none" are resolved by the caller (Gateway.send).
+ */
+export function parseSendTarget(target: string): SendTarget {
+  if (target === "none") return { kind: "none" };
+  const t = target.match(/^telegram:(dm|group):(-?\d+)(?::(\d+))?$/);
+  if (t) return { kind: "telegram", chatId: Number(t[2]), threadId: t[3] !== undefined ? Number(t[3]) : undefined };
+  if (target.startsWith("slack:")) {
+    let tail = target.slice(6);
+    let thread: string | undefined;
+    if (tail.startsWith("dm:")) tail = tail.slice(3);
+    else {
+      const i = tail.indexOf(":");
+      if (i !== -1) { thread = tail.slice(i + 1); tail = tail.slice(0, i); }
+    }
+    if (tail !== "home" && !/^[A-Z0-9]+$/.test(tail)) throw new Error(`bad slack target "${target}"`);
+    return { kind: "slack", channel: tail, thread };
+  }
+  if (target.startsWith("discord:")) {
+    let tail = target.slice(8);
+    if (tail.startsWith("dm:")) tail = tail.slice(3);
+    if (tail !== "home" && !/^\d+$/.test(tail)) throw new Error(`bad discord target "${target}"`);
+    return { kind: "discord", channel: tail };
+  }
+  throw new Error(`bad send target "${target}"`);
 }
 
 export class Gateway {
@@ -86,7 +121,7 @@ export class Gateway {
       const ledger = new WorkLedger(cfg.home);
       return [groupHistoryTool(new GroupArchive(cfg.home), cfg.telegram.allowFrom, (chat) => ledger.lastQueued(chat)), ...workTools(cfg, ledger)];
     };
-    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox, Object.keys(cfg.post.accounts).length ? this.post : undefined), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
+    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox, Object.keys(cfg.post.accounts).length ? this.post : undefined, this.brain.shellSandbox), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
   }
 
   use(plugin: GatewayPlugin): this {
@@ -121,13 +156,13 @@ export class Gateway {
       const app = secret(this.cfg.home, this.cfg.slack.appTokenEnv, this.cfg.envFiles);
       const bot = secret(this.cfg.home, this.cfg.slack.botTokenEnv, this.cfg.envFiles);
       if (!app || !bot) throw new Error(`slack is enabled but ${!app ? this.cfg.slack.appTokenEnv : this.cfg.slack.botTokenEnv} is not set`);
-      this.slack = new SlackChannel(this.cfg.slack, app, bot, this.brain, this.log);
+      this.slack = new SlackChannel(this.cfg.slack, app, bot, this.brain, this.log, join(this.cfg.home, "media"));
     }
     if (this.cfg.discord.enabled) {
       const { DiscordChannel } = await import("./channels/discord.ts");
       const token = secret(this.cfg.home, this.cfg.discord.tokenEnv, this.cfg.envFiles);
       if (!token) throw new Error(`discord is enabled but ${this.cfg.discord.tokenEnv} is not set`);
-      this.discord = new DiscordChannel(this.cfg.discord, token, this.brain, this.log);
+      this.discord = new DiscordChannel(this.cfg.discord, token, this.brain, this.log, join(this.cfg.home, "media"));
     }
     const baseApprover = this.brain.approver;
     this.brain.approver = (key) => async (command, reason) => {
@@ -265,34 +300,52 @@ export class Gateway {
   /** Hook for compatibility writers (UltraTerm's gateway_state.json). */
   emitStatus?: (status: Record<string, unknown>) => void;
 
-  /** Deliver Markdown to "home", "none" or a chat id. */
-  async send(target: string, text: string): Promise<string> {
+  /** Deliver Markdown to "home", "none", a chat id, or a conversation key; optionally with a file. */
+  async send(target: string, text: string, file?: FileOutput): Promise<string> {
     if (target === "none") return "Not delivered (target none).";
-    if (target.startsWith("discord:")) {
-      if (!this.discord) throw new Error("discord is not enabled");
-      const n = await this.discord.deliver(target.slice(8), text);
-      return `Delivered to Discord (${n} message${n === 1 ? "" : "s"}).`;
+    const route = target.startsWith("telegram:") || target.startsWith("slack:") || target.startsWith("discord:") ? parseSendTarget(target) : undefined;
+    if (route?.kind === "telegram") {
+      if (!this.telegram) throw new Error("telegram is not enabled");
+      const { chatId, threadId } = route;
+      if (!this.cfg.telegram.allowFrom.includes(chatId) && chatId !== this.cfg.telegram.homeChat && !this.cfg.telegram.groups.some((g) => g.chat === chatId))
+        throw new Error(`chat ${chatId} is not the home chat, an allowed user or a configured group`);
+      return file ? this.sendTelegramFile(chatId, text, file, threadId) : this.sendTelegramText(chatId, text, threadId);
     }
-    if (target.startsWith("slack:")) {
+    if (route?.kind === "slack") {
       if (!this.slack) throw new Error("slack is not enabled");
-      const n = await this.slack.send(target.slice(6), text);
+      const n = await this.slack.send(route.channel, text, route.thread, file);
       return `Delivered to Slack (${n} message${n === 1 ? "" : "s"}).`;
+    }
+    if (route?.kind === "discord") {
+      if (!this.discord) throw new Error("discord is not enabled");
+      const n = await this.discord.deliver(route.channel, text, file);
+      return `Delivered to Discord (${n} message${n === 1 ? "" : "s"}).`;
     }
     if (!this.telegram) throw new Error("no messaging channel is enabled");
     const chatId = target === "home" ? this.cfg.telegram.homeChat : Number(target);
     if (!chatId || !Number.isSafeInteger(chatId)) throw new Error(target === "home" ? "telegram.homeChat is not configured" : `bad chat id "${target}"`);
     if (!this.cfg.telegram.allowFrom.includes(chatId) && chatId !== this.cfg.telegram.homeChat && !this.cfg.telegram.groups.some((g) => g.chat === chatId))
       throw new Error(`chat ${chatId} is not the home chat, an allowed user or a configured group`);
+    return file ? this.sendTelegramFile(chatId, text, file) : this.sendTelegramText(chatId, text);
+  }
+
+  private async sendTelegramText(chatId: number, text: string, threadId?: number): Promise<string> {
     try {
-      const sent = await this.telegram.sendMarkdown(chatId, text);
+      const sent = await this.telegram!.sendMarkdown(chatId, text, { threadId });
       return `Delivered (${sent.length} message${sent.length === 1 ? "" : "s"}).`;
     } catch (e) {
-      this.telegram.enqueue(chatId, chunkMarkdown(text), undefined, e);
+      this.telegram!.enqueue(chatId, chunkMarkdown(text), threadId, e);
       if (e instanceof TelegramError && e.status === "unknown") return `Telegram outcome unknown (request ${e.requestId}); held for reconciliation, not retried.`;
-      const pending = this.telegram.pendingCount();
+      const pending = this.telegram!.pendingCount();
       return pending ? `Telegram refused it for now (${(e as Error).message}); queued for retry with backoff (${pending} pending).`
         : `Telegram will never accept it (${(e as Error).message}); not queued.`;
     }
+  }
+
+  /** Files have no retry queue: a refusal throws, so the caller knows the file did not go out. */
+  private async sendTelegramFile(chatId: number, text: string, file: FileOutput, threadId?: number): Promise<string> {
+    const sent = await this.telegram!.sendFile(chatId, file, text, threadId);
+    return `Delivered (${sent.length} message${sent.length === 1 ? "" : "s"}).`;
   }
 
   /** Send to Telegram now, with no retry queue: a failure throws, so the caller knows the operator was not told. */

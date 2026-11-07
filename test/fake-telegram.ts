@@ -3,6 +3,19 @@ import { createServer, type Server } from "node:http";
 
 export interface Call { method: string; body: any; at: number }
 
+/** Light multipart/form-data parse: form fields, and file parts as {filename}. */
+function parseMultipart(raw: string): Record<string, string | { filename?: string }> {
+  const out: Record<string, string | { filename?: string }> = {};
+  const boundary = raw.split("\r\n")[0];
+  for (const part of raw.split(boundary)) {
+    const m = part.match(/name="([^"]+)"(?:;\s*filename="([^"]*)")?/);
+    if (!m) continue;
+    const body = part.split("\r\n\r\n")[1] ?? "";
+    out[m[1]] = m[2] !== undefined ? { filename: m[2] } : body.replace(/\r\n$/, "");
+  }
+  return out;
+}
+
 export class FakeTelegram {
   calls: Call[] = [];
   /** message id -> current text, for messages Carl sent. */
@@ -10,6 +23,8 @@ export class FakeTelegram {
   private updates: any[] = [];
   /** getUpdates calls to answer by dropping the connection (a network blip), counted down per call. */
   dropPolls = 0;
+  /** When true, sendPhoto answers a 400 refusal (to test the fallback to sendDocument). */
+  refusePhoto = false;
   polls = 0;
   private nextUpdateId = 1;
   private nextMessageId = 1000;
@@ -24,7 +39,7 @@ export class FakeTelegram {
       req.on("end", async () => {
         const method = (req.url ?? "").split("/").pop()!;
         let body: any = {};
-        try { body = raw ? JSON.parse(raw) : {}; } catch { body = { raw }; }
+        try { body = raw ? JSON.parse(raw) : {}; } catch { body = { fields: parseMultipart(raw) }; }
         const reply = (result: unknown) => {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: true, result }));
@@ -59,6 +74,26 @@ export class FakeTelegram {
             }
             if (this.sent.has(body.message_id)) Object.assign(this.sent.get(body.message_id)!, { text: body.text, at: Date.now() });
             return reply({ message_id: body.message_id, date: 0, chat: { id: body.chat_id, type: "private" }, text: body.text });
+          case "sendPhoto":
+            if (this.refusePhoto) {
+              res.writeHead(400, { "content-type": "application/json" });
+              return res.end(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: PHOTO_INVALID_DIMENSIONS" }));
+            }
+            {
+              const id = this.nextMessageId++;
+              const chatId = Number(body.fields?.chat_id ?? body.chat_id);
+              const caption = String(body.fields?.caption ?? body.caption ?? "");
+              this.sent.set(id, { chatId, text: caption, at: Date.now() });
+              return reply({ message_id: id, date: 0, chat: { id: chatId, type: "private" }, caption });
+            }
+          case "sendDocument":
+            {
+              const id = this.nextMessageId++;
+              const chatId = Number(body.fields?.chat_id ?? body.chat_id);
+              const caption = String(body.fields?.caption ?? body.caption ?? "");
+              this.sent.set(id, { chatId, text: caption, at: Date.now() });
+              return reply({ message_id: id, date: 0, chat: { id: chatId, type: "private" }, caption });
+            }
           default:
             return reply(true);
         }

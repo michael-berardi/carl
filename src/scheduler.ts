@@ -55,6 +55,8 @@ export class Scheduler {
   private jobs: Job[] = [];
   private timer?: NodeJS.Timeout;
   private readonly running = new Set<string>();
+  /** Jobs running now (a restart for an update waits for them). */
+  runningCount(): number { return this.running.size; }
   /** Process groups of running command jobs, killed on stop. */
   readonly children = new Set<number>();
   /** Agent and built-in runs are cut off after this long. */

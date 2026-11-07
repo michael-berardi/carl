@@ -229,13 +229,25 @@ export class TelegramApi {
     return this.call<true>("setMyCommands", { commands });
   }
 
-  async sendDocument(chatId: number, fileName: string, data: Uint8Array, caption?: string): Promise<TgMessage> {
+  async sendDocument(chatId: number, fileName: string, data: Uint8Array, caption?: string, threadId?: number): Promise<TgMessage> {
     const form = new FormData();
     form.set("chat_id", String(chatId));
     if (caption) form.set("caption", caption.slice(0, 1024));
+    if (threadId !== undefined) form.set("message_thread_id", String(threadId));
     form.set("document", new Blob([new Uint8Array(data)]), fileName);
-    const body = { chat_id: chatId, caption: caption?.slice(0, 1024), document: { file_name: fileName } };
+    const body = { chat_id: chatId, caption: caption?.slice(0, 1024), message_thread_id: threadId, document: { file_name: fileName } };
     return this.observed("sendDocument", body, () => this.request<TgMessage>("sendDocument", body, { timeoutMs: 120_000 }, form));
+  }
+
+  /** Send a photo, mirroring sendDocument (same observed()/audit path). */
+  async sendPhoto(chatId: number, fileName: string, data: Uint8Array, caption?: string, threadId?: number): Promise<TgMessage> {
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    if (caption) form.set("caption", caption.slice(0, 1024));
+    if (threadId !== undefined) form.set("message_thread_id", String(threadId));
+    form.set("photo", new Blob([new Uint8Array(data)]), fileName);
+    const body = { chat_id: chatId, caption: caption?.slice(0, 1024), message_thread_id: threadId, photo: { file_name: fileName } };
+    return this.observed("sendPhoto", body, () => this.request<TgMessage>("sendPhoto", body, { timeoutMs: 120_000 }, form));
   }
 
   /**
