@@ -33,6 +33,8 @@ export interface GuardRules {
    * sandbox allows, so it no longer asks.
    */
   sandboxed?: boolean;
+  /** Posting is configured: the browser CLI (it drives the operator's signed-in browser, past the post approval gate) is never run from a shell command. */
+  denyBrowserCli?: boolean;
   /** MCP servers that run outside the sandbox: their tools ask first unless they match a read-only pattern. */
   trustedMcp?: string[];
   /** Extra "server/tool" patterns of trusted servers that run without asking: [regex, reason]. */
@@ -241,6 +243,7 @@ export function classifyCommand(command: string, extra: GuardRules = {}): Verdic
     if (v.level === "hardline") return v;
     if (v.level === "dangerous" && worst.level === "ok") worst = v;
   }
+  if (extra.denyBrowserCli && /overseer-browser|OverSeer\/browser/i.test(normalised)) return { level: "hardline", reason: "the browser control channel is closed to shell commands while posting is configured (posting goes through the post gate)" };
   const whole = judgeWhole(normalised);
   if (whole.level !== "ok" && worst.level === "ok") worst = whole;
   if (worst.level === "ok") for (const [re, reason] of own(extra.dangerous)) if (re.test(normalised)) return { level: "dangerous", reason };
@@ -280,7 +283,7 @@ export function writeVerdict(path: string, rules: GuardRules = {}): Verdict {
 export function readVerdict(path: string, rules: GuardRules = {}): Verdict {
   const p = expand(path, rules.cwd);
   const secret = (rules.secretPaths ?? []).map((s) => expand(s));
-  if (secret.includes(p) || /(^|\/)(\.env|auth\.json|mcp-auth\.json|id_rsa|id_ed25519|id_ecdsa)$/.test(p) || (/\/\.ssh\/[^/]+$/.test(p) && !p.endsWith(".pub")))
+  if (secret.some((s) => p === s || p.startsWith(s.replace(/\/+$/, "") + "/")) || /(^|\/)(\.env|auth\.json|mcp-auth\.json|id_rsa|id_ed25519|id_ecdsa)$/.test(p) || (/\/\.ssh\/[^/]+$/.test(p) && !p.endsWith(".pub")))
     return { level: "hardline", reason: `reading ${path} (credentials)` };
   return { level: "ok" };
 }

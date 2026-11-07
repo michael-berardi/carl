@@ -49,12 +49,25 @@ export interface PostAdapter {
   /** Prove the platform would take exactly this text, then discard it. Posts nothing. */
   dryRun(ctx: AdapterContext, rendered: Rendered): Promise<DryRunReport>;
   /**
-   * Post `rendered.sequence` starting after the `done` live URLs, resuming idempotently: before each part it checks the
-   * account's profile for it, so a run that died after a part went live never posts it twice. `onPart` is called with
-   * the full URL list after each part is verified live, so the caller can record it at once. Returns every live URL.
-   * It throws PostError; an error after a part went live says so.
+   * Post `rendered.sequence` starting after the `run.done` live URLs. Before every click `run.onBeforeClick` writes a
+   * record that a click is under way; any failure after the click is a final PostError (the operator checks the account,
+   * nothing is retried). A part with a pending click is only looked for, never clicked again. Returns every live URL.
    */
-  post(ctx: AdapterContext, rendered: Rendered, done: string[], onPart: (urls: string[]) => Promise<void>): Promise<string[]>;
+  post(ctx: AdapterContext, rendered: Rendered, run: PostRun): Promise<string[]>;
+}
+
+/** What the adapter needs from the caller to post safely. */
+export interface PostRun {
+  /** URLs of the parts already live, in order. */
+  done: string[];
+  /** When the operator approved (ms): nothing older can be this post. */
+  approvedAtMs: number;
+  /** A click was started on this part and never recorded: it may be live. Only a look at the profile may continue. */
+  pending?: { part: number; atMs: number };
+  /** Called, and awaited, before every click. If it throws, nothing is clicked. */
+  onBeforeClick(part: number): Promise<void>;
+  /** Called after each part is verified live with every live URL so far. */
+  onPart(urls: string[]): Promise<void>;
 }
 
 /** A failure with a cause the operator can act on. `final` = retrying cannot help (a refusal, not a transient fault). */

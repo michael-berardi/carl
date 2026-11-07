@@ -158,12 +158,13 @@ Carl publishes a social post from a draft file, now or on a schedule, and never 
 ```
 carl post dry-run <draft>      render, validate and prove the exact text fits the composer; posts nothing
 carl post approve <draft>      you approve the exact text (needs a terminal; editing the draft clears it)
-carl post now <draft>          post it; resumes a half-posted thread without double posting
+carl post now <draft>          post it (needs approval and a live dry run); a failure after the click stops for you to check, it never re-clicks
 carl post schedule <draft> --at <ISO> [--late post]
+carl post clear-pending <draft>  after you checked the profile and a pending part is not live
 carl post status
 ```
 
-Scheduled posts survive restarts. A slot missed by more than three hours (`post.missedWindowMinutes`) is skipped, the draft stays Scheduled and the delivered message says so, unless you chose `--late post`. The agent can draft, dry-run and schedule through its `post_draft` tool but cannot approve or post at once. See [docs/POSTING.md](docs/POSTING.md).
+Scheduled posts survive restarts. A slot missed by more than three hours (`post.missedWindowMinutes`) is skipped, the draft stays Scheduled and the delivered message says so, unless you chose `--late post`. The agent can draft, dry-run and give an approved draft its first slot through its `post_draft` tool but cannot approve, post at once, change a slot, or run a scheduled post; the approval is an HMAC with a key the sandbox denies. See [docs/POSTING.md](docs/POSTING.md).
 
 ## Configuration
 

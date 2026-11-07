@@ -133,7 +133,7 @@ export function mountPortal(api: ApiServer, gw: Gateway): void {
     if (action === "remove") return json(res, 200, { removed: scheduler.remove(id) });
     if (action === "run") {
       scheduler.get(id); // 404 for an unknown id before anything starts
-      void scheduler.runNow(id).catch((e) => gw.log.error("schedule run failed", { id, error: (e as Error).message }));
+      void scheduler.runNow(id, { force: true }).catch((e) => gw.log.error("schedule run failed", { id, error: (e as Error).message }));
       return json(res, 202, { started: true });
     }
     scheduler.setEnabled(id, action === "resume");
