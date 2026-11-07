@@ -1,14 +1,16 @@
-// carl post dry-run|now|schedule|approve|status. Approval is operator-only: it needs a terminal, so a command run by the
-// agent (no TTY) cannot grant it, and the drafts folder is outside the agent's write areas.
-import { createInterface } from "node:readline/promises";
-import { userInfo } from "node:os";
+// carl post dry-run|now|schedule|approve|clear-pending|record-live|status. approve, clear-pending and record-live do not decide
+// anything here: they put a card (the exact text, account, profile and text hash) in front of the operator on their channel, and
+// the gateway carries the action out only when the operator answers that card there. A terminal proves nothing (anything that can
+// type into one can type "y"), so no answer is ever read from this process.
 import { parseArgs } from "node:util";
 import { loadConfig } from "../config.ts";
 import { Log } from "../log.ts";
 import { Scheduler } from "../scheduler.ts";
 import { defaultRegistry } from "./registry.ts";
 import { realRunner } from "./runner.ts";
-import { visible } from "./draft.ts";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { sessionPrograms, sessionProblems } from "./key.ts";
 import { PostService } from "./service.ts";
 import { PostError } from "./types.ts";
 
@@ -18,25 +20,19 @@ export const POST_HELP = `carl post <command>
   now <draft> [--skip-dry-run]    post it now (needs your approval of the current text and a live dry run of it)
   schedule <draft> --at <ISO> [--late post] [--skip-dry-run]
                                   post it at that time; a slot missed by more than the window is skipped unless --late post
-  approve <draft> [--by <name>]   record your approval of the draft's current text (asks at a terminal)
-  clear-pending <draft>           after checking the account: a click was started on a part and never recorded, and that part is NOT live
-  status                          drafts and scheduled posts
+  approve <draft>                 ask for your approval: a card with the exact text appears on your operator channel (Telegram); the approval is recorded only when you answer it there
+  clear-pending <draft>           same, for: a click was started on a part and never recorded, and that part is NOT live
+  record-live <draft> <url>       same, for: the part after the recorded ones is already live at <url> (this account's status)
+  status                          drafts, scheduled posts, cards waiting for you, and any session-command problem
 
 <draft> is a name in the drafts folder (post.draftsDir) or a path.`;
 
 export interface PostCliIo {
-  isTTY: () => boolean;
-  confirm: (question: string) => Promise<boolean>;
   out: (s: string) => void;
   err: (s: string) => void;
 }
 
 const realIo: PostCliIo = {
-  isTTY: () => !!process.stdin.isTTY && !!process.stdout.isTTY,
-  confirm: async (q) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    try { return /^y(es)?$/i.test((await rl.question(q)).trim()); } finally { rl.close(); }
-  },
   out: (s) => console.log(s),
   err: (s) => console.error(s),
 };
@@ -45,7 +41,7 @@ export async function postCommand(args: string[], io: PostCliIo = realIo, make?:
   const [sub, ...rest] = args;
   if (!sub || sub === "help" || sub === "--help") { io.out(POST_HELP); return sub ? 0 : 64; }
   try {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { offline: { type: "boolean" }, at: { type: "string" }, late: { type: "string" }, by: { type: "string" }, "skip-dry-run": { type: "boolean" } } });
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { offline: { type: "boolean" }, at: { type: "string" }, late: { type: "string" }, "skip-dry-run": { type: "boolean" } } });
     const svc = make?.() ?? defaultService();
     const draft = positionals[0];
     const need = () => { if (!draft) throw new PostError(`carl post ${sub}: give the draft name or path`, true); return draft; };
@@ -62,25 +58,14 @@ export async function postCommand(args: string[], io: PostCliIo = realIo, make?:
         io.out((await svc.schedule(need(), values.at, { late: values.late as "post" | "skip" | undefined, skipDryRun: values["skip-dry-run"] })).text);
         return 0;
       }
-      case "approve": {
-        if (!io.isTTY()) throw new PostError("carl post approve is operator-only: run it yourself in a terminal (it will not run from an agent or a script)", true);
-        const d = svc.load(need());
-        const { rendered } = svc.prepare(d);
-        // What is shown is what is approved: the hash of this read is passed to approve(), which refuses if the file differs by then.
-        const shown = d.textHash;
-        const live = d.partHashes.length;
-        io.out(`Approve posting to ${d.platform}/${d.account} (${svc.deps.config.accounts[d.account]?.profile}):\n\n${rendered.sequence.map((t, i) => `[${i + 1}]${i < live ? " (ALREADY LIVE, cannot be changed)" : ""} ${visible(t)}`).join("\n\n")}\n`);
-        if (!(await io.confirm("Approve exactly this text? [y/N] "))) { io.out("Not approved."); return 1; }
-        io.out(await svc.approve(draft!, values.by?.trim() || userInfo().username, shown));
+      case "approve":
+      case "clear-pending":
+        io.out(svc.requestCard(sub, need(), { by: "operator" }));
         return 0;
-      }
-      case "clear-pending": {
-        if (!io.isTTY()) throw new PostError("carl post clear-pending is operator-only: run it yourself in a terminal", true);
-        const d = svc.load(need());
-        if (d.pendingPart === undefined) { io.out(`${draft} has no pending part.`); return 0; }
-        io.out(`A click on part ${d.pendingPart + 1} of ${draft} was started${d.pendingAt ? ` at ${d.pendingAt}` : ""} and never recorded. Open ${svc.deps.config.accounts[d.account]?.profile} and look.`);
-        if (!(await io.confirm(`Is part ${d.pendingPart + 1} certainly NOT live? Clearing lets Carl post it again. [y/N] `))) { io.out("Left pending."); return 1; }
-        io.out(await svc.clearPending(draft!));
+      case "record-live": {
+        const url = positionals[1];
+        if (!url) throw new PostError("carl post record-live <draft> <url>: give the post's URL", true);
+        io.out(svc.requestCard("record-live", need(), { by: "operator", url }));
         return 0;
       }
       case "status":
@@ -99,5 +84,15 @@ function defaultService(): PostService {
   const cfg = loadConfig();
   // Same schedules.json as the gateway; a running gateway adopts the job at its next tick.
   const scheduler = new Scheduler(cfg.home, new Log(undefined), { prompt: async () => "", builtin: {}, deliver: async () => {} }, { passive: true });
-  return new PostService({ home: cfg.home, config: cfg.post, run: realRunner, registry: defaultRegistry(), scheduler });
+  return new PostService({ home: cfg.home, config: cfg.post, run: realRunner, registry: defaultRegistry(), scheduler, sessionProblems: () => sessionProblems(cfg.post.accounts, found(cfg.post.accounts)) });
+}
+
+/** Where each configured session command is on this process's own PATH (the CLI runs with the operator's PATH). */
+function found(accounts: Record<string, { session: { command: string } }>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of Object.keys(sessionPrograms(accounts))) {
+    const path = (process.env.PATH ?? "").split(":").filter(Boolean).map((d) => join(d, name)).find((c) => existsSync(c));
+    if (path) out[name] = path;
+  }
+  return out;
 }

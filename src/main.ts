@@ -31,7 +31,7 @@ const HELP = `carl ${VERSION}: the minimal bot gateway
   carl ask-post <id>                post an ask's questions to its chat (asks module; CARL_HOME/asks/<id>.json)
   carl reflect                      run the individuation pass once and print it
   carl schedules                    list schedules
-  carl post <command>               draft posts: dry-run, now, schedule, approve, status (carl post help)
+  carl post <command>               draft posts: dry-run, now, schedule, approve, record-live, status (carl post help)
   carl prompt [--full]              the system prompt and tools a new conversation gets, with sizes
   carl app [--install]              open the web app in its own window; --install adds Carl.app (macOS)
   carl login [provider] [--api-key] list model providers, or sign in to one (Claude: claude auth login)

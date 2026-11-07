@@ -46,6 +46,10 @@ export function statusId(url: string, handle: string): bigint | undefined {
 /** When X created a status, from its snowflake id. */
 export const statusTime = (id: bigint) => Number(id >> 22n) + TWITTER_EPOCH;
 
+/** A domain written without a scheme: X turns it into a link (so the live text reads URL) while the draft keeps it literal, and a live post could never be matched. */
+const BARE_DOMAIN = /(?<![@\w./-])(?:[a-z0-9-]+\.)+(?:com|org|net|io|co|ai|app|dev|me|us|uk|ly|gg|tv|to|sh|xyz|info|biz|edu|gov|de|fr|es|ca|au|nl|ru|jp|cn|in|br|ch|se|no|it|eu|so|fm|cc|ink|page|link|site|online|store|tech)\b/i;
+export const bareDomain = (text: string): string | undefined => text.replace(/https?:\/\/\S+/gi, " ").match(BARE_DOMAIN)?.[0];
+
 /** Text as compared: whitespace collapsed, every link as URL. The page script produces the same form from the DOM. */
 export const normText = (s: string) => s.replace(/https?:\/\/\S*[^\s.,;:!?)\]'"]/g, "URL").replace(/\s+/g, " ").trim();
 
@@ -181,6 +185,8 @@ async function requireAccount(ctx: AdapterContext, session: string, handle: stri
   await browser(ctx, session, ["navigate", `${origin}/home`]);
   const r = await js(ctx, session, WHO());
   const href = r && typeof r === "object" && typeof r.href === "string" ? r.href : "";
+  // No profile link drawn in time is a slow or logged-out page, not a different account: retryable. A different handle is final.
+  if (!href) throw new PostError(`the page did not show the signed-in account's profile link in time; nothing was posted (not a different account). Is the browser signed in to @${handle}?`);
   let path = "";
   try { path = new URL(href, origin).pathname.replace(/\/+$/, ""); } catch {}
   if (path.toLowerCase() !== `/${handle}`.toLowerCase()) {
@@ -224,6 +230,8 @@ export const xAdapter: PostAdapter = {
     sequence.forEach((t, i) => {
       if (!t.trim()) problems.push(`part ${i + 1} is empty`);
       if (BAD_CHARS.test(t)) problems.push(`part ${i + 1} contains control or bidirectional characters (${visible(t).match(/\\u[0-9a-f]{4}/g)?.slice(0, 3).join(" ")}); a terminal could show different text from what is posted`);
+      const bare = bareDomain(t);
+      if (bare) problems.push(`part ${i + 1} has a link without a scheme (${bare}); X turns it into a link that Carl could not match on the profile. Write it as https://${bare}`);
       if (sizes[i] > LIMIT) problems.push(`${content.isThread ? `thread part ${i + 1}` : i === 0 ? "the post" : "the first reply"} is ${sizes[i]} characters (limit ${LIMIT})`);
     });
     return { sequence, sizes, problems };
@@ -245,6 +253,16 @@ export const xAdapter: PostAdapter = {
     return { ok: true, lines };
   },
 
+  checkLiveUrl(account, url, done) {
+    const { handle, origin } = xHandle(account.profile);
+    const id = statusId(url, handle);
+    if (id === undefined) return `${JSON.stringify(url)} is not ${origin}/${handle}/status/<id>`;
+    if (done.includes(url)) return "that URL is already recorded";
+    const last = done.length ? statusId(done[done.length - 1], handle) : undefined;
+    if (last !== undefined && id <= last) return "that status is not newer than the part before it (a thread's parts are posted in order)";
+    return undefined;
+  },
+
   async post(ctx, rendered, run: PostRun) {
     const { handle, origin } = xHandle(ctx.account.profile);
     const seq = rendered.sequence;
@@ -264,24 +282,31 @@ export const xAdapter: PostAdapter = {
         if (run.pending?.part === i) {
           // A click on this part was started and not recorded. Look, never click.
           const cands = await list(ctx, session, handle, timeline, text, 8);
-          const hit = pickPart(cands, text, handle, { urls, prevId, notBefore: Math.max(run.approvedAtMs, run.pending.atMs - SKEW_MS) });
+          // With the baseline recorded before the click the clocks do not matter; without one, no earlier than the click (with slack).
+          const baseline = run.pending.baseline ? BigInt(run.pending.baseline) : undefined;
+          const notBefore = baseline !== undefined ? run.approvedAtMs - SKEW_MS : Math.max(run.approvedAtMs, run.pending.atMs) - SKEW_MS;
+          const hit = pickPart(cands, text, handle, { urls, prevId, baseline, notBefore });
           if (!hit) throw new PostError(`part ${i + 1} was being posted when the last run stopped and is not on the profile (or not as the exact text). It may still appear: check @${handle}'s profile, and when part ${i + 1} is certainly not live run \`carl post clear-pending\` on the draft. Nothing was clicked`, true);
           urls.push(hit);
           try { await run.onPart([...urls]); } catch (e) { throw postClick(e, i); }
           continue;
         }
-        const before = newestId(await list(ctx, session, handle, timeline, null, 20), handle);
+        const seen = await list(ctx, session, handle, timeline, null, 20);
+        // Already on the profile (a mistaken `clear-pending`, a post made by hand): never click a second time.
+        const already = pickPart(seen, text, handle, { urls, prevId, notBefore: run.approvedAtMs - SKEW_MS });
+        if (already) throw new PostError(`part ${i + 1} is already live at ${already} (the exact text is on @${handle}'s profile, posted after the approval); nothing was clicked. Record it with \`carl post record-live\` on the draft`, true);
+        const before = newestId(seen, handle);
         const baseline = before !== undefined && before > prevId ? before : prevId;
         if (i === 0) await browser(ctx, session, ["navigate", `${origin}/compose/post`]);
         else await browser(ctx, session, ["navigate", urls[i - 1]]);
         await fill(ctx, session, text);
-        await run.onBeforeClick(i); // write-ahead: if this fails nothing is clicked
+        await run.onBeforeClick(i, baseline.toString()); // write-ahead: if this fails nothing is clicked
         try {
           await click(ctx, session, text, `part ${i + 1}`);
           await ctx.sleep(4000);
           let hit: string | undefined;
           for (let attempt = 0; attempt < 2 && !hit; attempt++) {
-            hit = pickPart(await list(ctx, session, handle, timeline, text, 40), text, handle, { urls, prevId, baseline, notBefore: run.approvedAtMs });
+            hit = pickPart(await list(ctx, session, handle, timeline, text, 40), text, handle, { urls, prevId, baseline, notBefore: run.approvedAtMs - SKEW_MS });
             if (!hit && attempt === 0) await ctx.sleep(5000);
           }
           if (!hit) throw new PostError(`part ${i + 1} was probably posted, but its exact text could not be found as a new post on ${timeline}`);
