@@ -18,6 +18,15 @@ test("exhaustion is recognised only from the provider's own words", () => {
   assert.ok(!isExhaustion({ stopReason: "stop" as any, errorMessage: "429" }));
 });
 
+test("a plan that cannot run the model moves the work on and benches that model for hours", () => {
+  // A lapsed paid login that fell back to a free plan: every run failed instead of moving to the next model.
+  const refusal = "Codex error: The 'gpt-6.1-terra' model is not supported when using Codex with a ChatGPT account.";
+  assert.ok(isExhaustion(err(refusal)));
+  assert.ok(!isOutage(err(refusal)));
+  assert.equal(cooldownMs(refusal), 6 * 3_600_000);
+  assert.ok(!isExhaustion(err("The model gpt-9 does not exist")));
+});
+
 test("outages bench for minutes and quota refusals for the provider's reset window", () => {
   assert.ok(!isOutage(err("HTTP 402: insufficient credits")));
   assert.ok(isOutage(err("OpenRouter error (HTTP 502): upstream provider returned bad gateway")));

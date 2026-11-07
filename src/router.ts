@@ -11,11 +11,14 @@ const QUOTA = /\b(402|429)\b|rate.?limit|usage limit|session limit|weekly limit|
 // hint ("resets in 500 seconds") is not an outage.
 const OUTAGE = /(?:http(?:\/\d(?:\.\d)?)?|status|code)\s*[:=]?\s*5\d\d\b|\b5xx\b|bad gateway|service unavailable|gateway time-?out|internal server error|overloaded/i;
 const NO_ENDPOINTS = /no endpoints? (?:available|found)|no available (?:endpoints?|providers?)|no provider (?:available|found)/i;
+// The signed-in account's plan cannot run this model at all (a lapsed paid login that fell back to a free plan, say). Like a
+// quota refusal it is the provider saying no before any output, so the next model in the chain answers instead of every run failing.
+const PLAN_REFUSED = /model is not supported when using \w+ with a [\w ]+account|not (?:available|supported) (?:on|for) (?:your|this) (?:plan|account)|requires? a (?:paid|pro|plus|team) (?:plan|subscription)/i;
 
 export function isExhaustion(message: Pick<AssistantMessage, "stopReason" | "errorMessage"> | undefined): boolean {
   if (!message || message.stopReason !== "error") return false;
   const text = message.errorMessage ?? "";
-  return QUOTA.test(text) || OUTAGE.test(text) || NO_ENDPOINTS.test(text);
+  return QUOTA.test(text) || OUTAGE.test(text) || NO_ENDPOINTS.test(text) || PLAN_REFUSED.test(text);
 }
 
 /** True when the failure is a provider outage or a route with no endpoints, not a quota refusal. */
@@ -41,6 +44,7 @@ export function cooldownMs(errorMessage: string, now = Date.now(), fallbackMs = 
     if (at.getTime() <= now) at.setDate(at.getDate() + 1);
     return at.getTime() - now;
   }
+  if (PLAN_REFUSED.test(errorMessage)) return 6 * 3_600_000;  // a plan does not change by itself: re-test in a few hours
   if (NO_ENDPOINTS.test(errorMessage)) return 10 * 60_000;
   if (OUTAGE.test(errorMessage)) return 2 * 60_000;
   return fallbackMs;
