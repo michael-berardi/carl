@@ -116,14 +116,15 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, 
   });
 
   // Drafting, dry runs and scheduling only. There is deliberately no way to approve or to post at once from here: the
-  // operator approves a draft's text with `carl post approve`, and scheduling refuses a draft without that approval.
+  // operator approves a draft's text by answering its card on their own channel (the agent may only request the card), and
+  // scheduling refuses a draft without that approval.
   const postDraft = post && defineTool({
     name: "post_draft",
     label: "Post draft",
     description:
-      'Social posts. action=draft: write a new draft (name, platform, account, and text or thread parts, optional reply); action=dry_run: render and validate a draft, and with offline=false also check the platform takes the exact text, posting nothing; action=schedule: give an approved draft its first slot at an ISO time (only when it has no slot yet; a slot missed by more than the configured window is skipped; you cannot change a slot or post late); action=status. For scheduling the draft also needs a live dry run of its exact text (dry_run with offline=false). You cannot approve a draft, post one now, or run or resume a scheduled post: the operator approves the exact text with `carl post approve`, and scheduling refuses a draft that is not approved or was edited after approval. Accounts come from the operator\'s configuration.',
+      'Social posts. action=draft: write a new draft (name, platform, account, and text or thread parts, optional reply); action=dry_run: render and validate a draft, and with offline=false also check the platform takes the exact text, posting nothing; action=schedule: give an approved draft its first slot at an ISO time (only when it has no slot yet; at least 15 minutes ahead, and the operator is told; a slot missed by more than the configured window is skipped; you cannot change a slot or post late); action=request_approval: put the draft in front of the operator as a card on their channel (you cannot answer it); action=status. For scheduling the draft also needs a live dry run of its exact text (dry_run with offline=false). You cannot approve a draft, post one now, or run or resume a scheduled post: the operator approves the exact text by answering its card on their own channel (request_approval or `carl post approve` only creates the card), and scheduling refuses a draft that is not approved or was edited after approval. Accounts come from the operator\'s configuration.',
     parameters: Type.Object({
-      action: Type.Union(["draft", "dry_run", "schedule", "status"].map((a) => Type.Literal(a))),
+      action: Type.Union(["draft", "dry_run", "request_approval", "schedule", "status"].map((a) => Type.Literal(a))),
       name: Type.Optional(Type.String({ description: "draft name: lowercase letters, digits, . _ -" })),
       platform: Type.Optional(Type.String()),
       account: Type.Optional(Type.String({ description: "an account key from the operator's configuration" })),
@@ -140,6 +141,8 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, 
           return ok(post.createDraft({ name: p.name, platform: p.platform, account: p.account, text: p.text, thread: p.thread, reply: p.reply }));
         case "dry_run":
           return ok(await post.dryRun(need(p.name), { offline: p.offline ?? true, named: true }));
+        case "request_approval":
+          return ok(post.requestCard("approve", need(p.name), { named: true, by: "agent" }));
         case "schedule":
           if (!p.name || !p.at) throw new Error("schedule needs name and at");
           if ((p as { late?: unknown }).late !== undefined) throw new Error("you cannot choose late posting; the operator does");

@@ -12,6 +12,8 @@ export interface FakeX {
   /** Texts the composer was filled with, in order. */
   filled: string[];
   clicks: number;
+  /** The page never draws the profile link (a slow load, or logged out). */
+  noProfileLink?: boolean;
   /** The handle the browser is signed in as. */
   signedIn: string;
   /** Fail (as a failed overseer-browser call) the n-th timeline read, 1-based. */
@@ -50,7 +52,7 @@ export function fakeX(opts: { retex?: FakeX["retex"]; clock?: () => number } = {
     if (sub[0] === "eval") {
       const src = sub[1];
       state.calls.push(`${cmd} ${args.slice(0, args.indexOf("--timeout") + 2).join(" ")} eval`);
-      if (src.includes("{href: a ? a.getAttribute")) return reply({ ok: true, result: JSON.stringify({ href: `/${state.signedIn}` }) });
+      if (src.includes("{href: a ? a.getAttribute")) return state.noProfileLink ? reply({ ok: true, result: JSON.stringify({ href: null }) }) : reply({ ok: true, result: JSON.stringify({ href: `/${state.signedIn}` }) });
       if (src.includes("composer not found")) {
         const m = src.match(/setData\('text\/plain', ("(?:[^"\\]|\\.)*")\)/)!;
         const text: string = JSON.parse(m[1]);

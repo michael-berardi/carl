@@ -54,6 +54,8 @@ export interface PostAdapter {
    * nothing is retried). A part with a pending click is only looked for, never clicked again. Returns every live URL.
    */
   post(ctx: AdapterContext, rendered: Rendered, run: PostRun): Promise<string[]>;
+  /** Pure: why `url` cannot be recorded as live part number `done.length + 1`'s post of this account, or undefined when it can. */
+  checkLiveUrl(account: PostAccount, url: string, done: string[]): string | undefined;
 }
 
 /** What the adapter needs from the caller to post safely. */
@@ -63,9 +65,9 @@ export interface PostRun {
   /** When the operator approved (ms): nothing older can be this post. */
   approvedAtMs: number;
   /** A click was started on this part and never recorded: it may be live. Only a look at the profile may continue. */
-  pending?: { part: number; atMs: number };
+  pending?: { part: number; atMs: number; /** The newest own status id before that click (decimal), when it was recorded. */ baseline?: string };
   /** Called, and awaited, before every click. If it throws, nothing is clicked. */
-  onBeforeClick(part: number): Promise<void>;
+  onBeforeClick(part: number, baseline: string): Promise<void>;
   /** Called after each part is verified live with every live URL so far. */
   onPart(urls: string[]): Promise<void>;
 }

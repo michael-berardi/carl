@@ -34,8 +34,9 @@ export interface Job {
   /**
    * Post jobs only (the post primitive, src/post): fire this draft at `when` ("once <ISO>"). Set by the post service after
    * it checks the operator's approval, never by the agent's schedule tool or the portal's generic form. The runner checks
-   * the approval again when the job fires. A run that fails is retried (resuming from the profile check, never reposting)
-   * up to POST_ATTEMPTS times; a refusal is final.
+   * the approval again when the job fires. A run that fails before any click is retried up to POST_ATTEMPTS times; a failure
+   * after a click, and every refusal, is final (a click that was started is only ever looked for again, never repeated, and
+   * only the operator clears it). A run before the slot, unforced, does nothing and changes no state.
    */
   post?: { draft: string; late?: "skip" | "post"; skipDryRun?: boolean };
   attempts?: number;
@@ -128,6 +129,7 @@ export class Scheduler {
       if (this.persisted.has(job.id) || this.removedHere.has(job.id) || this.jobs.some((j) => j.id === job.id)) continue;
       if (!this.passive) { try { job.nextRunAt ??= this.next(job, Date.now()); } catch { continue; } }
       this.jobs.push(job);
+      this.persisted.add(job.id); // it is in the file: a later removal by another process must be noticed, not undone
     }
     if (this.passive) this.jobs = this.jobs.map((j) => (this.owned.has(j.id) ? j : (inFile.get(j.id) ?? j)));
   }
@@ -235,6 +237,13 @@ export class Scheduler {
     return this.jobs.length < before;
   }
 
+  /** A fresh approval of a draft ends any earlier `--skip-dry-run` on its scheduled posts. */
+  clearSkipDryRun(draft: string): void {
+    let changed = false;
+    for (const j of this.jobs) if (j.post?.draft === draft && j.post.skipDryRun) { j.post = { draft: j.post.draft, ...(j.post.late ? { late: j.post.late } : {}) }; this.owned.add(j.id); changed = true; }
+    if (changed) this.save();
+  }
+
   setEnabled(id: string, enabled: boolean): void {
     const job = this.find(id);
     job.enabled = enabled;
@@ -285,6 +294,11 @@ export class Scheduler {
       // The CLI may have removed or rescheduled this job since the last tick: look before a post can go out.
       try { this.adoptExternal(); } catch {}
       if (!this.jobs.includes(job)) return;
+    }
+    // A post job asked to run before its slot without force (the UltraTerm Run button, say) does nothing: no attempt is used, no state changes.
+    if (job.post && !force) {
+      const slot = Date.parse(job.when.replace(/^once\s+/i, ""));
+      if (!Number.isNaN(slot) && Date.now() < slot) { this.log.info("post job not run: its slot has not arrived", { id: job.id }); return; }
     }
     this.running.add(job.id);
     let output = "";

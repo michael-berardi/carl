@@ -392,7 +392,7 @@ function postOf(v: unknown, home: string): PostConfig {
       platform,
       profile,
       session: {
-        command: str(s.command, "overseer-browser", `post.accounts.${key}.session.command`),
+        command: expandHome(str(s.command, "overseer-browser", `post.accounts.${key}.session.command`)),
         timeoutSeconds: int(s.timeoutSeconds, 60, `post.accounts.${key}.session.timeoutSeconds`, 5),
         namePrefix: str(s.namePrefix, "carl-post", `post.accounts.${key}.session.namePrefix`),
       },

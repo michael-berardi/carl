@@ -279,6 +279,9 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     // and app agents such as 1Password's. The Keychain files themselves are unreadable too.
     ...[`#"^(/private)?/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$"`, `#"/ssh-[^/]+/agent\\.[0-9]+$"`, `#"(ssh|agent)[^/]*\\.sock$"`]
       .map((re) => `(deny network-outbound (remote unix-socket (path-regex ${re})))`),
+    // overseer-browser's control socket, wherever its runtime lives (the managed one or an operator-relay's runtime_root): refused by
+    // name, so a descriptor that points somewhere new, or a copy of the socket, gains nothing. Only while posting is configured.
+    ...(Object.keys(cfg.post.accounts).length ? [`(deny network-outbound (remote unix-socket (path-regex #"overseer-browser[^/]*\\.sock$")))`] : []),
     ...["/.gnupg", "/.ssh", "/Library/Group Containers", "/Library/Containers", "/.orbstack", "/.local/share/containers", "/.lima", "/.rd"]
       .map((d) => `(deny network-outbound (remote unix-socket (subpath ${sbString(homedir() + d)})))`),
     `(deny file-read* ${credentialStores(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,

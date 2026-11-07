@@ -26,17 +26,53 @@ export function ensureKey(home: string): string {
 
 export const hmac = (key: string, s: string) => createHmac("sha256", key).update(s).digest("hex");
 
-/** Where OverSeer keeps its browser control socket, token and CLI runtime: out of the agent's reach whenever posting is configured. */
-export function browserControlDirs(accounts: Record<string, unknown>): string[] {
-  return Object.keys(accounts).length ? [join(homedir(), "Library", "Application Support", "OverSeer", "browser")] : [];
+/** `~` and `~/x` in a configured path, expanded. */
+export const expandHome = (p: string, home = homedir()) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p);
+
+/**
+ * Where overseer-browser keeps its control socket, token and runtime: out of the agent's reach whenever posting is
+ * configured. The Application Support folder is the managed runtime; the operator-relay descriptor
+ * (~/.config/overseer-browser/active-connection.json, or $OVERSEER_BROWSER_CONNECTION) names another `runtime_root` that holds the
+ * socket and the token; $OVERSEER_BROWSER_RUNTIME names one too. The descriptor's own folder is closed as well. The relay's socket
+ * is additionally refused by name wherever it lives (see the sandbox profile).
+ */
+export function browserControlDirs(accounts: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env, home = homedir()): string[] {
+  if (!Object.keys(accounts).length) return [];
+  const dirs = new Set<string>([join(home, "Library", "Application Support", "OverSeer", "browser"), join(home, ".config", "overseer-browser")]);
+  const override = env.OVERSEER_BROWSER_CONNECTION?.trim();
+  const descriptor = override && override !== "managed" ? resolve(expandHome(override, home)) : join(home, ".config", "overseer-browser", "active-connection.json");
+  dirs.add(dirname(descriptor));
+  try {
+    const root = JSON.parse(readFileSync(descriptor, "utf8"))?.runtime_root;
+    if (typeof root === "string" && root.startsWith("/")) { dirs.add(root); dirs.add(canon(root)); }
+  } catch {}
+  const runtime = env.OVERSEER_BROWSER_RUNTIME?.trim();
+  if (runtime) { const r = resolve(expandHome(runtime, home)); dirs.add(r); dirs.add(canon(r)); }
+  return [...dirs];
 }
 
 /** Session commands to resolve once from the operator's PATH at init (the gateway's own PATH is a private bin folder). */
 export function sessionPrograms(accounts: Record<string, { session: { command: string } }>): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {};
   for (const a of Object.values(accounts)) {
-    const c = a.session.command;
+    const c = expandHome(a.session.command);
     if (c.includes("/")) out[c.split("/").pop()!] = c; else out[c] = undefined;
+  }
+  return out;
+}
+
+/**
+ * Accounts whose session command cannot run: an absolute command that is not an executable file, or a name that was not
+ * found on the operator's PATH when Carl started (`found` = what adoptTrustedPath resolved). Empty = every account can post.
+ */
+export function sessionProblems(accounts: Record<string, { session: { command: string } }>, found: Record<string, string>): string[] {
+  const out: string[] = [];
+  for (const [key, a] of Object.entries(accounts)) {
+    const c = expandHome(a.session.command);
+    const path = c.includes("/") ? c : found[c];
+    let ok = false;
+    try { ok = !!path && statSync(path).isFile() && (statSync(path).mode & 0o111) !== 0; } catch {}
+    if (!ok) out.push(`account "${key}": session command "${a.session.command}" ${c.includes("/") ? "is not an executable file" : "was not found on the PATH Carl started with"}; nothing can be posted or dry-run from it. Set post.accounts.${key}.session.command to its absolute path in carl.json`);
   }
   return out;
 }

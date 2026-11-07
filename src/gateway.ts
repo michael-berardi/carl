@@ -19,6 +19,8 @@ import { GroupArchive, groupHistoryTool } from "./group-archive.ts";
 import { WorkLedger, workTools } from "./work.ts";
 import { COMMIT, VERSION } from "./version.ts";
 import { PostService } from "./post/service.ts";
+import { CardDesk } from "./post/cards.ts";
+import { sessionProblems } from "./post/key.ts";
 import { defaultRegistry } from "./post/registry.ts";
 import { realRunner } from "./post/runner.ts";
 
@@ -48,6 +50,9 @@ export class Gateway {
   private readonly plugins: GatewayPlugin[] = [];
   private readonly pidFile: string;
   exitCode = 0;
+  /** Post accounts whose session command did not resolve at start (shown by `carl post status`, delivered to the home chat). */
+  private postSessionProblems: string[] = [];
+  private cardTimer?: NodeJS.Timeout;
 
   readonly cfg: CarlConfig;
   constructor(cfg: CarlConfig, opts: { verbose?: boolean } = {}) {
@@ -69,7 +74,11 @@ export class Gateway {
       // Command jobs run under the shell sandbox too: the scripts and tools they call are ones the agent can change.
       commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg), cwd: cfg.workspace }),
     });
-    this.post = new PostService({ home: cfg.home, config: cfg.post, run: realRunner, registry: defaultRegistry(), scheduler: this.scheduler });
+    this.post = new PostService({
+      home: cfg.home, config: cfg.post, run: realRunner, registry: defaultRegistry(), scheduler: this.scheduler,
+      notify: (m) => void this.send("home", m).catch((e) => this.log.warn("post notice not delivered", { error: (e as Error).message })),
+      sessionProblems: () => this.postSessionProblems,
+    });
     if (Object.keys(cfg.post.accounts).length) this.post.ensureKey(); // the approval key exists (0600) before anything is approved
     const asks = cfg.asks ? new Asks(cfg.home) : undefined;
     this.asks = asks;
@@ -143,6 +152,7 @@ export class Gateway {
         this.hooks = mountHooks(this.api, this, this.cfg.hooks);
       }
     }
+    if (Object.keys(this.cfg.post.accounts).length) this.startPostDesk();
     for (const p of this.plugins) await p.start(this);
     if (this.api) await this.api.start();
     this.hooks?.resume();
@@ -177,6 +187,7 @@ export class Gateway {
       }
     }
     if (this.statusTimer) clearInterval(this.statusTimer);
+    if (this.cardTimer) clearInterval(this.cardTimer);
     // A gateway that never claimed the pid (it lost the race to another) must not mark the live one stopped.
     if (this.ownsPid) this.writeStatus("stopped", reason);
     try {
@@ -227,6 +238,24 @@ export class Gateway {
       this.log.error("status hook failed", { error: (e as Error).message });
     }
   }
+  /**
+   * Posting is configured: check the session commands resolve (a delivered error and a flag in `carl post status` when not), and
+   * show the operator's cards (approve, clear-pending, record-live) on their Telegram home chat. Only a button press there answers one.
+   */
+  private startPostDesk(): void {
+    this.postSessionProblems = sessionProblems(this.cfg.post.accounts, this.brain.resolvedPrograms);
+    if (this.postSessionProblems.length) {
+      for (const p of this.postSessionProblems) this.log.error("post: session command does not resolve", { problem: p });
+      void this.send("home", `Carl cannot post: ${this.postSessionProblems.join(" ")}`).catch((e) => this.log.warn("post session warning not delivered", { error: (e as Error).message }));
+    }
+    const chat = this.cfg.telegram.homeChat;
+    if (!this.cfg.telegram.enabled || !chat) this.log.warn("post: no Telegram home chat; approval cards cannot be answered, so nothing can be approved");
+    const desk = new CardDesk(this.post, (text) => (this.telegram && chat ? this.telegram.requestCard(chat, text, "Allow") : undefined), (m) => void this.send("home", m).catch((e) => this.log.warn("post notice not delivered", { error: (e as Error).message })));
+    const pump = () => void desk.pump().catch((e) => this.log.error("post cards failed", { error: (e as Error).message }));
+    this.cardTimer = setInterval(pump, 4_000);
+    this.cardTimer.unref();
+  }
+
   /** Hook for compatibility writers (UltraTerm's gateway_state.json). */
   emitStatus?: (status: Record<string, unknown>) => void;
 
