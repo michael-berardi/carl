@@ -27,6 +27,7 @@ import { type CarlConfig, mcpFile, ConfigError, MODEL_REQUIRED } from "./config.
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
 import { sessionPrograms } from "./post/key.ts";
+import { writeReadOnlyCache } from "./post/safety.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretDirs, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { cooldownMs, isExhaustion } from "./router.ts";
@@ -529,10 +530,25 @@ export class Brain extends EventEmitter {
     });
     for (const err of extensionsResult.errors ?? []) this.log.error("extension failed to load", { error: String((err as any).error ?? err), path: (err as any).path });
     await session.bindExtensions({});
+    this.cacheMcpAnnotations(session);
     const convo: Conversation = { key, session, busy: false, lastActivity: Date.now(), source };
     this.observe(convo);
     this.log.info("conversation opened", { key, sessionId: session.sessionId, fresh, messages: session.messages.length });
     return convo;
+  }
+
+  /** Remember which trusted-server tools publish readOnlyHint: true; the next start's posting check reads it (post/safety.ts). */
+  private cacheMcpAnnotations(session: any): void {
+    if (!this.cfg.trustedMcp.length) return;
+    try {
+      const listed: Record<string, boolean> = {};
+      for (const t of session.getAllTools?.() ?? []) {
+        const server = this.cfg.trustedMcp.find((s) => String(t.name).startsWith(`mcp__${s.replace(/[^A-Za-z0-9_]/g, "_")}__`));
+        if (!server) continue;
+        listed[`${server}/${String(t.name).slice(`mcp__${server.replace(/[^A-Za-z0-9_]/g, "_")}__`.length)}`] = t.annotations?.readOnlyHint === true;
+      }
+      if (Object.keys(listed).length) writeReadOnlyCache(this.cfg.home, listed);
+    } catch (e) { this.log.warn("could not cache MCP tool annotations", { error: (e as Error).message }); }
   }
 
   private async get(key: string, source: Inbound["source"]): Promise<Conversation> {

@@ -76,7 +76,7 @@ export class Gateway {
     });
     this.post = new PostService({
       home: cfg.home, config: cfg.post, run: realRunner, registry: defaultRegistry(), scheduler: this.scheduler,
-      notify: async (m) => { await this.send("home", m); },
+      notify: (m) => this.sendDirect("home", m),
       sessionProblems: () => this.postSessionProblems,
     });
     if (Object.keys(cfg.post.accounts).length && !cfg.post.blocked) this.post.ensureKey(); // the approval key exists (0600) before anything is approved
@@ -292,6 +292,14 @@ export class Gateway {
       return pending ? `Telegram refused it for now (${(e as Error).message}); queued for retry with backoff (${pending} pending).`
         : `Telegram will never accept it (${(e as Error).message}); not queued.`;
     }
+  }
+
+  /** Send to Telegram now, with no retry queue: a failure throws, so the caller knows the operator was not told. */
+  private async sendDirect(target: string, text: string): Promise<void> {
+    if (!this.telegram) throw new Error("no messaging channel is enabled");
+    const chatId = target === "home" ? this.cfg.telegram.homeChat : Number(target);
+    if (!chatId || !Number.isSafeInteger(chatId)) throw new Error("telegram.homeChat is not configured");
+    await this.telegram.sendMarkdown(chatId, text);
   }
 
   private async runPromptJob(job: Job): Promise<string> {

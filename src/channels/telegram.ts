@@ -722,18 +722,25 @@ export class TelegramChannel {
    * truncated, with Allow / Deny buttons. Only an allowed user's button press answers it (onCallback checks); it waits up to
    * 6 hours and then expires unanswered.
    */
+  private cardSends: Promise<void> = Promise.resolve();
+
   async requestCard(chatId: number, text: string, yes: string): Promise<{ answer: "approved" | "denied" | "timeout"; by?: string }> {
     const id = randomBytes(6).toString("hex");
     if (!this.callbacks.has("ca")) await this.requestApprovalSetup();
     // Never collapsed and never dropped: the whole card is shown, in as many messages as it takes, buttons on the last.
+    // One card at a time, so the pieces of two cards never interleave; every piece carries the card id.
     const pieces = splitCard(visibleControls(text), 3000);
-    let msg: TgMessage | undefined;
-    for (let i = 0; i < pieces.length; i++) {
-      const last = i === pieces.length - 1;
-      const html = `<b>Post approval${pieces.length > 1 ? ` (${i + 1}/${pieces.length})` : ""}</b>\n<pre>${escapeHtml(pieces[i])}</pre>`;
-      msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", ...(last ? { buttons: [[{ text: yes, callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] } : {}) });
-    }
-    const buttonMsg = msg!;
+    const turn = this.cardSends.then(async () => {
+      let msg: TgMessage | undefined;
+      for (let i = 0; i < pieces.length; i++) {
+        const last = i === pieces.length - 1;
+        const html = `<b>Post approval ${id}${pieces.length > 1 ? ` (${i + 1}/${pieces.length})` : ""}</b>\n<pre>${escapeHtml(pieces[i])}</pre>`;
+        msg = await this.api.sendMessage(chatId, html, { parseMode: "HTML", ...(last ? { buttons: [[{ text: yes, callback_data: `ca:${id}:yes` }, { text: "Deny", callback_data: `ca:${id}:no` }]] } : {}) });
+      }
+      return msg!;
+    });
+    this.cardSends = turn.then(() => undefined, () => undefined);
+    const buttonMsg = await turn;
     this.approvalMsgs.set(id, buttonMsg.message_id);
     const result = await new Promise<{ answer: "approved" | "denied" | "timeout"; by?: string }>((resolve) => {
       const timer = setTimeout(() => { this.approvals.delete(id); this.approvalMsgs.delete(id); resolve({ answer: "timeout" }); }, 6 * 3600_000);
