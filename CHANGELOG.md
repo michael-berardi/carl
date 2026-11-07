@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.9.4
+
+- **Clear login guidance before choosing a model.** `carl doctor` skips the primary login check when no model is set, instead of reporting an empty provider and an unusable login command. Configured fallback providers are still checked by name.
+
 ## 0.9.3
 
 - **A plan that cannot run the model moves the work on.** When the provider refuses the model for the signed-in account's plan (for example a paid login that lapsed to a free plan: "model is not supported when using ... with a ... account"), the next model in `fallbackModels` answers instead of the run failing, and the refused model is benched for 6 hours. Before, the gateway stopped on every message.

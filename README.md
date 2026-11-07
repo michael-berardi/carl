@@ -216,6 +216,8 @@ carl post <command>     draft posts: dry-run, approve, now, schedule, status
 carl app [--install]    open the web app in its own window; --install adds Carl.app (macOS)
 ```
 
+When `model` is unset, `carl doctor` skips its primary login check and asks you to set a model before signing in. Configured fallback logins are still checked separately.
+
 ## Modules
 
 - **UltraTerm:** `"ultraterm": {"home": "~/.hermes"}` makes Carl a drop-in for UltraTerm's UltraBot slot. It writes the status, transcript and usage files UltraTerm reads and serves the routes its panels use. To run it in that slot, install `scripts/ultrabot-gateway.sh` as `~/.hermes/ultrabot-gateway.sh`: UltraTerm then starts Carl from a clean environment as its own child and restarts it if it exits. Set `ultraterm.controlBin` to UltraTerm's control binary (it enables the Telegram decision buttons and account ordering, and its folder is protected), and list your control and memory servers in `trustedMcp` so they run outside the sandbox. Carl names no server or tool of its own: a trusted server's tools run without asking only when their MCP listing carries `readOnlyHint: true` or you list them in `guard.readOnlyTools` (`["server/tool", ...]`); every other tool asks first unless you allow it in `guard.allowTools` / `guard.operatorTools`. The launcher passes through only terminal, locale and UltraTerm variables; to pass others (never one whose name looks like a credential), set `CARL_PASS_ENV` to their names, separated by spaces or commas (default empty).
