@@ -14,6 +14,7 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { BashSpawnContext } from "@earendil-works/pi-coding-agent";
 import { type CarlConfig, secret as secret_ } from "./config.ts";
+import { browserControlDirs, postKeyPath } from "./post/key.ts";
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
@@ -74,10 +75,22 @@ export function credentialStores(cfg: CarlConfig): string[] {
 export function secretFiles(cfg: CarlConfig): string[] {
   return [
     join(cfg.home, ".env"), join(cfg.agentDir, "auth.json"), join(cfg.agentDir, "mcp-auth.json"), join(cfg.home, "engine", "mcp-auth.json"), ...cfg.envFiles,
+    // The post approval key: with it the agent could forge an approval. Unreadable and unwritable.
+    postKeyPath(cfg.home),
     ...(cfg.ultraterm ? [join(cfg.ultraterm.home, ".env"), join(cfg.ultraterm.home, "auth.json"),
       // OverSeer's local HTTP token: with it a command could ask OverSeer to act outside the sandbox.
       join(dirname(dirname(cfg.ultraterm.overseerBin)), "overseer", "http-token")] : []),
   ];
+}
+
+/**
+ * Folders (not single files) the agent may not read: OverSeer's browser control socket, token and CLI runtime whenever
+ * posting is configured. With them a sandboxed command could drive the operator's signed-in browser and post straight past
+ * the approval gate. Posting runs from the gateway, which is not sandboxed; the agent's own browser goes through the
+ * trusted OverSeer MCP server, which is not affected.
+ */
+export function secretDirs(cfg: CarlConfig): string[] {
+  return browserControlDirs(cfg.post.accounts);
 }
 
 /** Unix sockets of programs that run commands outside the sandbox on request (tmux servers, Docker). */
@@ -86,6 +99,7 @@ function controlSockets(cfg: CarlConfig): string[] {
   const out = [join(homedir(), ".ultraterm"), `/private/tmp/tmux-${uid}`, join(homedir(), ".colima"), join(homedir(), ".docker", "run"), "/private/var/run/docker.sock"];
   for (const sock of [process.env.TMUX?.split(",")[0], process.env.ULTRATERM_TMUX_SOCKET]) if (sock) out.push(dirname(sock));
   if (cfg.ultraterm) out.push(cfg.ultraterm.home);
+  out.push(...secretDirs(cfg));
   return out;
 }
 
@@ -248,6 +262,7 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     ...(cfg.ultraterm ? [`(deny file-read* (subpath ${sbString(cfg.ultraterm.home)}))`, `(allow file-read* (subpath ${sbString(join(cfg.ultraterm.home, "scripts"))}))`] : []),
     // Secrets: unreadable, and neither they nor any folder above them can be moved somewhere readable.
     `(deny file-read* ${secrets.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
+    ...(secretDirs(cfg).length ? [`(deny file-read* ${secretDirs(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`] : []),
     `(deny file-write* ${[...secrets, ...secrets.flatMap(ancestors)].map(sbLiterals).join(" ")})`,
     `(deny process-exec ${NO_EXEC.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
     "(deny appleevent-send)",

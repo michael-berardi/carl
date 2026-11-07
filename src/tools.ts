@@ -100,10 +100,13 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, 
           return ok(scheduler.remove(need(p.id)) ? "Removed." : `No job ${p.id}.`);
         case "pause":
         case "resume":
+          // A post job is the operator's: resuming one would fire it, so only the operator (`carl post`, the portal) can.
+          if (p.action === "resume" && scheduler.get(need(p.id)).post) throw new Error("that is a scheduled post: only the operator can resume or run it (`carl post schedule`)");
           scheduler.setEnabled(need(p.id), p.action === "resume");
           return ok(p.action === "pause" ? "Paused." : "Resumed.");
         case "run": {
           const job = scheduler.get(need(p.id)); // throws, naming the id, when there is no such job
+          if (job.post) throw new Error("that is a scheduled post: only the operator can run it early (a post fires at its slot, never on the agent's request)");
           void scheduler.runNow(job.id).catch(() => {});
           return ok(`Started ${job.name}; the result is delivered when it finishes.`);
         }
@@ -118,7 +121,7 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, 
     name: "post_draft",
     label: "Post draft",
     description:
-      'Social posts. action=draft: write a new draft (name, platform, account, and text or thread parts, optional reply); action=dry_run: render and validate a draft, and with offline=false also check the platform takes the exact text, posting nothing; action=schedule: schedule an approved draft at an ISO time (late="post" posts a missed slot late; the default skips a slot missed by more than the configured window); action=status. You cannot approve a draft or post one now: the operator approves the exact text with `carl post approve`, and scheduling refuses a draft that is not approved or was edited after approval. Accounts come from the operator\'s configuration.',
+      'Social posts. action=draft: write a new draft (name, platform, account, and text or thread parts, optional reply); action=dry_run: render and validate a draft, and with offline=false also check the platform takes the exact text, posting nothing; action=schedule: give an approved draft its first slot at an ISO time (only when it has no slot yet; a slot missed by more than the configured window is skipped; you cannot change a slot or post late); action=status. For scheduling the draft also needs a live dry run of its exact text (dry_run with offline=false). You cannot approve a draft, post one now, or run or resume a scheduled post: the operator approves the exact text with `carl post approve`, and scheduling refuses a draft that is not approved or was edited after approval. Accounts come from the operator\'s configuration.',
     parameters: Type.Object({
       action: Type.Union(["draft", "dry_run", "schedule", "status"].map((a) => Type.Literal(a))),
       name: Type.Optional(Type.String({ description: "draft name: lowercase letters, digits, . _ -" })),
@@ -128,8 +131,7 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, 
       thread: Type.Optional(Type.Array(Type.String(), { description: "thread parts, in order (instead of text)" })),
       reply: Type.Optional(Type.String({ description: "first reply under a single post" })),
       at: Type.Optional(Type.String({ description: "schedule: ISO time" })),
-      late: Type.Optional(Type.Union([Type.Literal("skip"), Type.Literal("post")])),
-      offline: Type.Optional(Type.Boolean({ description: "dry_run: only render and validate (default true)" })),
+      offline: Type.Optional(Type.Boolean({ description: "dry_run: only render and validate (default true); false also fills the composer in the browser and records the dry run, posting nothing" })),
     }),
     async execute(_id, p) {
       switch (p.action) {
@@ -140,7 +142,8 @@ export function carlTools(psyche: Psyche, scheduler: Scheduler, outbox: Outbox, 
           return ok(await post.dryRun(need(p.name), { offline: p.offline ?? true, named: true }));
         case "schedule":
           if (!p.name || !p.at) throw new Error("schedule needs name and at");
-          return ok((await post.schedule(p.name, p.at, { late: p.late, named: true })).text);
+          if ((p as { late?: unknown }).late !== undefined) throw new Error("you cannot choose late posting; the operator does");
+          return ok((await post.schedule(p.name, p.at, { named: true, agent: true })).text);
         case "status":
           return ok(post.status());
       }

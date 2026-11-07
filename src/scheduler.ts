@@ -1,6 +1,6 @@
 // Schedules: one JSON file, a 20-second tick, one catch-up run after downtime (never a burst).
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { nextRun, parseSchedule } from "./cron.ts";
 import type { Log } from "./log.ts";
@@ -37,7 +37,7 @@ export interface Job {
    * the approval again when the job fires. A run that fails is retried (resuming from the profile check, never reposting)
    * up to POST_ATTEMPTS times; a refusal is final.
    */
-  post?: { draft: string; late?: "skip" | "post" };
+  post?: { draft: string; late?: "skip" | "post"; skipDryRun?: boolean };
   attempts?: number;
   /** Post jobs: a refusal that retrying cannot fix. */
   noRetry?: boolean;
@@ -48,7 +48,7 @@ export interface Job {
   nextRunAt?: number;
 }
 
-export type JobRunner = (job: Job) => Promise<string>;
+export type JobRunner = (job: Job, opts?: { force?: boolean }) => Promise<string>;
 
 export class Scheduler {
   private jobs: Job[] = [];
@@ -60,8 +60,13 @@ export class Scheduler {
   static readonly RUN_TIMEOUT_MS = 30 * 60_000;
   static readonly POST_ATTEMPTS = 5;
   static readonly POST_RETRY_MS = 60_000;
-  /** Job ids this instance has seen (loaded, added or removed): others in schedules.json were added by another process (the CLI). */
-  private readonly known = new Set<string>();
+  /** Job ids that were in schedules.json when this instance last read or wrote it. A file without one of them means another process removed it; a file with an id not here means another process added it. */
+  private persisted = new Set<string>();
+  /** Ids this instance removed (never adopted back from a stale read). */
+  private readonly removedHere = new Set<string>();
+  /** Ids this instance added. A passive instance (the CLI) writes only these from memory and keeps the file's version of every other job. */
+  private readonly owned = new Set<string>();
+  private readonly passive: boolean;
   private readonly file: string;
 
   private readonly log: Log;
@@ -73,7 +78,8 @@ export class Scheduler {
     prompt: JobRunner; builtin: Record<string, JobRunner>; deliver: (job: Job, text: string) => Promise<void>;
     /** How command jobs run: wrap the argv (the shell sandbox) and the environment they get. */
     commandSandbox?: () => { wrap: (argv: string[]) => string[]; env: Record<string, string>; cwd?: string };
-  }) {
+  }, opts: { passive?: boolean } = {}) {
+    this.passive = !!opts.passive;
     this.log = log;
     this.runners = runners;
     this.file = join(home, "schedules.json");
@@ -85,10 +91,11 @@ export class Scheduler {
     try {
       const raw = JSON.parse(readFileSync(this.file, "utf8"));
       this.jobs = Array.isArray(raw.jobs) ? raw.jobs : [];
-      for (const j of this.jobs) this.known.add(j.id);
+      this.persisted = new Set(this.jobs.map((j) => j.id));
     } catch (e) {
       throw new Error(`${this.file} is not valid JSON: ${(e as Error).message}`);
     }
+    if (this.passive) return; // the CLI reads; it must not mark the gateway's running jobs interrupted or rewrite their timing
     for (const job of this.jobs) {
       const interrupted = job.lastStatus === "running";
       if (interrupted) {
@@ -106,24 +113,50 @@ export class Scheduler {
     }
   }
 
-  /** Jobs another process wrote to schedules.json since we last looked (`carl post schedule` from the CLI). */
+  private fileJobs(): Job[] | undefined {
+    if (!existsSync(this.file)) return undefined;
+    try { const raw = JSON.parse(readFileSync(this.file, "utf8")); return Array.isArray(raw.jobs) ? raw.jobs : []; } catch { return undefined; }
+  }
+
+  /** Fold in what other processes did to schedules.json since we last looked: jobs they added are adopted, jobs they removed are dropped. */
   private adoptExternal(): void {
-    if (!existsSync(this.file)) return;
-    let raw: { jobs?: Job[] };
-    try { raw = JSON.parse(readFileSync(this.file, "utf8")); } catch { return; }
-    for (const job of Array.isArray(raw.jobs) ? raw.jobs : []) {
-      if (this.known.has(job.id)) continue;
-      this.known.add(job.id);
-      try { job.nextRunAt ??= this.next(job, Date.now()); } catch { continue; }
+    const file = this.fileJobs();
+    if (!file) return;
+    const inFile = new Map(file.map((j) => [j.id, j]));
+    this.jobs = this.jobs.filter((j) => !(this.persisted.has(j.id) && !inFile.has(j.id)));
+    for (const job of file) {
+      if (this.persisted.has(job.id) || this.removedHere.has(job.id) || this.jobs.some((j) => j.id === job.id)) continue;
+      if (!this.passive) { try { job.nextRunAt ??= this.next(job, Date.now()); } catch { continue; } }
       this.jobs.push(job);
     }
+    if (this.passive) this.jobs = this.jobs.map((j) => (this.owned.has(j.id) ? j : (inFile.get(j.id) ?? j)));
+  }
+
+  /** Hold schedules.json's lock around a read-merge-write (the CLI and the gateway both write it). */
+  private withFileLock<T>(fn: () => T): T {
+    const lock = `${this.file}.lock`;
+    const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    for (let waited = 0; ; waited += 20) {
+      try { writeFileSync(lock, `${process.pid}\n`, { flag: "wx", mode: 0o600 }); break; } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        let age = 0;
+        try { age = Date.now() - statSync(lock).mtimeMs; } catch { continue; }
+        if (age > 15_000) { rmSync(lock, { force: true }); continue; }
+        if (waited > 10_000) throw new Error(`${this.file} is locked by another process (${lock})`);
+        pause(20);
+      }
+    }
+    try { return fn(); } finally { rmSync(lock, { force: true }); }
   }
 
   private save(): void {
-    this.adoptExternal();
-    const tmp = `${this.file}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify({ jobs: this.jobs }, null, 2) + "\n", { mode: 0o600 });
-    renameSync(tmp, this.file);
+    this.withFileLock(() => {
+      this.adoptExternal();
+      const tmp = `${this.file}.tmp-${process.pid}`;
+      writeFileSync(tmp, JSON.stringify({ jobs: this.jobs }, null, 2) + "\n", { mode: 0o600 });
+      renameSync(tmp, this.file);
+      this.persisted = new Set(this.jobs.map((j) => j.id));
+    });
   }
 
   private next(job: Job, after: number): number | undefined {
@@ -188,7 +221,7 @@ export class Scheduler {
     } catch (e) {
       throw Object.assign(new Error((e as Error).message), { status: 400 });
     }
-    this.known.add(job.id);
+    this.owned.add(job.id);
     this.jobs.push(job);
     this.save();
     return job;
@@ -196,7 +229,7 @@ export class Scheduler {
 
   remove(id: string): boolean {
     const before = this.jobs.length;
-    this.known.add(id);
+    this.removedHere.add(id);
     this.jobs = this.jobs.filter((j) => j.id !== id);
     this.save();
     return this.jobs.length < before;
@@ -232,8 +265,9 @@ export class Scheduler {
     return job;
   }
 
-  async runNow(id: string): Promise<void> {
-    await this.execute(this.find(id));
+  /** Run a job now. `force` (the operator's portal, never the agent) lets a post job run before its slot. */
+  async runNow(id: string, opts: { force?: boolean } = {}): Promise<void> {
+    await this.execute(this.find(id), opts.force);
   }
 
   private async tick(): Promise<void> {
@@ -245,8 +279,13 @@ export class Scheduler {
     }
   }
 
-  private async execute(job: Job): Promise<void> {
+  private async execute(job: Job, force = false): Promise<void> {
     if (this.running.has(job.id)) return;
+    if (job.post) {
+      // The CLI may have removed or rescheduled this job since the last tick: look before a post can go out.
+      try { this.adoptExternal(); } catch {}
+      if (!this.jobs.includes(job)) return;
+    }
     this.running.add(job.id);
     let output = "";
     try {
@@ -260,7 +299,7 @@ export class Scheduler {
       if (job.builtin) {
         const run = this.runners.builtin[job.builtin];
         if (!run) throw new Error(`unknown built-in job "${job.builtin}"`);
-        output = await timed(run(job));
+        output = await timed(run(job, { force }));
       } else if (job.command) {
         const sandbox = this.runners.commandSandbox?.();
         output = await runCommand(job.command, Math.min(Math.max(job.timeoutMinutes ?? 10, 1), 240) * 60_000, this.children,

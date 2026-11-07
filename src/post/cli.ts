@@ -8,16 +8,18 @@ import { Log } from "../log.ts";
 import { Scheduler } from "../scheduler.ts";
 import { defaultRegistry } from "./registry.ts";
 import { realRunner } from "./runner.ts";
+import { visible } from "./draft.ts";
 import { PostService } from "./service.ts";
 import { PostError } from "./types.ts";
 
 export const POST_HELP = `carl post <command>
 
   dry-run <draft> [--offline]     render, validate and prove the platform takes the exact text, then discard it (no approval needed)
-  now <draft>                     post it now (needs the operator's approval of the current text)
-  schedule <draft> --at <ISO> [--late post]
+  now <draft> [--skip-dry-run]    post it now (needs your approval of the current text and a live dry run of it)
+  schedule <draft> --at <ISO> [--late post] [--skip-dry-run]
                                   post it at that time; a slot missed by more than the window is skipped unless --late post
   approve <draft> [--by <name>]   record your approval of the draft's current text (asks at a terminal)
+  clear-pending <draft>           after checking the account: a click was started on a part and never recorded, and that part is NOT live
   status                          drafts and scheduled posts
 
 <draft> is a name in the drafts folder (post.draftsDir) or a path.`;
@@ -43,7 +45,7 @@ export async function postCommand(args: string[], io: PostCliIo = realIo, make?:
   const [sub, ...rest] = args;
   if (!sub || sub === "help" || sub === "--help") { io.out(POST_HELP); return sub ? 0 : 64; }
   try {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { offline: { type: "boolean" }, at: { type: "string" }, late: { type: "string" }, by: { type: "string" } } });
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { offline: { type: "boolean" }, at: { type: "string" }, late: { type: "string" }, by: { type: "string" }, "skip-dry-run": { type: "boolean" } } });
     const svc = make?.() ?? defaultService();
     const draft = positionals[0];
     const need = () => { if (!draft) throw new PostError(`carl post ${sub}: give the draft name or path`, true); return draft; };
@@ -52,21 +54,33 @@ export async function postCommand(args: string[], io: PostCliIo = realIo, make?:
         io.out(await svc.dryRun(need(), { offline: values.offline }));
         return 0;
       case "now":
-        io.out(await svc.postNow(need()));
+        io.out(await svc.postNow(need(), { skipDryRun: values["skip-dry-run"] }));
         return 0;
       case "schedule": {
         if (!values.at) throw new PostError("carl post schedule needs --at <ISO time>", true);
         if (values.late !== undefined && values.late !== "post" && values.late !== "skip") throw new PostError('--late is "post" or "skip"', true);
-        io.out((await svc.schedule(need(), values.at, { late: values.late as "post" | "skip" | undefined })).text);
+        io.out((await svc.schedule(need(), values.at, { late: values.late as "post" | "skip" | undefined, skipDryRun: values["skip-dry-run"] })).text);
         return 0;
       }
       case "approve": {
         if (!io.isTTY()) throw new PostError("carl post approve is operator-only: run it yourself in a terminal (it will not run from an agent or a script)", true);
         const d = svc.load(need());
         const { rendered } = svc.prepare(d);
-        io.out(`Approve posting to ${d.platform}/${d.account}:\n\n${rendered.sequence.map((t, i) => `[${i + 1}] ${t}`).join("\n\n")}\n`);
+        // What is shown is what is approved: the hash of this read is passed to approve(), which refuses if the file differs by then.
+        const shown = d.textHash;
+        const live = d.partHashes.length;
+        io.out(`Approve posting to ${d.platform}/${d.account} (${svc.deps.config.accounts[d.account]?.profile}):\n\n${rendered.sequence.map((t, i) => `[${i + 1}]${i < live ? " (ALREADY LIVE, cannot be changed)" : ""} ${visible(t)}`).join("\n\n")}\n`);
         if (!(await io.confirm("Approve exactly this text? [y/N] "))) { io.out("Not approved."); return 1; }
-        io.out(await svc.approve(draft, values.by?.trim() || userInfo().username));
+        io.out(await svc.approve(draft!, values.by?.trim() || userInfo().username, shown));
+        return 0;
+      }
+      case "clear-pending": {
+        if (!io.isTTY()) throw new PostError("carl post clear-pending is operator-only: run it yourself in a terminal", true);
+        const d = svc.load(need());
+        if (d.pendingPart === undefined) { io.out(`${draft} has no pending part.`); return 0; }
+        io.out(`A click on part ${d.pendingPart + 1} of ${draft} was started${d.pendingAt ? ` at ${d.pendingAt}` : ""} and never recorded. Open ${svc.deps.config.accounts[d.account]?.profile} and look.`);
+        if (!(await io.confirm(`Is part ${d.pendingPart + 1} certainly NOT live? Clearing lets Carl post it again. [y/N] `))) { io.out("Left pending."); return 1; }
+        io.out(await svc.clearPending(draft!));
         return 0;
       }
       case "status":
@@ -84,6 +98,6 @@ export async function postCommand(args: string[], io: PostCliIo = realIo, make?:
 function defaultService(): PostService {
   const cfg = loadConfig();
   // Same schedules.json as the gateway; a running gateway adopts the job at its next tick.
-  const scheduler = new Scheduler(cfg.home, new Log(undefined), { prompt: async () => "", builtin: {}, deliver: async () => {} });
+  const scheduler = new Scheduler(cfg.home, new Log(undefined), { prompt: async () => "", builtin: {}, deliver: async () => {} }, { passive: true });
   return new PostService({ home: cfg.home, config: cfg.post, run: realRunner, registry: defaultRegistry(), scheduler });
 }
