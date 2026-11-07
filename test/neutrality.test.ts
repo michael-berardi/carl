@@ -10,7 +10,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 function files(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
     const path = join(dir, name);
-    return statSync(path).isDirectory() ? files(path) : /\.(ts|js|sh|md)$/.test(name) ? [path] : [];
+    return statSync(path).isDirectory() ? files(path) : (/\.(ts|js|mjs|sh|md|html)$/.test(name) || !name.includes(".")) ? [path] : [];
   });
 }
 const shipped = [
@@ -53,10 +53,12 @@ test("the post primitive ships no account, handle or platform preference: accoun
   assert.deepEqual(hits, []);
 });
 
-test("src names no coordinator: no overseer or coordinator_ literal anywhere in the source", () => {
-  const hits = files(join(root, "src"))
+test("shipped code names no coordinator: no overseer, coordinator_, coordinator- or ut-coordinator literal in src, bin, scripts or the web files", () => {
+  const scan = [...files(join(root, "src")), ...files(join(root, "bin")), ...files(join(root, "scripts"))];
+  assert.ok(scan.length > 20, "the folders are covered");
+  const hits = scan
     .flatMap((f) => readFileSync(f, "utf8").split("\n").map((line, i) => [f, i + 1, line] as const))
-    .filter(([, , line]) => /overseer|coordinator_/i.test(line))
+    .filter(([, , line]) => /overseer|coordinator[_-]|ut-coordinator/i.test(line))
     .map(([f, n, line]) => `${f.slice(root.length)}:${n}: ${line.trim().slice(0, 120)}`);
   assert.deepEqual(hits, []);
 });

@@ -14,3 +14,7 @@ test("anything that is not an MCP call keeps the guard's own reason", () => {
   assert.equal(approvalSummary("rm -rf build/", "deletes files"), "deletes files");
   assert.equal(approvalSummary("mcp__x__tool_run\nnot json", "r"), "UltraBot wants to run a tool in x");
 });
+
+test("a qualifier word in the tool name does not leak into the sentence", () => {
+  assert.equal(approvalSummary('mcp__ultraterm__ultraterm_team_job_add\n{"title": "T"}', "r"), "UltraBot wants to add a job to ultraterm: “T”");
+});

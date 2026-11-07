@@ -416,6 +416,10 @@ function postOf(v: unknown, home: string): PostConfig {
     };
   }
   if (raw.retex !== undefined && raw.retex !== "auto" && raw.retex !== "off") throw new ConfigError('post.retex must be "auto" or "off"');
+  for (const k of ["socketPattern", "commandPattern"] as const) {
+    const pat = raw.browser?.[k];
+    if (typeof pat === "string" && pat) { try { new RegExp(pat); } catch (e) { throw new ConfigError(`post.browser.${k} is not a valid regular expression: ${(e as Error).message}`); } }
+  }
   return {
     draftsDir: abs(str(raw.draftsDir, "posts", "post.draftsDir"), home),
     missedWindowMinutes: int(raw.missedWindowMinutes, 180, "post.missedWindowMinutes", 1),

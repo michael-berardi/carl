@@ -158,14 +158,14 @@ Carl publishes a social post from a draft file, now or on a schedule, and never 
 ```
 carl post dry-run <draft>      render, validate and prove the exact text fits the composer; posts nothing
 carl post approve <draft>      asks: a card with the exact text appears in your Telegram home chat; the approval is recorded only when you press Allow there (editing the draft clears it)
-carl post now <draft>          post it (needs approval and a live dry run); a failure after the click stops for you to check, it never re-clicks
+carl post now <draft>          asks: a POST NOW card appears in your Telegram home chat and the gateway posts only when you press Allow there (needs approval and a live dry run); a failure after the click stops for you to check, it never re-clicks
 carl post schedule <draft> --at <ISO> [--late post]
 carl post clear-pending <draft>  (a card) after you checked the profile and a pending part is not live
 carl post record-live <draft> <url>  (a card) a pending part is live at that URL
 carl post status
 ```
 
-Scheduled posts survive restarts. A slot missed by more than three hours (`post.missedWindowMinutes`) is skipped, the draft stays Scheduled and the delivered message says so, unless you chose `--late post`. The agent can draft, dry-run and give an approved draft its first slot through its `post_draft` tool but cannot approve, answer a card, post at once, schedule closer than 15 minutes, change a slot, or run a scheduled post; the approval is an HMAC with a key the sandbox denies, and it is recorded only when you answer the card on your own channel. See [docs/POSTING.md](docs/POSTING.md).
+A scheduled slot survives a restart, but the restart voids the approval, so the post then fails closed until you approve again. A slot missed by more than three hours (`post.missedWindowMinutes`) is skipped, the draft stays Scheduled and the delivered message says so, unless you chose `--late post`. The agent can draft, dry-run and give an approved draft its first slot through its `post_draft` tool but cannot approve, answer a card, post at once, schedule closer than 15 minutes, change a slot, or run a scheduled post; the approval is an HMAC under a key that exists only in the running gateway's memory (never on disk), and it is recorded only when you answer the card on your own channel. See [docs/POSTING.md](docs/POSTING.md).
 
 ## Configuration
 
@@ -218,7 +218,7 @@ carl app [--install]    open the web app in its own window; --install adds Carl.
 
 ## Modules
 
-- **UltraTerm:** `"ultraterm": {"home": "~/.hermes"}` makes Carl a drop-in for UltraTerm's UltraBot slot. It writes the status, transcript and usage files UltraTerm reads and serves the routes its panels use. To run it in that slot, install `scripts/ultrabot-gateway.sh` as `~/.hermes/ultrabot-gateway.sh`: UltraTerm then starts Carl from a clean environment as its own child and restarts it if it exits. Set `ultraterm.controlBin` to UltraTerm's control binary (it enables the Telegram decision buttons and account ordering, and its folder is protected), and list your control and memory servers in `trustedMcp` so they run outside the sandbox. Carl names no server or tool of its own: a trusted server's tools run without asking only when their MCP listing carries `readOnlyHint: true` or you list them in `guard.readOnlyTools` (`["server/tool", ...]`); every other tool asks first unless you allow it in `guard.allowTools` / `guard.operatorTools`.
+- **UltraTerm:** `"ultraterm": {"home": "~/.hermes"}` makes Carl a drop-in for UltraTerm's UltraBot slot. It writes the status, transcript and usage files UltraTerm reads and serves the routes its panels use. To run it in that slot, install `scripts/ultrabot-gateway.sh` as `~/.hermes/ultrabot-gateway.sh`: UltraTerm then starts Carl from a clean environment as its own child and restarts it if it exits. Set `ultraterm.controlBin` to UltraTerm's control binary (it enables the Telegram decision buttons and account ordering, and its folder is protected), and list your control and memory servers in `trustedMcp` so they run outside the sandbox. Carl names no server or tool of its own: a trusted server's tools run without asking only when their MCP listing carries `readOnlyHint: true` or you list them in `guard.readOnlyTools` (`["server/tool", ...]`); every other tool asks first unless you allow it in `guard.allowTools` / `guard.operatorTools`. The launcher passes through only terminal, locale and UltraTerm variables; to pass others (never one whose name looks like a credential), set `CARL_PASS_ENV` to their names, separated by spaces or commas (default empty).
 - **Your own extensions:** any Pi-SDK extension loads through `extensions`. That covers custom tools, providers, MCP bridges and delegation.
 
 ## Development

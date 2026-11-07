@@ -236,7 +236,7 @@ export class Brain extends EventEmitter {
       writablePaths: writablePaths(this.cfg),
       secretPaths: [...secretFiles(this.cfg), ...secretDirs(this.cfg)],
       denyBrowserCommand: this.browserCommandPattern(),
-      isReadOnly: (name: string) => this.cfg.guard.readOnlyTools.includes(name) || this.hintedReadOnly(name) || readOnlyCache(this.cfg.home).readOnly.has(name),
+      isReadOnly: (name: string) => this.cfg.guard.readOnlyTools.includes(name) || (this.hintedReadOnly(name) ?? readOnlyCache(this.cfg.home).readOnly.has(name)),
       cwd: this.cfg.workspace,
       noExec: this.sandboxProfile ? NO_EXEC : [],
       sandboxed: !!this.sandboxProfile,
@@ -245,11 +245,11 @@ export class Brain extends EventEmitter {
     };
   }
 
-  /** While posting is configured: shell commands that name the browser tooling are refused (post.browser.commandPattern, else the session commands' names). */
+  /** Whenever post.browser.commandPattern is set (or accounts name session commands): shell commands that name the browser tooling are refused (post.browser.commandPattern, else the session commands' names). */
   private browserCommandPattern(): string | undefined {
     const accounts = Object.values(this.cfg.post.accounts);
-    if (!accounts.length) return undefined;
     if (this.cfg.post.browser.commandPattern) return this.cfg.post.browser.commandPattern;
+    if (!accounts.length) return undefined;
     const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return [...new Set(accounts.map((a) => esc(basename(a.session.command))))].join("|");
   }
@@ -550,18 +550,20 @@ export class Brain extends EventEmitter {
     return convo;
   }
 
-  /** Is this "server/tool" listed right now, by any open conversation, with readOnlyHint: true? (MCP tools can arrive after a session opens, so this looks at the live listing.) */
-  private hintedReadOnly(name: string): boolean {
+  /** The live readOnlyHint of this "server/tool" in any open conversation: true if any listing says true and none says false, false if a live listing says false (it overrides a cached true), undefined if it is not listed now. */
+  private hintedReadOnly(name: string): boolean | undefined {
+    let seen: boolean | undefined;
     for (const convo of this.conversations.values()) {
       try {
         for (const t of (convo.session as any).getAllTools?.() ?? []) {
-          if (t.annotations?.readOnlyHint !== true) continue;
           const server = this.cfg.trustedMcp.find((s) => String(t.name).startsWith(`mcp__${s.replace(/[^A-Za-z0-9_]/g, "_")}__`));
-          if (server && `${server}/${String(t.name).slice(`mcp__${server.replace(/[^A-Za-z0-9_]/g, "_")}__`.length)}` === name) return true;
+          if (!server || `${server}/${String(t.name).slice(`mcp__${server.replace(/[^A-Za-z0-9_]/g, "_")}__`.length)}` !== name) continue;
+          if (t.annotations?.readOnlyHint !== true) return false;
+          seen = true;
         }
       } catch { /* a session being torn down: not a hint */ }
     }
-    return false;
+    return seen;
   }
 
   /** Remember which trusted-server tools publish readOnlyHint: true; kept in state/mcp-readonly.json (post/safety.ts) for the guard. */

@@ -14,12 +14,11 @@ export const hmac = (key: string, s: string) => createHmac("sha256", key).update
 export const expandHome = (p: string, home = homedir()) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p);
 
 /**
- * The browser relay's control socket, token and runtime: out of the agent's reach whenever posting is configured. All of it
+ * The browser relay's control socket, token and runtime: out of the agent's reach whenever post.browser is set (with or without accounts). All of it
  * comes from the operator's `post.browser` config (nothing is assumed): the listed folders, the folders of the descriptor files
  * and the `runtime_root` they name, and any descriptor or runtime that the named environment variables point at.
  */
-export function browserControlDirs(accounts: Record<string, unknown>, b: BrowserConfig, env: NodeJS.ProcessEnv = process.env, home = homedir()): string[] {
-  if (!Object.keys(accounts).length) return [];
+export function browserControlDirs(b: BrowserConfig, env: NodeJS.ProcessEnv = process.env, home = homedir()): string[] {
   const dirs = new Set<string>(b.controlDirs);
   for (const descriptor of descriptorFiles(b, env, home)) {
     dirs.add(dirname(descriptor));

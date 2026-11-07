@@ -22,14 +22,14 @@ export interface CardRequest {
   /** post-now: the operator asked to post without the live dry run. */
   skipDryRun?: boolean;
   /** Who asked (informational: it decides nothing). */
-  by: "operator" | "agent";
+  by: "api" | "agent";
   at: string;
 }
 
 const KINDS = new Set<string>(["approve", "post-now", "clear-pending", "record-live"]);
 const MAX_PENDING = 8;
 const MAX_AGE_MS = 48 * 3600_000;
-/** After the operator denies a card the agent asked for, the agent cannot ask for the same thing again for this long. */
+/** After the operator denies a card (raised by the agent or through the API), the same request cannot be raised for the same thing again for this long. */
 export const DENY_COOLDOWN_MS = 6 * 3600_000;
 const RETRY_AFTER_FAILED_SEND_MS = 60_000;
 
@@ -58,9 +58,9 @@ export class CardStore {
 
   /** One card per (kind, draft, url): asking again returns the card already waiting. */
   add(card: CardRequest): { card: CardRequest; fresh: boolean } {
-    if (card.by === "agent") {
+    {
       const denied = this.deniedAt(card);
-      if (denied !== undefined && this.clock() - denied < DENY_COOLDOWN_MS) throw Object.assign(new Error(`the operator denied this request ${Math.ceil((this.clock() - denied) / 60_000)} minute(s) ago; it is not asked again for ${DENY_COOLDOWN_MS / 3600_000} hours. Tell the operator what you need instead`), { final: true });
+      if (denied !== undefined && this.clock() - denied < DENY_COOLDOWN_MS) throw Object.assign(new Error(`the operator denied this request ${Math.ceil((this.clock() - denied) / 60_000)} minute(s) ago; it is not asked again for ${DENY_COOLDOWN_MS / 3600_000} hours. Say what you need on the operator channel instead`), { final: true });
     }
     const existing = this.list().find((c) => c.kind === card.kind && c.draft === card.draft && c.url === card.url);
     if (existing) return { card: existing, fresh: false };
@@ -127,7 +127,7 @@ export class CardDesk {
       this.shown.add(card.id);
       work.push(asked.then(async (d) => {
         this.store.remove(card.id);
-        if (d.answer === "denied" && card.by === "agent") this.store.deny(card);
+        if (d.answer === "denied") this.store.deny(card);
         if (d.answer !== "approved") return;
         try { this.tell(await this.svc.applyCard(card, described.bind, `operator ${d.by ?? "channel"}`)); } catch (e) { this.tell(`Not done (${card.kind} ${card.draft.split("/").pop()}): ${(e as Error).message}`); }
       }).catch((e) => {
