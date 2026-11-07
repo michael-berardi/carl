@@ -26,6 +26,8 @@ export interface FakeX {
   tamper?: (text: string) => string;
   /** The click works but the post never shows on the timeline (or X rejected it as a duplicate). */
   hideNew?: boolean;
+  /** The timeline never draws (no posts, and not X's empty-profile state). */
+  unreadable?: boolean;
   /** The click call itself fails (a timeout). */
   failClick?: boolean;
   /** What the timeline shows for a live post's text (default: as posted). */
@@ -78,7 +80,7 @@ export function fakeX(opts: { retex?: FakeX["retex"]; clock?: () => number } = {
         state.lists++;
         if (state.failList?.(state.lists)) return { code: 1, stdout: JSON.stringify({ ok: false, error: "timeout" }), stderr: "" };
         const list = [...state.live].reverse().map((p) => ({ url: p.url, text: (state.show ? state.show(p.text) : p.text).replace(/https?:\/\/\S*[^\s.,;:!?)\]'"]/g, "URL").replace(/\s+/g, " ").trim() }));
-        return reply({ ok: true, result: JSON.stringify(list) });
+        return reply({ ok: true, result: JSON.stringify({ items: state.unreadable ? [] : list, empty: !state.unreadable && list.length === 0 }) });
       }
       return reply({ ok: true, result: "null" });
     }

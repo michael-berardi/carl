@@ -145,10 +145,11 @@ const LIST = (handle: string, want: string | null, tries: number) => `(async () 
   };
   for (let i = 0; i < ${tries}; i++) {
     const list = read();
-    if (want === null ? list.length : list.some((c) => c.text === norm(want))) return JSON.stringify(list);
+    if (want === null ? list.length : list.some((c) => c.text === norm(want))) return JSON.stringify({items: list, empty: false});
+    if (!list.length && document.querySelector('[data-testid="emptyState"]')) return JSON.stringify({items: [], empty: true});
     await wait(500);
   }
-  return JSON.stringify(read());
+  return JSON.stringify({items: read(), empty: false});
 })()`;
 
 /** One overseer-browser call. The CLI's own request deadline is shorter than X's slow page loads, so --timeout is explicit. */
@@ -211,9 +212,15 @@ async function click(ctx: AdapterContext, session: string, text: string, what: s
 
 /** Open a timeline page and read the posts on it. */
 async function list(ctx: AdapterContext, session: string, handle: string, page: string, want: string | null, tries: number): Promise<Candidate[]> {
+  return (await timelineOf(ctx, session, handle, page, want, tries)).items;
+}
+
+/** The posts on a page, and whether the page showed X's own "nothing here" state (an empty profile), as opposed to not drawing in time. */
+async function timelineOf(ctx: AdapterContext, session: string, handle: string, page: string, want: string | null, tries: number): Promise<{ items: Candidate[]; empty: boolean }> {
   await browser(ctx, session, ["navigate", page]);
   const r = await js(ctx, session, LIST(handle, want, tries));
-  return Array.isArray(r) ? r.filter((c) => c && typeof c.url === "string" && typeof c.text === "string") : [];
+  const raw = Array.isArray(r) ? r : r && typeof r === "object" && Array.isArray(r.items) ? r.items : [];
+  return { items: raw.filter((c: any) => c && typeof c.url === "string" && typeof c.text === "string"), empty: !!(r && typeof r === "object" && !Array.isArray(r) && r.empty === true) };
 }
 
 const newestId = (cands: Candidate[], handle: string) => cands.reduce<bigint | undefined>((m, c) => { const id = statusId(c.url, handle); return id !== undefined && (m === undefined || id > m) ? id : m; }, undefined);
@@ -273,7 +280,7 @@ export const xAdapter: PostAdapter = {
     for (let i = 1; i < urls.length; i++) if (statusId(urls[i], handle)! <= statusId(urls[i - 1], handle)!) throw new PostError("the recorded URLs are not in posting order; refusing to continue the thread", true);
     if (urls.length >= seq.length) throw new PostError("every part is already posted", true);
     if (run.pending && run.pending.part !== urls.length) throw new PostError(`pending_part ${run.pending.part + 1} does not match the ${urls.length} part(s) recorded live; check the profile, then run \`carl post clear-pending\``, true);
-    const timeline = `${origin}/${handle}/with_replies`;
+    const timelineUrl = `${origin}/${handle}/with_replies`;
     return withSession(ctx, async (session) => {
       await requireAccount(ctx, session, handle, origin);
       for (let i = urls.length; i < seq.length; i++) {
@@ -281,7 +288,7 @@ export const xAdapter: PostAdapter = {
         const prevId = urls.length ? statusId(urls[urls.length - 1], handle)! : 0n;
         if (run.pending?.part === i) {
           // A click on this part was started and not recorded. Look, never click.
-          const cands = await list(ctx, session, handle, timeline, text, 8);
+          const cands = await list(ctx, session, handle, timelineUrl, text, 8);
           // With the baseline recorded before the click the clocks do not matter; without one, no earlier than the click (with slack).
           const baseline = run.pending.baseline ? BigInt(run.pending.baseline) : undefined;
           const notBefore = baseline !== undefined ? run.approvedAtMs - SKEW_MS : Math.max(run.approvedAtMs, run.pending.atMs) - SKEW_MS;
@@ -291,7 +298,11 @@ export const xAdapter: PostAdapter = {
           try { await run.onPart([...urls]); } catch (e) { throw postClick(e, i); }
           continue;
         }
-        const seen = await list(ctx, session, handle, timeline, null, 20);
+        // The exact text as `want`: the wait runs its full length, so a pinned post alone cannot end it early. An unreadable
+        // (empty, not-drawn) timeline is a retryable refusal: only X's own empty-profile state lets a click go ahead on no posts.
+        const look = await timelineOf(ctx, session, handle, timelineUrl, text, 20);
+        const seen = look.items;
+        if (!seen.length && !look.empty) throw new PostError(`part ${i + 1}: the profile timeline of @${handle} did not draw, so Carl cannot rule out that the text is already live; nothing was clicked. It will be tried again`);
         // Already on the profile (a mistaken `clear-pending`, a post made by hand): never click a second time.
         const already = pickPart(seen, text, handle, { urls, prevId, notBefore: run.approvedAtMs - SKEW_MS });
         if (already) throw new PostError(`part ${i + 1} is already live at ${already} (the exact text is on @${handle}'s profile, posted after the approval); nothing was clicked. Record it with \`carl post record-live\` on the draft`, true);
@@ -306,10 +317,10 @@ export const xAdapter: PostAdapter = {
           await ctx.sleep(4000);
           let hit: string | undefined;
           for (let attempt = 0; attempt < 2 && !hit; attempt++) {
-            hit = pickPart(await list(ctx, session, handle, timeline, text, 40), text, handle, { urls, prevId, baseline, notBefore: run.approvedAtMs - SKEW_MS });
+            hit = pickPart(await list(ctx, session, handle, timelineUrl, text, 40), text, handle, { urls, prevId, baseline, notBefore: run.approvedAtMs - SKEW_MS });
             if (!hit && attempt === 0) await ctx.sleep(5000);
           }
-          if (!hit) throw new PostError(`part ${i + 1} was probably posted, but its exact text could not be found as a new post on ${timeline}`);
+          if (!hit) throw new PostError(`part ${i + 1} was probably posted, but its exact text could not be found as a new post on ${timelineUrl}`);
           urls.push(hit);
           await run.onPart([...urls]);
         } catch (e) {

@@ -76,10 +76,10 @@ export class Gateway {
     });
     this.post = new PostService({
       home: cfg.home, config: cfg.post, run: realRunner, registry: defaultRegistry(), scheduler: this.scheduler,
-      notify: (m) => void this.send("home", m).catch((e) => this.log.warn("post notice not delivered", { error: (e as Error).message })),
+      notify: async (m) => { await this.send("home", m); },
       sessionProblems: () => this.postSessionProblems,
     });
-    if (Object.keys(cfg.post.accounts).length) this.post.ensureKey(); // the approval key exists (0600) before anything is approved
+    if (Object.keys(cfg.post.accounts).length && !cfg.post.blocked) this.post.ensureKey(); // the approval key exists (0600) before anything is approved
     const asks = cfg.asks ? new Asks(cfg.home) : undefined;
     this.asks = asks;
     const groupTools = (): ToolDefinition[] => {
@@ -87,7 +87,7 @@ export class Gateway {
       const ledger = new WorkLedger(cfg.home);
       return [groupHistoryTool(new GroupArchive(cfg.home), cfg.telegram.allowFrom, (chat) => ledger.lastQueued(chat)), ...workTools(cfg, ledger)];
     };
-    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox, Object.keys(cfg.post.accounts).length ? this.post : undefined), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
+    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox, Object.keys(cfg.post.accounts).length && !cfg.post.blocked ? this.post : undefined), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
   }
 
   use(plugin: GatewayPlugin): this {
@@ -243,6 +243,11 @@ export class Gateway {
    * show the operator's cards (approve, clear-pending, record-live) on their Telegram home chat. Only a button press there answers one.
    */
   private startPostDesk(): void {
+    if (this.cfg.post.blocked) {
+      this.log.error("post: posting is OFF", { reason: this.cfg.post.blocked });
+      void this.send("home", this.cfg.post.blocked).catch((e) => this.log.warn("post refusal not delivered", { error: (e as Error).message }));
+      return;
+    }
     this.postSessionProblems = sessionProblems(this.cfg.post.accounts, this.brain.resolvedPrograms);
     if (this.postSessionProblems.length) {
       for (const p of this.postSessionProblems) this.log.error("post: session command does not resolve", { problem: p });
