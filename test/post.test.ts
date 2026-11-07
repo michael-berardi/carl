@@ -19,6 +19,9 @@ import { postCommand, type PostCliIo } from "../src/post/cli.ts";
 import { normText, PAGE_TEXT, pickPart, statusTime, xHandle, xLength } from "../src/post/adapters/x.ts";
 import { carlTools } from "../src/tools.ts";
 import { loadConfig } from "../src/config.ts";
+import { postingBlockedReason, UNSANDBOXED_TOOLS, unsafeAllowTools } from "../src/post/safety.ts";
+import { DEFAULT_TRUSTED_READONLY } from "../src/guard.ts";
+import { splitCard } from "../src/channels/telegram.ts";
 import { type FakeX, fakeX } from "./post-fake.ts";
 
 const log = { info() {}, warn() {}, error() {}, debug() {} } as any;
@@ -524,7 +527,7 @@ test("M7/C3: the agent cannot post at once, change a slot, post late, or run or 
   await assert.rejects(post.execute("id", { action: "schedule", name: "ag", at: "2026-03-10T12:00:01Z" }), /already has a slot/);
   // run / resume of a post job through the agent's schedule tool.
   await assert.rejects(sched.execute("id", { action: "run", id: jobId }), /only the operator can run it early/);
-  await assert.rejects(sched.execute("id", { action: "resume", id: jobId }), /only the operator can resume or run it/);
+  await assert.rejects(sched.execute("id", { action: "resume", id: jobId }), /only the operator can pause or resume it/);
   assert.equal(r.x.clicks, 0);
   // runScheduled before the slot refuses unless the operator forces it.
   await assert.rejects(r.svc.runScheduled(r.scheduler.get(jobId)), /has not arrived/);
@@ -979,7 +982,7 @@ test("R2: asking never approves; only the operator's answer to the card does, bo
   for (const answer of ["denied", "timeout"] as const) {
     await new CardDesk(r.svc, (text) => { shown.push(text); return Promise.resolve({ answer }); }, () => {}).pump();
     assert.equal(readDraft(p).approved, undefined, answer);
-    r.svc.requestCard("approve", "card", { by: "agent" });
+    r.svc.requestCard("approve", "card", { by: "operator" });
   }
   // The card carries the exact text, account, profile URL and text hash.
   assert.match(shown[0], /Exactly this/);
@@ -1105,7 +1108,7 @@ test("R6: a few seconds of clock difference between this machine and X does not 
 test("R7: the agent cannot schedule inside 15 minutes, and the operator is told when it schedules", async () => {
   const r = rig();
   const notes: string[] = [];
-  const svc = new PostService({ ...r.svc.deps, notify: (m) => notes.push(m) });
+  const svc = new PostService({ ...r.svc.deps, notify: (m) => { notes.push(m); } });
   r.write("lead", 'text: "Soon"');
   await svc.approve("lead", "alice"); await svc.dryRun("lead");
   const tool: any = carlTools({} as any, r.scheduler, { send: async () => "" }, svc).find((t) => t.name === "post_draft");
@@ -1240,4 +1243,247 @@ test("Low: a pending part cannot be re-approved with edited text; dropped thread
   assert.equal(r.scheduler.get(job.id).post!.skipDryRun, true);
   await r.svc.approve("skip", "alice");
   assert.equal(r.scheduler.get(job.id).post!.skipDryRun, undefined);
+});
+
+// ===================== Round 4: the third review (F1-F6 and the Lows) =====================
+
+test("F1: posting is refused while allowTools auto-allows a tool that can type into a terminal or run unsandboxed", async () => {
+  // The set covers what the review named, and the built-in read-only allow list never matches it.
+  for (const t of ["overseer_send", "overseer_job_add", "overseer_message"]) assert.ok(UNSANDBOXED_TOOLS.includes(t), t);
+  for (const t of UNSANDBOXED_TOOLS) for (const [src] of DEFAULT_TRUSTED_READONLY) assert.equal(new RegExp(src).test(`overseer/${t}`), false, `${t} must not be read-only`);
+  assert.deepEqual(unsafeAllowTools([["^overseer/overseer_status$", "x"]], ["overseer"]), []);
+  assert.equal(unsafeAllowTools([["^overseer/overseer_(send|job_add)$", "queued work"]], ["overseer"])[0].tools.join(), "overseer_send,overseer_job_add");
+  assert.ok(unsafeAllowTools([[".*", "everything"]], [])[0].tools.length === UNSANDBOXED_TOOLS.length, "a catch-all allows them too");
+  assert.equal(postingBlockedReason({}, [[".*", "x"]], []), undefined, "no accounts, nothing to refuse");
+  const home = mkdtempSync(join(tmpdir(), "carl-post-f1-"));
+  process.env.HOME = home;
+  const acct = { platform: "x", profile: "https://x.com/example" };
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", trustedMcp: ["overseer"], guard: { allowTools: [["^overseer/overseer_(send|job_add|message)$", "queued work"]] }, post: { accounts: { main: acct } } }));
+  const cfg = loadConfig(home);
+  assert.match(cfg.post.blocked!, /Posting is OFF/);
+  assert.match(cfg.post.blocked!, /Remove that entry from guard\.allowTools/);
+  assert.match(cfg.post.blocked!, /overseer_send, overseer_message, overseer_job_add/);
+  // Every operation refuses, `status` says why, and the agent gets no post tool.
+  const r = rig();
+  const svc = new PostService({ ...r.svc.deps, config: { ...r.svc.deps.config, blocked: cfg.post.blocked } });
+  r.write("off", 'text: "Hi"');
+  for (const f of [() => svc.dryRun("off", { offline: true }), () => svc.postNow("off"), () => svc.approve("off", "alice"), () => svc.schedule("off", "2026-03-11T12:00:00Z")]) await assert.rejects(f(), /Posting is OFF/);
+  assert.throws(() => svc.requestCard("approve", "off", { by: "operator" }), /Posting is OFF/);
+  assert.match(svc.status(), /^POSTING IS OFF: Posting is OFF/);
+  assert.equal(r.x.calls.length, 0);
+  // Moving the tools to ask (removing them from allowTools) turns it on.
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", trustedMcp: ["overseer"], guard: { allowTools: [] }, post: { accounts: { main: acct } } }));
+  assert.equal(loadConfig(home).post.blocked, undefined);
+});
+
+test("F1: the approval key is a 0600 file; the docs say plainly that an unsandboxed process of the user can read it", () => {
+  const doc = readFileSync(new URL("../docs/POSTING.md", import.meta.url), "utf8");
+  assert.match(doc, /unsandboxed process of the same user can read/i);
+  assert.match(doc, /Keychain/);
+});
+
+test("F2: a failed write-ahead does not wedge the draft: the rerun clicks, and a lost pending record can be cleared by card", async () => {
+  const r = rig();
+  const p = r.write("wedge", 'text: "Wedge"');
+  await approve(r, "wedge");
+  const real = r.x.run;
+  let tamper = true;
+  const svc = new PostService({ ...r.svc.deps, run: async (cmd, args, o) => {
+    const res = await real(cmd, args, o);
+    if (tamper && args.some((a) => a.includes("composer not found"))) { tamper = false; writeFileSync(p, readFileSync(p, "utf8") + "\n"); }
+    return res;
+  } });
+  await assert.rejects(svc.postNow("wedge"), /changed while it was being updated/);
+  assert.equal(r.x.clicks, 0);
+  assert.match(readFileSync(join(r.home, "state", "post-ledger.jsonl"), "utf8"), /"event":"cleared"/);
+  // The edit voided nothing that matters (a blank line is not text): approve again and the rerun posts, with no clear-pending needed.
+  await approve(r, "wedge");
+  assert.match(await svc.postNow("wedge"), /Posted wedge/);
+  assert.equal(r.x.clicks, 1);
+  // A click whose pending record a stale save lost: the card still shows it and clear-pending works from the ledger alone.
+  const q = r.write("lost", 'text: "Lost pending"');
+  await approve(r, "lost");
+  r.x.hideNew = true;
+  await assert.rejects(r.svc.postNow("lost"), /probably posted/);
+  writeFileSync(q, setFields(readFileSync(q, "utf8"), { pending_part: undefined, pending_at: undefined, pending_baseline: undefined, last_error: undefined }));
+  assert.equal(readDraft(q).pendingPart, undefined);
+  assert.match(r.svc.status(), /PENDING part 1/);
+  const cleared = await operator(r, "clear-pending", "lost");
+  assert.match(cleared.shown[0], /click on part 1 of lost\.md was started/);
+  assert.match(cleared.told.join(), /Cleared the pending record/);
+  r.x.hideNew = false;
+  assert.match(await r.svc.postNow("lost"), /Posted lost/);
+});
+
+test("F2: a live dry run takes the draft's lock, so it cannot land in the middle of a post", async () => {
+  const r = rig();
+  r.write("busy", 'text: "Busy"');
+  await approve(r, "busy");
+  const real = r.x.run;
+  let inner: Promise<string> | undefined;
+  const svc = new PostService({ ...r.svc.deps, run: async (cmd, args, o) => {
+    if (!inner && args.some((a) => a.includes("composer not found"))) inner = r.svc.dryRun("busy").catch((e) => String(e.message));
+    return real(cmd, args, o);
+  } });
+  await svc.dryRun("busy");
+  inner = undefined;
+  await svc.postNow("busy");
+  assert.match(String(await inner), /being posted by another run/);
+});
+
+test("F3: the pre-click look waits for the exact text, and an undrawn timeline refuses (retryable) instead of clicking", async () => {
+  const r = rig();
+  r.write("blind", 'text: "Blind"');
+  await approve(r, "blind");
+  r.x.unreadable = true;
+  await assert.rejects(r.svc.postNow("blind"), (e: any) => e.final !== true && /did not draw.*nothing was clicked/.test(e.message));
+  assert.equal(r.x.clicks, 0);
+  r.x.unreadable = false; // an empty profile shown as X's own empty state is fine
+  assert.match(await r.svc.postNow("blind"), /Posted blind/);
+  const src = readFileSync(new URL("../src/post/adapters/x.ts", import.meta.url), "utf8");
+  assert.match(src, /timelineOf\(ctx, session, handle, timelineUrl, text, 20\)/, "the pre-click look passes the text as `want`");
+});
+
+test("F4: a post card is not collapsed, shows who asked, is never dropped when long, and an agent's denied card is not asked again at once", async () => {
+  const r = rig();
+  r.write("who", 'text: "Who asked"');
+  const asked = await operator(r, "approve", "who", { answer: "denied" });
+  assert.match(asked.shown[0], /Asked by: you/);
+  r.svc.requestCard("approve", "who", { by: "agent" });
+  const agent = new CardDesk(r.svc, (text) => { agent.seen.push(text); return Promise.resolve({ answer: "denied" as const }); }, () => {}) as CardDesk & { seen: string[] };
+  agent.seen = [];
+  await agent.pump();
+  assert.match(agent.seen[0], /Asked by: THE AGENT/);
+  assert.throws(() => r.svc.requestCard("approve", "who", { by: "agent" }), /denied this request .* not asked again/);
+  r.clock.now += 7 * 3600_000;
+  assert.match(r.svc.requestCard("approve", "who", { by: "agent" }), /Asked/);
+  const tg = readFileSync(new URL("../src/channels/telegram.ts", import.meta.url), "utf8");
+  const card = tg.slice(tg.indexOf("async requestCard("), tg.indexOf("private async requestApprovalSetup"));
+  assert.doesNotMatch(card, /expandable/);
+  assert.doesNotMatch(card, /too long to review/);
+  const long = Array.from({ length: 40 }, (_, i) => `[${i + 1}] ${"word ".repeat(40)}`).join("\n\n");
+  const pieces = splitCard(long, 3000);
+  assert.ok(pieces.length > 1 && pieces.every((x) => x.length <= 3000));
+  assert.equal(pieces.join("\n\n").replace(/\s+/g, ""), long.replace(/\s+/g, ""), "nothing is lost");
+});
+
+test("F5: a card whose message could not be sent is shown again after a back-off, not stranded", async () => {
+  const r = rig();
+  r.write("flaky", 'text: "Flaky"');
+  r.svc.requestCard("approve", "flaky", { by: "operator" });
+  let sends = 0; const told: string[] = [];
+  const desk = new CardDesk(r.svc, () => { sends++; return sends === 1 ? Promise.reject(new Error("telegram down")) : Promise.resolve({ answer: "approved" as const, by: "4242" }); }, (m) => { told.push(m); });
+  await desk.pump();
+  assert.equal(sends, 1);
+  assert.match(told[0], /could not be shown/);
+  await desk.pump();
+  assert.equal(sends, 1, "backed off");
+  r.clock.now += 61_000;
+  await desk.pump();
+  assert.equal(sends, 2);
+  assert.match(readDraft(join(r.draftsDir, "flaky.md")).approved!, /^operator 4242 /);
+});
+
+test("F6: the ledger's hashes are checked: a part live with other text is refused everywhere, and a repost of the same text is not 'Posted'", async () => {
+  const r = rig();
+  const p = r.write("thr6", 'thread:\n  - "One"\n  - "Two"\n  - "Three"');
+  await approve(r, "thr6");
+  r.x.failList = undefined;
+  // Parts 1 and 2 go live; then the run stops at part 3.
+  const real = r.x.run;
+  let clicks = 0;
+  const svc = new PostService({ ...r.svc.deps, run: async (c, a, o) => { if (a.some((x) => x.includes("clicked: button")) && ++clicks === 3) return { code: 1, stdout: JSON.stringify({ ok: false, error: "timeout" }), stderr: "" }; return real(c, a, o); } });
+  await assert.rejects(svc.postNow("thr6"), /may be live/);
+  // A stale save drops part_hashes and the pending record, then part 2 is edited and approved again.
+  writeFileSync(p, setFields(readFileSync(p, "utf8"), { part_hashes: undefined, pending_part: undefined, pending_at: undefined, pending_baseline: undefined }));
+  let text = readFileSync(p, "utf8").replace('"Two"', '"Two edited"');
+  writeFileSync(p, text);
+  await assert.rejects(r.svc.approve("thr6", "alice"), /part 2 went live with different text/);
+  assert.throws(() => r.svc.requestCard("approve", "thr6", { by: "operator" }), /part 2 went live with different text/);
+  await assert.rejects(r.svc.postNow("thr6"), /edited after it was approved/);
+  // Reposting identical text from the same path under a new approval is refused, not marked Posted with the old URL.
+  const q = r.write("again", 'text: "Same text"');
+  await approve(r, "again");
+  await r.svc.postNow("again");
+  const clicksBefore = r.x.clicks;
+  writeFileSync(q, `---\nplatform: x\naccount: main\ntext: "Same text"\n---\n`);
+  r.clock.now += 60_000;
+  await r.svc.approve("again", "alice"); await r.svc.dryRun("again");
+  await assert.rejects(r.svc.postNow("again"), /earlier approval.*save the draft under a new name/s);
+  assert.equal(r.x.clicks, clicksBefore);
+  assert.equal(readDraft(q).status, "Ready");
+});
+
+test("Low: approve is bound to the hash the card was described with, not a fresh read", () => {
+  const src = readFileSync(new URL("../src/post/service.ts", import.meta.url), "utf8");
+  assert.match(src, /this\.approve\(path, by, now\.hash\)/);
+  assert.doesNotMatch(src, /this\.approve\(path, by, readDraft/);
+});
+
+test("Low: an unreadable ledger is an error, not an empty ledger", async () => {
+  const r = rig();
+  r.write("badled", 'text: "Bad ledger"');
+  await approve(r, "badled");
+  mkdirSync(join(r.home, "state", "post-ledger.jsonl"), { recursive: true }); // reading a directory fails with EISDIR
+  await assert.rejects(r.svc.postNow("badled"), /cannot be read/);
+  assert.equal(r.x.clicks, 0);
+});
+
+test("Low: the approval is bound to the draft's path", async () => {
+  const r = rig();
+  const p = r.write("orig", 'text: "Bound"');
+  await r.svc.approve("orig", "alice");
+  const copy = join(r.draftsDir, "copy.md");
+  writeFileSync(copy, readFileSync(p, "utf8"));
+  assert.match(r.svc.problem(readDraft(copy))!, /edited after it was approved/);
+  assert.equal(r.svc.problem(readDraft(p)), undefined);
+});
+
+test("Low: the agent cannot remove or pause an operator's post job, and cannot schedule without the operator being told", async () => {
+  const r = rig();
+  const tools = carlTools({} as any, r.scheduler, { send: async () => "" }, r.svc);
+  const sched: any = tools.find((t) => t.name === "schedule");
+  r.write("keep", 'text: "Keep"');
+  await approve(r, "keep");
+  await r.svc.schedule("keep", "2026-03-11T12:00:00Z");
+  const id = r.scheduler.list().find((j) => j.post)!.id;
+  await assert.rejects(sched.execute("id", { action: "remove", id }), /only the operator can remove it/);
+  await assert.rejects(sched.execute("id", { action: "pause", id }), /only the operator can pause or resume it/);
+  assert.equal(r.scheduler.list().filter((j) => j.post && j.enabled).length, 1);
+  // A notice that cannot be delivered means no slot.
+  r.write("tell", 'text: "Tell"');
+  await approve(r, "tell");
+  const svc = new PostService({ ...r.svc.deps, notify: async () => { throw new Error("telegram down"); } });
+  await assert.rejects(svc.schedule("tell", "2026-03-11T12:00:00Z", { agent: true }), /could not be told.*not kept/);
+  assert.equal(r.scheduler.list().filter((j) => j.post && j.enabled && j.post.draft.endsWith("tell.md")).length, 0);
+  assert.notEqual(readDraft(join(r.draftsDir, "tell.md")).status, "Scheduled");
+});
+
+test("Low: a relay descriptor that changed since Carl started refuses posting; the default descriptor is closed even when the environment names another", async () => {
+  const r = rig();
+  r.write("relay", 'text: "Relay"');
+  await approve(r, "relay");
+  mkdirSync(join(r.home, ".config", "overseer-browser"), { recursive: true });
+  writeFileSync(join(r.home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ version: 1, runtime_root: join(r.home, ".osr-new") }));
+  await assert.rejects(r.svc.postNow("relay"), /relay descriptor changed since Carl started/);
+  await assert.rejects(r.svc.dryRun("relay"), /relay descriptor changed/);
+  assert.equal(r.x.clicks, 0);
+  const home = mkdtempSync(join(tmpdir(), "carl-post-env-"));
+  mkdirSync(join(home, ".config", "overseer-browser"), { recursive: true });
+  writeFileSync(join(home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ version: 1, runtime_root: join(home, ".osr-default") }));
+  writeFileSync(join(home, "other.json"), JSON.stringify({ version: 1, runtime_root: join(home, ".osr-env") }));
+  const dirs = browserControlDirs({ main: ACCOUNT }, { OVERSEER_BROWSER_CONNECTION: join(home, "other.json") }, home);
+  assert.ok(dirs.some((d) => d.endsWith(".osr-default")), "what the posting child sees (no OVERSEER_* in its environment) is closed");
+  assert.ok(dirs.some((d) => d.endsWith(".osr-env")));
+});
+
+test("Low: the sandbox refuses the approval key by name anywhere and the loopback debug port while posting is configured", () => {
+  const home = mkdtempSync(join(tmpdir(), "carl-post-sb-"));
+  process.env.HOME = home;
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example" } } } }));
+  const profile = buildProfile(loadConfig(home));
+  assert.ok(profile.includes('(deny file-read* (regex #"/post-approval\\.key$"))'));
+  assert.ok(profile.includes('(deny network-outbound (remote ip "localhost:9222"))'));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b" }));
+  assert.ok(!buildProfile(loadConfig(home)).includes("9222"));
 });

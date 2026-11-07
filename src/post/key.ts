@@ -39,13 +39,18 @@ export const expandHome = (p: string, home = homedir()) => (p === "~" ? home : p
 export function browserControlDirs(accounts: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env, home = homedir()): string[] {
   if (!Object.keys(accounts).length) return [];
   const dirs = new Set<string>([join(home, "Library", "Application Support", "OverSeer", "browser"), join(home, ".config", "overseer-browser")]);
+  // Both the default descriptor (what a posting child sees: runner.ts strips OVERSEER_* from its environment) and the one this
+  // process's own environment names are closed, so the sandbox and the posting CLI cannot be looking at different relays.
   const override = env.OVERSEER_BROWSER_CONNECTION?.trim();
-  const descriptor = override && override !== "managed" ? resolve(expandHome(override, home)) : join(home, ".config", "overseer-browser", "active-connection.json");
-  dirs.add(dirname(descriptor));
-  try {
-    const root = JSON.parse(readFileSync(descriptor, "utf8"))?.runtime_root;
-    if (typeof root === "string" && root.startsWith("/")) { dirs.add(root); dirs.add(canon(root)); }
-  } catch {}
+  const descriptors = [join(home, ".config", "overseer-browser", "active-connection.json")];
+  if (override && override !== "managed") descriptors.push(resolve(expandHome(override, home)));
+  for (const descriptor of descriptors) {
+    dirs.add(dirname(descriptor));
+    try {
+      const root = JSON.parse(readFileSync(descriptor, "utf8"))?.runtime_root;
+      if (typeof root === "string" && root.startsWith("/")) { dirs.add(root); dirs.add(canon(root)); }
+    } catch {}
+  }
   const runtime = env.OVERSEER_BROWSER_RUNTIME?.trim();
   if (runtime) { const r = resolve(expandHome(runtime, home)); dirs.add(r); dirs.add(canon(r)); }
   return [...dirs];
@@ -95,3 +100,11 @@ export const inside = (p: string, dir: string) => { const a = canon(p); const b 
  */
 export const agentCanWrite = (p: string, roots: string[], home: string) =>
   roots.some((root) => inside(p, root) && !(inside(p, home) && !inside(root, home)));
+
+/** The relay descriptor as it is now (its text, with the environment's override named too). Carl records it at start; posting refuses once it differs. */
+export function relayFingerprint(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
+  const override = env.OVERSEER_BROWSER_CONNECTION?.trim();
+  const files = [join(home, ".config", "overseer-browser", "active-connection.json"), ...(override && override !== "managed" ? [resolve(expandHome(override, home))] : [])];
+  const seen = files.map((f) => { try { return readFileSync(f, "utf8"); } catch { return ""; } });
+  return createHmac("sha256", "relay").update(JSON.stringify([files, seen, env.OVERSEER_BROWSER_RUNTIME ?? ""])).digest("hex");
+}

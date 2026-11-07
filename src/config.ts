@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { agentCanWrite } from "./post/key.ts";
+import { postingBlockedReason } from "./post/safety.ts";
 
 export interface TelegramConfig {
   enabled: boolean;
@@ -51,6 +52,8 @@ export interface PostConfig {
   /** "auto" uses `retex set --if-hash` when retex is installed; "off" always uses an atomic write with a hash check. */
   retex: "auto" | "off";
   accounts: Record<string, { platform: string; profile: string; session: { command: string; timeoutSeconds: number; namePrefix: string } }>;
+  /** Set by loadConfig when posting is configured but unsafe (see post/safety.ts): posting stays off and `carl post status` says why. */
+  blocked?: string;
   /** Folders the agent can write (workspace, its working areas under CARL_HOME, agentWritable): a draft there could be forged, so none is accepted. Filled in by loadConfig. */
   agentWritable: string[];
 }
@@ -272,6 +275,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     throw new ConfigError(`trustedMcp: "${n}" must be 1-32 letters, digits, - or _ (longer names get shortened tool names the guard could not attribute)`);
   if ((cfg.home + "/").startsWith(cfg.workspace.replace(/\/+$/, "") + "/"))
     throw new ConfigError(`workspace (${cfg.workspace}) must not contain CARL_HOME (${cfg.home}): the agent would be able to rewrite Carl's own configuration`);
+  cfg.post.blocked = postingBlockedReason(cfg.post.accounts, cfg.guard.allowTools, cfg.trustedMcp);
   cfg.post.agentWritable = [cfg.workspace, join(cfg.home, "memory"), join(cfg.home, "media"), join(cfg.home, "spill"), ...cfg.agentWritable];
   if (agentCanWrite(cfg.post.draftsDir, cfg.post.agentWritable, cfg.home))
     throw new ConfigError(`post.draftsDir (${cfg.post.draftsDir}) is in a folder the agent can write (workspace, memory, media, spill or agentWritable): it could forge an approval or edit a scheduled draft. Choose a folder outside the agent's areas`);
