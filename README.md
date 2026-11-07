@@ -132,7 +132,7 @@ Carl runs tools with your own permissions, because it does real work. Two layers
 - lets the agent write only its working areas (`workspace`, `memory`, `media`, `spill`), the temp and cache folders tools expect, the npm cache and any folders you list in `agentWritable`. Everything else, including Carl's own files, programs on `PATH`, shell startup files, skills and your other projects, is read-only to it;
 - keeps Carl's own code, extensions and any `.pi` extension folder unwritable even inside those areas, and keeps the working areas themselves from being moved or swapped for a link;
 - closes UltraTerm's bot folder (`~/.hermes`: the old gateway's config, secrets and backups) except its `scripts`;
-- denies reads of credential files: Carl's (`.env`, configured env files, the model logins in `auth.json`, OverSeer's local token) and the usual stores of your other tools (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.npmrc`, `~/.kube`, the GitHub CLI's and gcloud's config, Docker's config, Codex's and Claude Code's credential files, the Keychain files), and moving, renaming or hardlinking Carl's;
+- denies reads of credential files: Carl's (`.env`, configured env files, the model logins in `auth.json`, plus any files you list in `ultraterm.secretFiles`, such as a control server's local token) and the usual stores of your other tools (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.npmrc`, `~/.kube`, the GitHub CLI's and gcloud's config, Docker's config, Codex's and Claude Code's credential files, the Keychain files), and moving, renaming or hardlinking Carl's;
 - blocks the routes that run work outside the sandbox or reach your credentials: `osascript`, `open`, `launchctl`, `crontab`, `at`, `shortcuts` and `sudo`, Apple Events, LaunchServices, tmux and Docker sockets, signals to other processes, the Keychain, your SSH agent, and Carl's own API port;
 - passes only an allowlist of environment variables (`PATH`, `HOME`, locale, terminal, proxy and similar). Carl's secrets and keys exported in your shell are dropped; list names the agent should get in `shellEnv` (their values may live in the env files).
 
@@ -153,7 +153,7 @@ Add your own rules under `guard.hardline` and `guard.dangerous` in `carl.json`.
 
 ## Posting
 
-Carl publishes a social post from a draft file, now or on a schedule, and never without your approval. A draft is a Markdown file with front matter (`platform`, `account`, `text` or `thread`, optional `reply`). Accounts are defined only in your `carl.json` (`post.accounts`), and X is the first platform (driven through an owned `overseer-browser` session).
+Carl publishes a social post from a draft file, now or on a schedule, and never without your approval. A draft is a Markdown file with front matter (`platform`, `account`, `text` or `thread`, optional `reply`). Accounts are defined only in your `carl.json` (`post.accounts`), and X is the first platform (driven through an owned browser session whose tool you name in `session.command`). Posting is a request to the running gateway: `carl post` only raises a card, and only your Telegram press makes the gateway post (see `docs/POSTING.md`).
 
 ```
 carl post dry-run <draft>      render, validate and prove the exact text fits the composer; posts nothing
@@ -191,7 +191,7 @@ Scheduled posts survive restarts. A slot missed by more than three hours (`post.
   "envFiles": ["~/.config/bot/.env"],
   "shellEnv": ["GITHUB_TOKEN"],
   "agentWritable": ["~/projects/scratch"],
-  "trustedMcp": ["overseer"]
+  "trustedMcp": ["my-control-server"]
 }
 ```
 
@@ -218,7 +218,7 @@ carl app [--install]    open the web app in its own window; --install adds Carl.
 
 ## Modules
 
-- **UltraTerm:** `"ultraterm": {"home": "~/.hermes"}` makes Carl a drop-in for UltraTerm's UltraBot slot. It writes the status, transcript and usage files UltraTerm reads and serves the routes its panels use. To run it in that slot, install `scripts/ultrabot-gateway.sh` as `~/.hermes/ultrabot-gateway.sh`: UltraTerm then starts Carl from a clean environment as its own child and restarts it if it exits. List the OverSeer and memory servers in `trustedMcp` so they run outside the sandbox (their acting tools still ask first).
+- **UltraTerm:** `"ultraterm": {"home": "~/.hermes"}` makes Carl a drop-in for UltraTerm's UltraBot slot. It writes the status, transcript and usage files UltraTerm reads and serves the routes its panels use. To run it in that slot, install `scripts/ultrabot-gateway.sh` as `~/.hermes/ultrabot-gateway.sh`: UltraTerm then starts Carl from a clean environment as its own child and restarts it if it exits. Set `ultraterm.controlBin` to UltraTerm's control binary (it enables the Telegram decision buttons and account ordering, and its folder is protected), and list your control and memory servers in `trustedMcp` so they run outside the sandbox. Carl names no server or tool of its own: a trusted server's tools run without asking only when their MCP listing carries `readOnlyHint: true` or you list them in `guard.readOnlyTools` (`["server/tool", ...]`); every other tool asks first unless you allow it in `guard.allowTools` / `guard.operatorTools`.
 - **Your own extensions:** any Pi-SDK extension loads through `extensions`. That covers custom tools, providers, MCP bridges and delegation.
 
 ## Development

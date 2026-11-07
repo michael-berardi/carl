@@ -83,7 +83,9 @@ test("programs the sandbox blocks are refused with the reason, not offered for a
 
 test("trusted MCP tools ask first unless they only read", async () => {
   const { mcpVerdict } = await import("../src/guard.ts");
-  const rules = { trustedMcp: ["overseer", "vault", "my-tools"], allowTools: [["^my-tools/lookup$", "reads"]] as [string, string][] };
+  // Carl names no coordinator tool: a read is a tool whose listing carried readOnlyHint (isReadOnly) or one the operator listed.
+  const hinted = new Set(["overseer/overseer_status", "overseer/overseer_read", "overseer/overseer_job_list", "overseer/overseer_job_get", "overseer/overseer_events"]);
+  const rules = { trustedMcp: ["overseer", "vault", "my-tools"], allowTools: [["^my-tools/lookup$", "reads"]] as [string, string][], isReadOnly: (n: string) => hinted.has(n) };
   for (const acting of ["overseer_send", "overseer_open", "overseer_job_add", "overseer_job_dispatch", "overseer_job_approve", "overseer_message", "overseer_close", "overseer_schedule_add", "overseer_brand_new_tool"])
     assert.equal(mcpVerdict(`mcp__overseer__${acting}`, rules).level, "dangerous", acting);
   for (const read of ["overseer_status", "overseer_read", "overseer_job_list", "overseer_job_get", "overseer_events"])

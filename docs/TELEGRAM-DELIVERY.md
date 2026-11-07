@@ -81,7 +81,7 @@ Carl installation. These receipts are local Bot API evidence, not screenshots or
 
 ## UltraTerm decision buttons
 
-The trusted `ut-overseer decision-answer` child inherits the gateway's environment, including whatever verified
+The trusted `decision-answer` child of the control binary (`ultraterm.controlBin`) inherits the gateway's environment, including whatever verified
 UltraBot identity its UltraTerm launcher supplies. Carl does not strip that identity through the agent-command
 sandbox environment, generate authority credentials, or bypass UltraTerm's decision/approval checks. If the launcher
 did not supply the required authority, the child may refuse the answer and Carl reports that refusal. Group-chat

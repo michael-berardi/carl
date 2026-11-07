@@ -126,7 +126,7 @@ export function signatureTag(configDir: string | undefined, model: string): stri
 
 /**
  * The API caps tool names at 64 characters and Carl adds an 11-character prefix, so a tool name can use 50.
- * Longer or non-ASCII names (MCP servers prefix theirs, e.g. mcp__overseer__overseer_coordinator_note_disposition)
+ * Longer or non-ASCII names (MCP servers prefix theirs, e.g. mcp__server__server_a_long_tool_name_that_goes_on)
  * get a stable alias: a readable head plus a hash of the full name. Replies are mapped back to the real name.
  */
 export const MAX_TOOL_NAME = 50;

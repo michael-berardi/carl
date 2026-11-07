@@ -1,6 +1,6 @@
 // The brain: one Pi AgentSession per conversation, created lazily, persisted as Pi JSONL, disposed when idle.
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -27,7 +27,7 @@ import { type CarlConfig, mcpFile, ConfigError, MODEL_REQUIRED } from "./config.
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
 import { sessionPrograms } from "./post/key.ts";
-import { writeReadOnlyCache } from "./post/safety.ts";
+import { readOnlyCache, writeReadOnlyCache } from "./post/safety.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretDirs, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { cooldownMs, isExhaustion } from "./router.ts";
@@ -186,13 +186,16 @@ export class Brain extends EventEmitter {
     for (const p of this.cfg.extensions) if (!p.includes(":")) add(p);
     for (const p of this.cfg.skills) add(p); // skills reach the prompt
     if (this.cfg.ultraterm) {
-      // UltraTerm's helpers (ut-overseer, ut-provider-accounts) run outside the sandbox: their whole folder is protected.
-      add(dirname(this.cfg.ultraterm.overseerBin));
-      add(dirname(realOf(this.cfg.ultraterm.overseerBin)));
-      // ...and the Python runtime they run on.
-      const runtime = join(dirname(dirname(this.cfg.ultraterm.overseerBin)), "runtime");
-      add(runtime);
-      add(realOf(runtime));
+      // UltraTerm's helpers (the control binary and its sibling helpers) run outside the sandbox: their whole folder is protected.
+      const bin = this.cfg.ultraterm.controlBin;
+      if (bin) {
+        add(dirname(bin));
+        add(dirname(realOf(bin)));
+        // ...and the Python runtime they run on.
+        const runtime = join(dirname(dirname(bin)), "runtime");
+        add(runtime);
+        add(realOf(runtime));
+      }
       for (const f of ["gateway_state.json", "state.db", "state.db-wal", "state.db-shm"]) add(join(this.cfg.ultraterm.home, f));
     }
     add(join(homedir(), "Applications", "Carl.app"));
@@ -217,7 +220,7 @@ export class Brain extends EventEmitter {
    * replaced. Also `node` in each folder of the operator's PATH, which Carl's launcher resolves at the next start.
    */
   private pinnedPaths(): string[] {
-    const ut = this.cfg.ultraterm?.overseerBin;
+    const ut = this.cfg.ultraterm?.controlBin;
     const bins = [...Object.values(this.trusted), ut, ut && join(dirname(ut), "ut-provider-accounts"), process.argv[1]];
     return [...new Set([
       ...bins.filter((b): b is string => !!b).flatMap(executableChain),
@@ -232,13 +235,23 @@ export class Brain extends EventEmitter {
       protectedPaths: [this.cfg.home, ...this.controlPlane(false)],
       writablePaths: writablePaths(this.cfg),
       secretPaths: [...secretFiles(this.cfg), ...secretDirs(this.cfg)],
-      denyBrowserCli: Object.keys(this.cfg.post.accounts).length > 0,
+      denyBrowserCommand: this.browserCommandPattern(),
+      isReadOnly: (name: string) => this.cfg.guard.readOnlyTools.includes(name) || this.hintedReadOnly(name) || readOnlyCache(this.cfg.home).readOnly.has(name),
       cwd: this.cfg.workspace,
       noExec: this.sandboxProfile ? NO_EXEC : [],
       sandboxed: !!this.sandboxProfile,
       trustedMcp: this.cfg.trustedMcp,
       sandboxProfile: this.sandboxProfile,
     };
+  }
+
+  /** While posting is configured: shell commands that name the browser tooling are refused (post.browser.commandPattern, else the session commands' names). */
+  private browserCommandPattern(): string | undefined {
+    const accounts = Object.values(this.cfg.post.accounts);
+    if (!accounts.length) return undefined;
+    if (this.cfg.post.browser.commandPattern) return this.cfg.post.browser.commandPattern;
+    const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return [...new Set(accounts.map((a) => esc(basename(a.session.command))))].join("|");
   }
 
   private fileTools(): ToolDefinition[] {
@@ -289,7 +302,7 @@ export class Brain extends EventEmitter {
     process.env.ULTRACOMPRESS_STATE_ROOT = join(this.cfg.home, "state", "ultracompress");
     process.env.ULTRACOMPRESS_SESSION_ROOT = join(this.cfg.home, "sessions");
     mkdirSync(process.env.ULTRACOMPRESS_SESSION_ROOT, { recursive: true, mode: 0o700 });
-    const ut = this.cfg.ultraterm?.overseerBin;
+    const ut = this.cfg.ultraterm?.controlBin;
     this.trusted = adoptTrustedPath(join(this.stateDir, "bin"),
       { node: process.execPath, claude: this.claudeBin, ultracompress: uc, tmux: undefined, git: undefined, ...sessionPrograms(this.cfg.post.accounts) }, ut ? [dirname(ut)] : []);
     const leaked = Object.keys(process.env).filter((n) => secretEnvNames(this.cfg).includes(n) || CREDENTIAL_NAME.test(n));
@@ -537,7 +550,21 @@ export class Brain extends EventEmitter {
     return convo;
   }
 
-  /** Remember which trusted-server tools publish readOnlyHint: true; the next start's posting check reads it (post/safety.ts). */
+  /** Is this "server/tool" listed right now, by any open conversation, with readOnlyHint: true? (MCP tools can arrive after a session opens, so this looks at the live listing.) */
+  private hintedReadOnly(name: string): boolean {
+    for (const convo of this.conversations.values()) {
+      try {
+        for (const t of (convo.session as any).getAllTools?.() ?? []) {
+          if (t.annotations?.readOnlyHint !== true) continue;
+          const server = this.cfg.trustedMcp.find((s) => String(t.name).startsWith(`mcp__${s.replace(/[^A-Za-z0-9_]/g, "_")}__`));
+          if (server && `${server}/${String(t.name).slice(`mcp__${server.replace(/[^A-Za-z0-9_]/g, "_")}__`.length)}` === name) return true;
+        }
+      } catch { /* a session being torn down: not a hint */ }
+    }
+    return false;
+  }
+
+  /** Remember which trusted-server tools publish readOnlyHint: true; kept in state/mcp-readonly.json (post/safety.ts) for the guard. */
   private cacheMcpAnnotations(session: any): void {
     if (!this.cfg.trustedMcp.length) return;
     try {
