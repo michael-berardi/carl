@@ -60,7 +60,7 @@ export class Gateway {
     const outbox: Outbox = { send: (target, text) => this.send(target, text) };
     this.scheduler = new Scheduler(cfg.home, this.log, {
       prompt: (job) => this.runPromptJob(job),
-      builtin: { individuation: () => this.individuate(), post: (job) => this.post.runScheduled(job) },
+      builtin: { individuation: () => this.individuate(), post: (job, o) => this.post.runScheduled(job, o) },
       // The message is the job's own words. Its internal schedule id/name is not shown to the operator
       // Failures already name the job.
       deliver: async (job, text) => {
@@ -70,6 +70,7 @@ export class Gateway {
       commandSandbox: () => ({ wrap: (argv) => sandboxArgv(this.brain.shellSandbox, argv), env: cleanEnv(cfg), cwd: cfg.workspace }),
     });
     this.post = new PostService({ home: cfg.home, config: cfg.post, run: realRunner, registry: defaultRegistry(), scheduler: this.scheduler });
+    if (Object.keys(cfg.post.accounts).length) this.post.ensureKey(); // the approval key exists (0600) before anything is approved
     const asks = cfg.asks ? new Asks(cfg.home) : undefined;
     this.asks = asks;
     const groupTools = (): ToolDefinition[] => {

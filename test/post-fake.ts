@@ -1,28 +1,42 @@
 // A fake command runner for the post tests: overseer-browser (a tiny X) and retex (absent, or a recorder).
 import type { Runner } from "../src/post/types.ts";
 
+const EPOCH = 1288834974657n;
+
 export interface FakeX {
   run: Runner;
   /** Every command line, as "<cmd> <args...>" without the eval source. */
   calls: string[];
-  /** Posts live on the fake profile, in order. */
+  /** Posts live on the fake profile, newest last. */
   live: { url: string; text: string }[];
   /** Texts the composer was filled with, in order. */
   filled: string[];
   clicks: number;
-  /** Throw (as a failed overseer-browser call) on the n-th find, 1-based, after the click that preceded it. */
-  failFind?: (n: number) => boolean;
+  /** The handle the browser is signed in as. */
+  signedIn: string;
+  /** Fail (as a failed overseer-browser call) the n-th timeline read, 1-based. */
+  failList?: (n: number) => boolean;
+  /** Reads (timeline listings) so far. */
+  lists: number;
   /** The composer shows this instead of what was pasted (a doubled insert). */
   mangle?: (text: string) => string;
+  /** The page changes the composer between the fill and the click. */
+  tamper?: (text: string) => string;
+  /** The click works but the post never shows on the timeline (or X rejected it as a duplicate). */
+  hideNew?: boolean;
+  /** The click call itself fails (a timeout). */
+  failClick?: boolean;
+  /** What the timeline shows for a live post's text (default: as posted). */
+  show?: (text: string) => string;
   retex?: "absent" | { hash: string };
   retexSets: string[][];
 }
 
-export function fakeX(opts: { retex?: FakeX["retex"] } = {}): FakeX {
-  const state: FakeX = { calls: [], live: [], filled: [], clicks: 0, retexSets: [], retex: opts.retex ?? "absent", run: undefined as never };
+export function fakeX(opts: { retex?: FakeX["retex"]; clock?: () => number } = {}): FakeX {
+  const clock = opts.clock ?? Date.now;
+  const state: FakeX = { calls: [], live: [], filled: [], clicks: 0, lists: 0, signedIn: "example", retexSets: [], retex: opts.retex ?? "absent", run: undefined as never };
   let composer = "";
-  let finds = 0;
-  let n = 1000;
+  let seq = 0n;
   state.run = async (cmd, args) => {
     if (cmd === "retex") {
       state.calls.push(`retex ${args.join(" ")}`);
@@ -36,24 +50,33 @@ export function fakeX(opts: { retex?: FakeX["retex"] } = {}): FakeX {
     if (sub[0] === "eval") {
       const src = sub[1];
       state.calls.push(`${cmd} ${args.slice(0, args.indexOf("--timeout") + 2).join(" ")} eval`);
+      if (src.includes("{href: a ? a.getAttribute")) return reply({ ok: true, result: JSON.stringify({ href: `/${state.signedIn}` }) });
       if (src.includes("composer not found")) {
         const m = src.match(/setData\('text\/plain', ("(?:[^"\\]|\\.)*")\)/)!;
         const text: string = JSON.parse(m[1]);
         state.filled.push(text);
         composer = state.mangle ? state.mangle(text) : text;
-        return reply({ ok: true, result: JSON.stringify({ text: composer, button: { label: "Post", disabled: false } }) });
+        const shown = composer;
+        if (state.tamper) composer = state.tamper(composer);
+        return reply({ ok: true, result: JSON.stringify({ text: shown, button: { label: "Post", disabled: false } }) });
       }
       if (src.includes("clicked: button")) {
+        if (state.failClick) return { code: 1, stdout: JSON.stringify({ ok: false, error: "timeout" }), stderr: "" };
+        const want: string = JSON.parse(src.match(/norm\(("(?:[^"\\]|\\.)*")\)\) return JSON/)![1]);
+        const norm = (s: string) => s.replace(/\r/g, "").replace(/\n+/g, "\n").trim();
+        if (norm(composer) !== norm(want)) return reply({ ok: true, result: JSON.stringify({ error: "composer text changed before the click" }) });
         state.clicks++;
-        state.live.push({ url: `https://x.com/example/status/${n++}`, text: composer });
+        if (!state.hideNew) {
+          const id = ((BigInt(clock()) - EPOCH) << 22n) + ++seq;
+          state.live.push({ url: `https://x.com/example/status/${id}`, text: composer });
+        }
         return reply({ ok: true, result: JSON.stringify({ clicked: "Post" }) });
       }
-      if (src.includes("post not found on the page")) {
-        finds++;
-        if (state.failFind?.(finds)) return { code: 1, stdout: JSON.stringify({ ok: false, error: "timeout" }), stderr: "" };
-        const want: string = JSON.parse(src.match(/const want = ("(?:[^"\\]|\\.)*")\.replace/)![1]);
-        const hit = state.live.find((p) => p.text.replace(/\s+/g, " ").trim().startsWith(want.replace(/\s+/g, " ").trim().slice(0, 80)));
-        return reply({ ok: true, result: JSON.stringify(hit ? { url: hit.url } : { error: "post not found on the page" }) });
+      if (src.includes("const read = () =>")) {
+        state.lists++;
+        if (state.failList?.(state.lists)) return { code: 1, stdout: JSON.stringify({ ok: false, error: "timeout" }), stderr: "" };
+        const list = [...state.live].reverse().map((p) => ({ url: p.url, text: (state.show ? state.show(p.text) : p.text).replace(/https?:\/\/\S*[^\s.,;:!?)\]'"]/g, "URL").replace(/\s+/g, " ").trim() }));
+        return reply({ ok: true, result: JSON.stringify(list) });
       }
       return reply({ ok: true, result: "null" });
     }

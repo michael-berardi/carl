@@ -26,7 +26,8 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { type CarlConfig, mcpFile, ConfigError, MODEL_REQUIRED } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
-import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretFiles, writablePaths } from "./sandbox.ts";
+import { sessionPrograms } from "./post/key.ts";
+import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretDirs, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { cooldownMs, isExhaustion } from "./router.ts";
 import { claudeCodeProviderConfig, closeSpares, PROVIDER as CLAUDE_PROVIDER, sweepCallFolders } from "./providers/claude-code.ts";
@@ -229,7 +230,8 @@ export class Brain extends EventEmitter {
       ...this.cfg.guard,
       protectedPaths: [this.cfg.home, ...this.controlPlane(false)],
       writablePaths: writablePaths(this.cfg),
-      secretPaths: secretFiles(this.cfg),
+      secretPaths: [...secretFiles(this.cfg), ...secretDirs(this.cfg)],
+      denyBrowserCli: Object.keys(this.cfg.post.accounts).length > 0,
       cwd: this.cfg.workspace,
       noExec: this.sandboxProfile ? NO_EXEC : [],
       sandboxed: !!this.sandboxProfile,
@@ -286,7 +288,7 @@ export class Brain extends EventEmitter {
     mkdirSync(process.env.ULTRACOMPRESS_SESSION_ROOT, { recursive: true, mode: 0o700 });
     const ut = this.cfg.ultraterm?.overseerBin;
     this.trusted = adoptTrustedPath(join(this.stateDir, "bin"),
-      { node: process.execPath, claude: this.claudeBin, ultracompress: uc, tmux: undefined, git: undefined }, ut ? [dirname(ut)] : []);
+      { node: process.execPath, claude: this.claudeBin, ultracompress: uc, tmux: undefined, git: undefined, ...sessionPrograms(this.cfg.post.accounts) }, ut ? [dirname(ut)] : []);
     const leaked = Object.keys(process.env).filter((n) => secretEnvNames(this.cfg).includes(n) || CREDENTIAL_NAME.test(n));
     if (leaked.length) this.log.warn("credentials are in Carl's process environment; on macOS any program of this user can read another's startup environment, so keep them in files (CARL_HOME/.env) instead", { names: leaked.join(",") });
     this.sandboxProfile = installProfile(this.cfg, { controlPlane: this.controlPlane(), pinned: this.pinnedPaths(), apiPorts: this.cfg.api.enabled ? [this.cfg.api.port] : [] }, join(this.stateDir, "sandbox.sb"));

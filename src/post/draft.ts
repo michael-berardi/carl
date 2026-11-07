@@ -1,7 +1,7 @@
 // A draft is a Markdown file with YAML front matter. Reads are tolerant (the front matter may have been written by a
 // notes vault); writes change only the keys they name, with a compare-and-set so nobody's concurrent edit is lost.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { DraftContent, Runner } from "./types.ts";
 import { PostError } from "./types.ts";
 
@@ -20,7 +20,19 @@ export interface Draft extends DraftContent {
   scheduledAt?: string;
   postUrl?: string;
   threadUrls: string[];
+  /** Write-ahead record: a click on this part (0-based) started and was not recorded as live. */
+  pendingPart?: number;
+  pendingAt?: string;
+  /** Hashes of the texts that went live, per part (an edit of a live part is refused). */
+  partHashes: string[];
+  /** The binding hash a successful live dry run covered. */
+  dryRunHash?: string;
 }
+
+/** Control and bidi characters: a terminal can show different text from what is hashed and posted. \n alone is allowed. */
+export const BAD_CHARS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+/** The same text with every such character shown as \\uXXXX. */
+export const visible = (s: string) => s.replace(new RegExp(BAD_CHARS.source, "g"), (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
 export const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -40,6 +52,21 @@ function unquote(v: string): string {
   return t;
 }
 
+/** Only these keys are lists: `text: [beta] note [x]` is a plain string. */
+const LIST_KEYS = new Set(["thread", "thread_urls", "media"]);
+
+/** `["a, b", 'c', d]`: JSON when it is JSON, else commas outside quotes. */
+function flowList(v: string): string[] {
+  try { const j = JSON.parse(v); if (Array.isArray(j) && j.every((x) => typeof x === "string")) return j.filter(Boolean); } catch {}
+  const items: string[] = [];
+  let cur = ""; let q = "";
+  for (const ch of v.slice(1, -1)) {
+    if (q) { cur += ch; if (ch === q) q = ""; } else if (ch === '"' || ch === "'") { q = ch; cur += ch; } else if (ch === ",") { items.push(cur); cur = ""; } else cur += ch;
+  }
+  items.push(cur);
+  return items.map(unquote).filter(Boolean);
+}
+
 /** The YAML subset drafts use: scalars, quoted strings, `|` / `>` blocks, `- item` lists and `[a, b]`. */
 export function parseFront(lines: string[]): Record<string, Value> {
   const out: Record<string, Value> = {};
@@ -56,8 +83,8 @@ export function parseFront(lines: string[]): Record<string, Value> {
       out[key] = rest.trim().startsWith(">") ? text.join(" ").replace(/ +/g, " ").trim() : text.join("\n").replace(/\n+$/, "");
     } else if (rest.trim() === "" && cont.some((l) => /^\s*-[ \t]/.test(l))) {
       out[key] = cont.filter((l) => /^\s*-[ \t]/.test(l)).map((l) => unquote(l.replace(/^\s*-[ \t]+/, "")));
-    } else if (rest.trim().startsWith("[") && rest.trim().endsWith("]")) {
-      out[key] = rest.trim().slice(1, -1).split(",").map(unquote).filter(Boolean);
+    } else if (LIST_KEYS.has(key) && rest.trim().startsWith("[") && rest.trim().endsWith("]")) {
+      out[key] = flowList(rest.trim());
     } else {
       out[key] = unquote(rest);
     }
@@ -101,6 +128,10 @@ export function parseDraft(raw: string, path: string): Draft {
     scheduledAt: str(fields.scheduled_at) || undefined,
     postUrl: str(fields.post_url) || undefined,
     threadUrls,
+    pendingPart: /^\d+$/.test(str(fields.pending_part)) ? Number(str(fields.pending_part)) : undefined,
+    pendingAt: str(fields.pending_at) || undefined,
+    partHashes: str(fields.part_hashes).split(",").map((h) => h.trim()).filter(Boolean),
+    dryRunHash: str(fields.dry_run_hash) || undefined,
   };
 }
 
@@ -137,8 +168,9 @@ export function setFields(raw: string, props: Record<string, string | undefined>
 }
 
 /**
- * Compare-and-set write of front matter keys. With retex available: `retex set --if-hash`. Otherwise an atomic write
- * after checking the file is still what was read. A concurrent edit makes this throw instead of overwriting it.
+ * Compare-and-set write of front matter keys. `expect` is the hash of the file as it was read: if the file is anything
+ * else, nothing is written. With retex available (and nothing to clear) the write is `retex set --if-hash`; retex missing
+ * (exit 127) falls back to an atomic write; any other retex failure is an error. Returns the hash of the file afterwards.
  */
 export class DraftStore {
   private readonly run: Runner;
@@ -148,31 +180,38 @@ export class DraftStore {
     this.useRetex = useRetex;
   }
 
-  async set(path: string, props: Record<string, string | undefined>): Promise<void> {
-    if (this.useRetex) {
+  async set(path: string, props: Record<string, string | undefined>, expect?: string): Promise<string> {
+    const changed = () => new PostError(`${path} changed while it was being updated; nothing was overwritten`);
+    if (expect !== undefined && sha256(readFileSync(path, "utf8")) !== expect) throw changed();
+    const defined = Object.entries(props).filter(([, v]) => v !== undefined) as [string, string][];
+    // retex cannot clear a key through `set`: a write that clears keys is one atomic write, never two.
+    if (this.useRetex && defined.length === Object.keys(props).length) {
       const show = await this.run("retex", ["show", path, "--lean"]);
-      let hash: string | undefined;
-      try { hash = JSON.parse(show.stdout).contentHash; } catch {}
-      if (show.code === 0 && typeof hash === "string") {
-        const defined = Object.entries(props).filter(([, v]) => v !== undefined) as [string, string][];
-        const unset = Object.entries(props).filter(([, v]) => v === undefined).map(([k]) => k);
-        // retex cannot clear a key through `set`; those go through the file path below, after the retex write.
+      if (show.code !== 127) {
+        let hash: string | undefined;
+        try { hash = JSON.parse(show.stdout).contentHash; } catch {}
+        if (show.code !== 0 || typeof hash !== "string") throw new PostError(`retex show failed for ${path}: ${(show.stdout + show.stderr).slice(0, 200)}`);
         const done = await this.run("retex", ["set", path, ...defined.map(([k, v]) => `${k}=${v}`), "--if-hash", hash, "--lean"]);
         if (done.code !== 0) throw new PostError(`draft update failed (${Object.keys(props).join(", ")}): ${(done.stdout + done.stderr).slice(0, 200)}`);
-        if (unset.length) this.atomic(path, Object.fromEntries(unset.map((k) => [k, undefined])));
-        return;
+        return sha256(readFileSync(path, "utf8"));
       }
     }
-    this.atomic(path, props);
+    return this.atomic(path, props, expect);
   }
 
-  private atomic(path: string, props: Record<string, string | undefined>): void {
+  private atomic(path: string, props: Record<string, string | undefined>, expect?: string): string {
     const before = readFileSync(path, "utf8");
+    if (expect !== undefined && sha256(before) !== expect) throw new PostError(`${path} changed while it was being updated; nothing was overwritten`);
     const next = setFields(before, props);
     const tmp = `${path}.tmp-${process.pid}`;
-    writeFileSync(tmp, next, { mode: 0o600 });
-    // Check-then-rename: the window is a few microseconds, and a lost race is reported, not hidden.
-    if (sha256(readFileSync(path, "utf8")) !== sha256(before)) throw new PostError(`${path} changed while it was being updated; nothing was overwritten`);
-    renameSync(tmp, path);
+    try {
+      writeFileSync(tmp, next, { mode: 0o600 });
+      // Check-then-rename: the window is a few microseconds, and a lost race is reported, not hidden.
+      if (sha256(readFileSync(path, "utf8")) !== sha256(before)) throw new PostError(`${path} changed while it was being updated; nothing was overwritten`);
+      renameSync(tmp, path);
+    } finally {
+      rmSync(tmp, { force: true });
+    }
+    return sha256(next);
   }
 }
