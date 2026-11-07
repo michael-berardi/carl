@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { agentCanWrite } from "./post/key.ts";
-import { postingBlockedReason, readOnlyCache } from "./post/safety.ts";
 
 export interface TelegramConfig {
   enabled: boolean;
@@ -44,6 +43,20 @@ export interface ApiConfig {
   keyEnv: string;
 }
 
+export interface BrowserConfig {
+  /** Folders (control socket, token, runtime) the agent may not read while posting is configured. */
+  controlDirs: string[];
+  /** JSON files that name another `runtime_root` (read at start; their folder and that root are closed too). */
+  descriptors: string[];
+  /** Environment variable names that can point at another descriptor file / runtime folder (read from Carl's own environment). */
+  descriptorEnv: string[];
+  runtimeEnv: string[];
+  /** Regex source for the relay's control socket file name, refused wherever it lives. Empty = none. */
+  socketPattern: string;
+  /** Regex source: shell commands matching it are refused to the agent while posting is configured (default: the session commands' names). */
+  commandPattern: string;
+}
+
 export interface PostConfig {
   /** Folder of draft files (Markdown with YAML front matter). Keep it where the agent cannot write: approvals live in the drafts. */
   draftsDir: string;
@@ -52,8 +65,8 @@ export interface PostConfig {
   /** "auto" uses `retex set --if-hash` when retex is installed; "off" always uses an atomic write with a hash check. */
   retex: "auto" | "off";
   accounts: Record<string, { platform: string; profile: string; session: { command: string; timeoutSeconds: number; namePrefix: string } }>;
-  /** Set by loadConfig when posting is configured but unsafe (see post/safety.ts): posting stays off and `carl post status` says why. */
-  blocked?: string;
+  /** The operator's browser relay, which only the gateway may drive: what the agent's sandbox and shell must not reach. Nothing is assumed; see docs/POSTING.md. */
+  browser: BrowserConfig;
   /** Folders the agent can write (workspace, its working areas under CARL_HOME, agentWritable): a draft there could be forged, so none is accepted. Filled in by loadConfig. */
   agentWritable: string[];
 }
@@ -99,8 +112,8 @@ export interface CarlConfig {
   stt?: string[];
   /** Idle minutes after which a chat starts a fresh session on its next message (0 = never). */
   idleResetMinutes: number;
-  /** UltraTerm compatibility (the UltraBot slot): home UltraTerm reads, and the ut-overseer binary. */
-  ultraterm?: { home: string; overseerBin: string };
+  /** UltraTerm compatibility (the UltraBot slot): home UltraTerm reads, and the control binary (ultraterm.controlBin) and secret files its helpers keep. */
+  ultraterm?: { home: string; controlBin?: string; secretFiles: string[] };
   /** Who turns the shadow into lessons: "carl" (the daily individuation pass and psyche/integrated.md) or "ultraterm"
    *  (UltraTerm Dream and Nightmare read the shadow and decision ledgers; lessons arrive through shared memory).
    *  Default: "ultraterm" when the UltraTerm module is on, else "carl". */
@@ -117,7 +130,7 @@ export interface CarlConfig {
    *  Accounts exist only here: a draft names a key, never a login or profile. */
   post: PostConfig;
   /** Extra shell-guard patterns on top of the built-in ones. */
-  guard: { hardline: [string, string][]; dangerous: [string, string][]; allowTools: [string, string][]; operatorTools: [string, string][] };
+  guard: { hardline: [string, string][]; dangerous: [string, string][]; allowTools: [string, string][]; operatorTools: [string, string][]; /** "server/tool" names of trusted servers that run without asking, besides tools whose listing carried readOnlyHint: true. */ readOnlyTools: string[] };
   /** UltraCompress compaction (deterministic brief, no model call, plus recall): "auto" = on when the binary is installed. */
   ultracompress: "auto" | "off";
   /** Extra KEY=VALUE files read for secrets after the environment and CARL_HOME/.env (values are never copied). */
@@ -252,7 +265,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     stt: raw.stt === undefined ? undefined : strList(raw.stt, "stt").map((p, i) => (i === 0 ? expandHome(p) : p)),
     idleResetMinutes: int(raw.idleResetMinutes, 0, "idleResetMinutes", 0),
     ultraterm: raw.ultraterm
-      ? { home: abs(str(raw.ultraterm.home, "~/.hermes", "ultraterm.home"), home), overseerBin: abs(str(raw.ultraterm.overseerBin, "~/.ultraterm/bin/ut-overseer", "ultraterm.overseerBin"), home) }
+      ? { home: abs(str(raw.ultraterm.home, "~/.hermes", "ultraterm.home"), home), ...(raw.ultraterm.controlBin !== undefined ? { controlBin: abs(str(raw.ultraterm.controlBin, "", "ultraterm.controlBin"), home) } : {}), secretFiles: strList(raw.ultraterm.secretFiles, "ultraterm.secretFiles").map((p: string) => abs(p, home)) }
       : undefined,
     learning: learningMode(raw.learning, !!raw.ultraterm),
     envFiles: strList(raw.envFiles, "envFiles").map((p) => abs(p, home)),
@@ -264,7 +277,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     asks: raw.asks === undefined ? false : bool(raw.asks, "asks"),
     work: workOf(raw.work, home),
     post: postOf(raw.post, home),
-    guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous"), allowTools: pairs(raw.guard?.allowTools, "guard.allowTools"), operatorTools: pairs(raw.guard?.operatorTools, "guard.operatorTools") },
+    guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous"), allowTools: pairs(raw.guard?.allowTools, "guard.allowTools"), operatorTools: pairs(raw.guard?.operatorTools, "guard.operatorTools"), readOnlyTools: strList(raw.guard?.readOnlyTools, "guard.readOnlyTools") },
     claude: {
       enabled: raw.claude?.enabled === undefined ? true : bool(raw.claude.enabled, "claude.enabled"),
       command: raw.claude?.command ? abs(str(raw.claude.command, "claude", "claude.command"), home) : undefined,
@@ -275,12 +288,6 @@ export function loadConfig(home = carlHome()): CarlConfig {
     throw new ConfigError(`trustedMcp: "${n}" must be 1-32 letters, digits, - or _ (longer names get shortened tool names the guard could not attribute)`);
   if ((cfg.home + "/").startsWith(cfg.workspace.replace(/\/+$/, "") + "/"))
     throw new ConfigError(`workspace (${cfg.workspace}) must not contain CARL_HOME (${cfg.home}): the agent would be able to rewrite Carl's own configuration`);
-  const listed = readOnlyCache(cfg.home);
-  cfg.post.blocked = postingBlockedReason({
-    accounts: cfg.post.accounts, allowTools: cfg.guard.allowTools, operatorTools: cfg.guard.operatorTools, trustedMcp: cfg.trustedMcp,
-    readOnly: listed.readOnly, listed: listed.listed,
-    workGroup: !!cfg.work && cfg.telegram.groups.some((g) => g.work), workSandboxed: cfg.work?.sandboxed === true,
-  });
   cfg.post.agentWritable = [cfg.workspace, join(cfg.home, "memory"), join(cfg.home, "media"), join(cfg.home, "spill"), ...cfg.agentWritable];
   if (agentCanWrite(cfg.post.draftsDir, cfg.post.agentWritable, cfg.home))
     throw new ConfigError(`post.draftsDir (${cfg.post.draftsDir}) is in a folder the agent can write (workspace, memory, media, spill or agentWritable): it could forge an approval or edit a scheduled draft. Choose a folder outside the agent's areas`);
@@ -397,11 +404,12 @@ function postOf(v: unknown, home: string): PostConfig {
     const profile = str(a?.profile, "", `post.accounts.${key}.profile`);
     if (!/^https?:\/\//.test(profile)) throw new ConfigError(`post.accounts.${key}.profile must be a URL`);
     const s = a?.session ?? {};
+    if (!s.command) throw new ConfigError(`post.accounts.${key}.session.command is required: the program that drives your signed-in browser (Carl assumes none)`);
     accounts[key] = {
       platform,
       profile,
       session: {
-        command: expandHome(str(s.command, "overseer-browser", `post.accounts.${key}.session.command`)),
+        command: expandHome(str(s.command, "", `post.accounts.${key}.session.command`)),
         timeoutSeconds: int(s.timeoutSeconds, 60, `post.accounts.${key}.session.timeoutSeconds`, 5),
         namePrefix: str(s.namePrefix, "carl-post", `post.accounts.${key}.session.namePrefix`),
       },
@@ -413,6 +421,14 @@ function postOf(v: unknown, home: string): PostConfig {
     missedWindowMinutes: int(raw.missedWindowMinutes, 180, "post.missedWindowMinutes", 1),
     retex: raw.retex ?? "auto",
     accounts,
+    browser: {
+      controlDirs: strList(raw.browser?.controlDirs, "post.browser.controlDirs").map((p: string) => abs(p, home)),
+      descriptors: strList(raw.browser?.descriptors, "post.browser.descriptors").map((p: string) => abs(p, home)),
+      descriptorEnv: strList(raw.browser?.descriptorEnv, "post.browser.descriptorEnv"),
+      runtimeEnv: strList(raw.browser?.runtimeEnv, "post.browser.runtimeEnv"),
+      socketPattern: raw.browser?.socketPattern === undefined ? "" : str(raw.browser.socketPattern, "", "post.browser.socketPattern"),
+      commandPattern: raw.browser?.commandPattern === undefined ? "" : str(raw.browser.commandPattern, "", "post.browser.commandPattern"),
+    },
     agentWritable: [],
   };
 }

@@ -30,8 +30,8 @@ const fromPicker = (provider: string, model: string) => PICKER_MAP.find((r) => r
 export interface UltraTermCompatOptions {
   /** HERMES_HOME UltraTerm reads (custom mode: ~/.hermes). */
   home: string;
-  /** ut-overseer binary for Telegram decision buttons. */
-  overseerBin: string;
+  /** The control binary for Telegram decision buttons (ultraterm.controlBin); decision buttons and account order are off without it. */
+  controlBin?: string;
 }
 
 interface SessionRow { id: string; key: string; source: string }
@@ -57,7 +57,8 @@ export class UltraTermCompat implements GatewayPlugin {
     if (this.accountCache && Date.now() - this.accountCache.at < 60_000) return this.accountCache.order;
     let order = fallback;
     try {
-      const bin = join(this.opts.overseerBin, "..", "ut-provider-accounts");
+      if (!this.opts.controlBin) return fallback;
+      const bin = join(this.opts.controlBin, "..", "ut-provider-accounts");
       const out = execText(bin, ["status"]);
       const accounts = (JSON.parse(out).providers?.claude?.accounts ?? []) as any[];
       const usable = accounts.filter((a) => a.configured && a.eligible && !a.signedOut && !a.cooldown && typeof a.configDir === "string");
@@ -423,7 +424,8 @@ export class UltraTermCompat implements GatewayPlugin {
     const parts = data.split(":");
     if (parts.length !== 3 || !parts[1].startsWith("D-") || !/^\d+$/.test(parts[2])) return "That button is malformed; nothing was sent.";
     if (q.message?.chat?.type !== "private") return "Answer UltraTerm questions in your direct chat with the bot.";
-    const out = await run(this.opts.overseerBin, ["decision-answer", "--id", parts[1], "--choice", parts[2], "--user", String(q.from.id), "--callback", q.id], 60_000);
+    if (!this.opts.controlBin) return "Decision buttons need ultraterm.controlBin in carl.json; nothing was sent.";
+    const out = await run(this.opts.controlBin, ["decision-answer", "--id", parts[1], "--choice", parts[2], "--user", String(q.from.id), "--callback", q.id], 60_000);
     let text: string;
     let accepted = false;
     let replay = false;

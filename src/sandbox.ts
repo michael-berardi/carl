@@ -14,7 +14,7 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { BashSpawnContext } from "@earendil-works/pi-coding-agent";
 import { type CarlConfig, secret as secret_ } from "./config.ts";
-import { browserControlDirs, postKeyPath } from "./post/key.ts";
+import { browserControlDirs } from "./post/key.ts";
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
@@ -75,22 +75,20 @@ export function credentialStores(cfg: CarlConfig): string[] {
 export function secretFiles(cfg: CarlConfig): string[] {
   return [
     join(cfg.home, ".env"), join(cfg.agentDir, "auth.json"), join(cfg.agentDir, "mcp-auth.json"), join(cfg.home, "engine", "mcp-auth.json"), ...cfg.envFiles,
-    // The post approval key: with it the agent could forge an approval. Unreadable and unwritable.
-    postKeyPath(cfg.home),
     ...(cfg.ultraterm ? [join(cfg.ultraterm.home, ".env"), join(cfg.ultraterm.home, "auth.json"),
-      // OverSeer's local HTTP token: with it a command could ask OverSeer to act outside the sandbox.
-      join(dirname(dirname(cfg.ultraterm.overseerBin)), "overseer", "http-token")] : []),
+      // Files the operator names (ultraterm.secretFiles), such as a control server's local HTTP token.
+      ...cfg.ultraterm.secretFiles] : []),
   ];
 }
 
 /**
- * Folders (not single files) the agent may not read: OverSeer's browser control socket, token and CLI runtime whenever
- * posting is configured. With them a sandboxed command could drive the operator's signed-in browser and post straight past
- * the approval gate. Posting runs from the gateway, which is not sandboxed; the agent's own browser goes through the
- * trusted OverSeer MCP server, which is not affected.
+ * Folders (not single files) the agent may not read: the browser relay's control socket, token and CLI runtime (post.browser)
+ * whenever posting is configured. With them a sandboxed command could drive the operator's signed-in browser and post
+ * straight past the approval gate. Posting runs from the gateway, which is not sandboxed; the agent's own browser, if it has
+ * one through a trusted MCP server, is not affected.
  */
 export function secretDirs(cfg: CarlConfig): string[] {
-  return browserControlDirs(cfg.post.accounts);
+  return browserControlDirs(cfg.post.accounts, cfg.post.browser);
 }
 
 /** Unix sockets of programs that run commands outside the sandbox on request (tmux servers, Docker). */
@@ -264,8 +262,6 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     `(deny file-read* ${secrets.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
     ...(secretDirs(cfg).length ? [`(deny file-read* ${secretDirs(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`] : []),
     `(deny file-write* ${[...secrets, ...secrets.flatMap(ancestors)].map(sbLiterals).join(" ")})`,
-    // The approval key is refused by name in any CARL_HOME (a sibling instance's profile, a read tool): it must not reach a transcript.
-    `(deny file-read* (regex #"/post-approval\\.key$"))`,
     `(deny process-exec ${NO_EXEC.map((p) => `(literal ${sbString(p)})`).join(" ")})`,
     "(deny appleevent-send)",
     // No signals to processes outside this command (Carl itself, the operator's programs); its own children are fine.
@@ -281,9 +277,11 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     // and app agents such as 1Password's. The Keychain files themselves are unreadable too.
     ...[`#"^(/private)?/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$"`, `#"/ssh-[^/]+/agent\\.[0-9]+$"`, `#"(ssh|agent)[^/]*\\.sock$"`]
       .map((re) => `(deny network-outbound (remote unix-socket (path-regex ${re})))`),
-    // overseer-browser's control socket, wherever its runtime lives (the managed one or an operator-relay's runtime_root): refused by
-    // name, so a descriptor that points somewhere new, or a copy of the socket, gains nothing. Only while posting is configured.
-    ...(Object.keys(cfg.post.accounts).length ? [`(deny network-outbound (remote unix-socket (path-regex #"overseer-browser[^/]*\\.sock$")))`, `(deny network-outbound (remote ip "localhost:9222"))`] : []),
+    // The browser relay's control socket (post.browser.socketPattern), wherever its runtime lives: refused by name, so a descriptor
+    // that points somewhere new, or a copy of the socket, gains nothing. Only while posting is configured.
+    ...(Object.keys(cfg.post.accounts).length ? [
+      ...(cfg.post.browser.socketPattern ? [`(deny network-outbound (remote unix-socket (path-regex #"${cfg.post.browser.socketPattern.replace(/"/g, '\\"')}")))`] : []),
+      `(deny network-outbound (remote ip "localhost:9222"))`] : []),
     ...["/.gnupg", "/.ssh", "/Library/Group Containers", "/Library/Containers", "/.orbstack", "/.local/share/containers", "/.lima", "/.rd"]
       .map((d) => `(deny network-outbound (remote unix-socket (subpath ${sbString(homedir() + d)})))`),
     `(deny file-read* ${credentialStores(cfg).map((p) => `(subpath ${sbString(p)})`).join(" ")})`,

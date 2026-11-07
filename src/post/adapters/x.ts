@@ -1,4 +1,4 @@
-// X adapter: drives an owned overseer-browser session in the operator's browser. X's own scheduling is a paid feature,
+// X adapter: drives an owned browser session in the operator's browser. X's own scheduling is a paid feature,
 // so Carl owns scheduling. Text is pasted, then the composer is read back and must hold exactly that text (X's editor
 // can double an insert); the signed-in account must be the configured one; a record that a click is under way is written
 // before Post is clicked; and the live URL is found on the profile (full text, fresh, newer than the previous post)
@@ -152,14 +152,14 @@ const LIST = (handle: string, want: string | null, tries: number) => `(async () 
   return JSON.stringify({items: read(), empty: false});
 })()`;
 
-/** One overseer-browser call. The CLI's own request deadline is shorter than X's slow page loads, so --timeout is explicit. */
+/** One browser-session call. The CLI's own request deadline is shorter than X's slow page loads, so --timeout is explicit. */
 async function browser(ctx: AdapterContext, session: string, args: string[], timeoutSeconds = ctx.account.session.timeoutSeconds): Promise<any> {
   const r = await ctx.run(ctx.account.session.command, ["--session", session, "--timeout", String(timeoutSeconds), ...args, "--json"], { timeoutMs: (timeoutSeconds + 15) * 1000 });
   let data: any;
   try { data = JSON.parse(r.stdout || "{}"); } catch {
-    throw new PostError(`overseer-browser ${args[0]} returned non-JSON: ${r.stdout.slice(0, 200)} ${r.stderr.slice(0, 200)}`);
+    throw new PostError(`browser session ${args[0]} returned non-JSON: ${r.stdout.slice(0, 200)} ${r.stderr.slice(0, 200)}`);
   }
-  if (!data?.ok) throw new PostError(`overseer-browser ${args[0]} failed: ${JSON.stringify(data?.error ?? data).slice(0, 400)}${r.code === 127 ? ` (${r.stderr})` : ""}`);
+  if (!data?.ok) throw new PostError(`browser session ${args[0]} failed: ${JSON.stringify(data?.error ?? data).slice(0, 400)}${r.code === 127 ? ` (${r.stderr})` : ""}`);
   return data;
 }
 

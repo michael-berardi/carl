@@ -13,7 +13,7 @@ import { Asks, moduleAskTools } from "./asks.ts";
 import { individuationPrompt, parseIndividuation, Psyche, readJsonl } from "./psyche.ts";
 import { type Job, Scheduler } from "./scheduler.ts";
 import { cleanEnv, sandboxArgv } from "./sandbox.ts";
-import { ApiServer } from "./server.ts";
+import { ApiServer, json } from "./server.ts";
 import { carlTools, type Outbox } from "./tools.ts";
 import { GroupArchive, groupHistoryTool } from "./group-archive.ts";
 import { WorkLedger, workTools } from "./work.ts";
@@ -79,7 +79,6 @@ export class Gateway {
       notify: (m) => this.sendDirect("home", m),
       sessionProblems: () => this.postSessionProblems,
     });
-    if (Object.keys(cfg.post.accounts).length && !cfg.post.blocked) this.post.ensureKey(); // the approval key exists (0600) before anything is approved
     const asks = cfg.asks ? new Asks(cfg.home) : undefined;
     this.asks = asks;
     const groupTools = (): ToolDefinition[] => {
@@ -87,7 +86,7 @@ export class Gateway {
       const ledger = new WorkLedger(cfg.home);
       return [groupHistoryTool(new GroupArchive(cfg.home), cfg.telegram.allowFrom, (chat) => ledger.lastQueued(chat)), ...workTools(cfg, ledger)];
     };
-    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox, Object.keys(cfg.post.accounts).length && !cfg.post.blocked ? this.post : undefined), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
+    this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox, Object.keys(cfg.post.accounts).length ? this.post : undefined), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
   }
 
   use(plugin: GatewayPlugin): this {
@@ -152,7 +151,14 @@ export class Gateway {
         this.hooks = mountHooks(this.api, this, this.cfg.hooks);
       }
     }
-    if (Object.keys(this.cfg.post.accounts).length) this.startPostDesk();
+    if (Object.keys(this.cfg.post.accounts).length) {
+      this.startPostDesk();
+      // `carl post` is a client of this route; the approval key exists only in this process (post/key.ts).
+      if (this.api) {
+        const { handlePost } = await import("./post/api.ts");
+        this.api.route("POST", /^\/carl\/post$/, async (_q, res, _u, body) => json(res, 200, await handlePost(this.post, body ?? {})));
+      } else this.log.warn("post: the API is off, so `carl post` cannot reach the gateway; enable api in carl.json");
+    }
     for (const p of this.plugins) await p.start(this);
     if (this.api) await this.api.start();
     this.hooks?.resume();
@@ -243,11 +249,6 @@ export class Gateway {
    * show the operator's cards (approve, clear-pending, record-live) on their Telegram home chat. Only a button press there answers one.
    */
   private startPostDesk(): void {
-    if (this.cfg.post.blocked) {
-      this.log.error("post: posting is OFF", { reason: this.cfg.post.blocked });
-      void this.send("home", this.cfg.post.blocked).catch((e) => this.log.warn("post refusal not delivered", { error: (e as Error).message }));
-      return;
-    }
     this.postSessionProblems = sessionProblems(this.cfg.post.accounts, this.brain.resolvedPrograms);
     if (this.postSessionProblems.length) {
       for (const p of this.postSessionProblems) this.log.error("post: session command does not resolve", { problem: p });

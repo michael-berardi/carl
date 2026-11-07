@@ -33,8 +33,10 @@ export interface GuardRules {
    * sandbox allows, so it no longer asks.
    */
   sandboxed?: boolean;
-  /** Posting is configured: the browser CLI (it drives the operator's signed-in browser, past the post approval gate) is never run from a shell command. */
-  denyBrowserCli?: boolean;
+  /** Regex source (set while posting is configured): a shell command matching it is refused. It names the browser tooling that drives the operator's signed-in browser, which only the gateway's post gate may do. */
+  denyBrowserCommand?: string;
+  /** Is "server/tool" known to only read (its MCP listing carried readOnlyHint: true, or the operator listed it in guard.readOnlyTools)? Such tools of a trusted server run without asking. */
+  isReadOnly?: (serverTool: string) => boolean;
   /** MCP servers that run outside the sandbox: their tools ask first unless they match a read-only pattern. */
   trustedMcp?: string[];
   /** Extra "server/tool" patterns of trusted servers that run without asking: [regex, reason]. */
@@ -243,7 +245,7 @@ export function classifyCommand(command: string, extra: GuardRules = {}): Verdic
     if (v.level === "hardline") return v;
     if (v.level === "dangerous" && worst.level === "ok") worst = v;
   }
-  if (extra.denyBrowserCli && /overseer-browser|OverSeer\/browser/i.test(normalised)) return { level: "hardline", reason: "the browser control channel is closed to shell commands while posting is configured (posting goes through the post gate)" };
+  if (extra.denyBrowserCommand && new RegExp(extra.denyBrowserCommand, "i").test(normalised)) return { level: "hardline", reason: "the browser control channel is closed to shell commands while posting is configured (posting goes through the post gate)" };
   const whole = judgeWhole(normalised);
   if (whole.level !== "ok" && worst.level === "ok") worst = whole;
   if (worst.level === "ok") for (const [re, reason] of own(extra.dangerous)) if (re.test(normalised)) return { level: "dangerous", reason };
@@ -348,12 +350,13 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
 }
 
 /**
- * Tools of trusted MCP servers that only read: they run without asking. Every other tool of a trusted server
+ * Tools of trusted MCP servers that only read: they run without asking. Carl names no server or tool of its own: a tool is a
+ * read when its MCP listing carried readOnlyHint: true or the operator listed it (guard.readOnlyTools); these patterns are the
+ * generic note/memory reads that any server may offer. Every other tool of a trusted server
  * (opening workers, typing into terminals, queueing or approving work, writing notes) asks first, also from a
  * codemode script, because it acts outside the sandbox with the operator's permissions.
  */
 export const DEFAULT_TRUSTED_READONLY: [string, string][] = [
-  ["^overseer/(?:overseer|coordinator)_(status|digest|terminals|read|profiles|events|panel|policy|effective_policy|concurrency|job_list|job_get|job_receiver|cleanup_status|reap_status|reap_owner_status|schedule_list|proposals|decisions_pending|decisions_packet)$", "OverSeer reads"],
   ["^[^/]+/(list_notes|search_notes|read_note|query_records|recall_context|get_links|get_schema|get_stats|get_board|memory_context|memory_recall|memory_review)$", "Retex reads"],
 ];
 
@@ -373,6 +376,7 @@ export function mcpVerdict(toolName: string, rules: GuardRules, input?: Record<s
   const server = (rules.trustedMcp ?? []).find((s) => toolName.startsWith(mcpPrefix(s)));
   if (!server) return { level: "ok" }; // an untrusted server runs inside the sandbox, like the shell
   const tool = toolName.slice(mcpPrefix(server).length);
+  if (rules.isReadOnly?.(`${server}/${tool}`)) return { level: "ok" };
   for (const [src] of [...DEFAULT_TRUSTED_READONLY, ...(rules.allowTools ?? [])]) if (new RegExp(src).test(`${server}/${tool}`)) return { level: "ok" };
   for (const [src] of rules.operatorTools ?? []) {
     if (!new RegExp(src).test(`${server}/${tool}`)) continue;

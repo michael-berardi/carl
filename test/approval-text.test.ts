@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { approvalSummary } from "../src/approval-text.ts";
 
 test("an MCP call reads as one plain sentence with its title", () => {
-  const command = 'mcp__overseer__overseer_job_add\n{"title": "Spam-filter Excellent Webworld cold outreach", "prompt": "Goal: ..."}';
-  assert.equal(approvalSummary(command, "overseer overseer_job_add acts outside the sandbox"),
-    "UltraBot wants to add a job to the OverSeer queue: “Spam-filter Excellent Webworld cold outreach”");
-  assert.equal(approvalSummary('mcp__overseer__overseer_job_cancel\n{"id": "J-0042"}', "r"), "UltraBot wants to cancel a job in the OverSeer queue: “J-0042”");
+  const command = 'mcp__queue__queue_job_add\n{"title": "Spam-filter Excellent Webworld cold outreach", "prompt": "Goal: ..."}';
+  assert.equal(approvalSummary(command, "queue queue_job_add acts outside the sandbox"),
+    "UltraBot wants to add a job to queue: “Spam-filter Excellent Webworld cold outreach”");
+  assert.equal(approvalSummary('mcp__queue__queue_job_cancel\n{"id": "J-0042"}', "r"), "UltraBot wants to cancel a job in queue: “J-0042”");
   assert.equal(approvalSummary('mcp__vault__note_create\n{"name": "Call notes"}', "r"), "UltraBot wants to create a note in the vault: “Call notes”");
 });
 

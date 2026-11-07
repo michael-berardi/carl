@@ -3,7 +3,7 @@
 //
 //   { "id": "site-launch", "chat": -1001234567890, "askee": "Alex",
 //     "title": "Before the new pages go live", "questions": [{"n": 1, "text": "..."}],
-//     "answersFile": "/abs/answers.md", "onComplete": ["ut-overseer", "job-report", "--json", "{...}"] }
+//     "answersFile": "/abs/answers.md", "onComplete": ["report-tool", "job-report", "--json", "{...}"] }
 //
 // The operator (or a coordinator acting for them) writes the file; `carl ask-post <id>` posts the questions.
 // The agent can only record answers and finish an ask: finishing writes the answers file and runs the ask's

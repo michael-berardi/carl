@@ -19,13 +19,16 @@ import { postCommand, type PostCliIo } from "../src/post/cli.ts";
 import { normText, PAGE_TEXT, pickPart, statusTime, xHandle, xLength } from "../src/post/adapters/x.ts";
 import { carlTools } from "../src/tools.ts";
 import { loadConfig } from "../src/config.ts";
-import { postingBlockedReason, readOnlyCache, UNSANDBOXED_TOOLS, writeReadOnlyCache } from "../src/post/safety.ts";
+import { readOnlyCache, writeReadOnlyCache } from "../src/post/safety.ts";
+import { handlePost } from "../src/post/api.ts";
+import { APPROVAL_TTL_MS } from "../src/post/service.ts";
 import { DEFAULT_TRUSTED_READONLY, mcpVerdict } from "../src/guard.ts";
 import { splitCard } from "../src/channels/telegram.ts";
 import { type FakeX, fakeX } from "./post-fake.ts";
 
 const log = { info() {}, warn() {}, error() {}, debug() {} } as any;
 const T0 = Date.parse("2026-03-10T12:00:00Z");
+const BROWSER = { controlDirs: [], descriptors: [], descriptorEnv: [], runtimeEnv: [], socketPattern: "", commandPattern: "" };
 const ACCOUNT = { platform: "x", profile: "https://x.com/example", session: { command: "overseer-browser", timeoutSeconds: 75, namePrefix: "carl-post" } };
 
 function rig(opts: { retex?: FakeX["retex"]; now?: number; window?: number; skew?: number } = {}) {
@@ -38,11 +41,13 @@ function rig(opts: { retex?: FakeX["retex"]; now?: number; window?: number; skew
   const scheduler = new Scheduler(home, log, { prompt: async () => "", builtin: {}, deliver: async () => {} } as any);
   const svc = new PostService({
     home, run: x.run, registry: defaultRegistry(), scheduler, now: () => clock.now, sleep: async () => {}, id: () => "t1",
-    config: { draftsDir, missedWindowMinutes: opts.window ?? 180, retex: "auto", accounts: { main: ACCOUNT }, agentWritable: [] },
+    config: { draftsDir, missedWindowMinutes: opts.window ?? 180, retex: "auto", accounts: { main: ACCOUNT }, browser: BROWSER, agentWritable: [] },
   });
   const write = (name: string, front: string, body = "") => { const p = join(draftsDir, `${name}.md`); writeFileSync(p, `---\nplatform: x\naccount: main\n${front}\n---\n${body}`); return p; };
   return { home, draftsDir, x, clock, scheduler, svc, write };
 }
+/** Another service in the same gateway process (same in-memory key), with some dependencies changed. A genuinely new PostService is a restart. */
+const sibling = (of: PostService, deps: ConstructorParameters<typeof PostService>[0]) => { const svc = new PostService(deps); (svc as any).key = (of as any).key; return svc; };
 /** What the operator does before anything can post: approve the exact text, and a live dry run of it. */
 const approve = async (r: ReturnType<typeof rig>, name: string) => { await r.svc.approve(name, "alice"); await r.svc.dryRun(name); };
 const posted = (x: FakeX) => x.live.length;
@@ -183,7 +188,7 @@ test("a thread that died after a click is final, asks the operator to check, and
   await approve(r, "thr");
   // Part 2 goes live, then the read that would find its URL fails: the run dies before recording it.
   r.x.failList = (n) => n === 4; // reads: p1 baseline, p1 find, p2 baseline, p2 find (4th)
-  await assert.rejects(r.svc.postNow("thr"), (e: any) => e.final === true && /overseer-browser eval failed/.test(e.message) && /Part 2 may be live/.test(e.message));
+  await assert.rejects(r.svc.postNow("thr"), (e: any) => e.final === true && /browser session eval failed/.test(e.message) && /Part 2 may be live/.test(e.message));
   assert.deepEqual(r.x.live.map((l) => l.text), ["Part one.", "Part two."]);
   let d = readDraft(p);
   assert.equal(d.threadUrls.length, 1, "only part 1 was recorded");
@@ -218,6 +223,8 @@ test("C1: a click whose post is not found is final, never retried, and a rerun r
   r.x.hideNew = false;
   assert.match((await operator(r, "clear-pending", "miss1")).told.join(), /Cleared the pending record for part 1/);
   assert.equal(readDraft(p).pendingPart, undefined);
+  await assert.rejects(r.svc.postNow("miss1"), /already used for a post attempt/, "one approval, one post attempt");
+  await approve(r, "miss1");
   await r.svc.postNow("miss1");
   assert.equal(r.x.clicks, 2);
   // A click call that fails (a timeout) is also final and leaves the record.
@@ -234,7 +241,7 @@ test("C1: the write-ahead record is written before the click, and if it cannot b
   await approve(r, "wa");
   const real = r.x.run;
   // The draft changes just before the pending record is written (the compare-and-set refuses), at the moment of the fill.
-  const svc = new PostService({ ...r.svc.deps, run: async (cmd, args, o) => {
+  const svc = sibling(r.svc, { ...r.svc.deps, run: async (cmd, args, o) => {
     const res = await real(cmd, args, o);
     if (args.some((a) => a.includes("composer not found"))) writeFileSync(p, readFileSync(p, "utf8") + "\n");
     return res;
@@ -338,7 +345,7 @@ test("H4: the browser must be signed in to the configured account; the profile i
   assert.equal(r.x.clicks, 0);
   // Remapping an account key to another profile voids the approval.
   r.x.signedIn = "example";
-  const other = new PostService({ ...r.svc.deps, config: { ...r.svc.deps.config, accounts: { main: { ...ACCOUNT, profile: ["https://x", "com/another"].join(".") } } } });
+  const other = sibling(r.svc, { ...r.svc.deps, config: { ...r.svc.deps.config, accounts: { main: { ...ACCOUNT, profile: ["https://x", "com/another"].join(".") } } } });
   await assert.rejects(other.postNow("who"), /edited after it was approved/);
   assert.throws(() => xHandle("http://x.com/example"), /https/);
   assert.throws(() => xHandle("https://evil.example/example"), /https:\/\/x\.com/);
@@ -455,7 +462,7 @@ test("M3/M4: compare-and-set against the file as read; retex failures are not sw
 test("M4: a real retex set keeps the approval valid (skipped where retex is not installed)", { skip: spawnSync("retex", ["--help"]).error ? "retex not installed" : false }, async () => {
   const r = rig();
   const p = r.write("real", 'text: "Real retex"');
-  const real = new PostService({ ...r.svc.deps, run: realRunner, config: { ...r.svc.deps.config, retex: "auto" } });
+  const real = sibling(r.svc, { ...r.svc.deps, run: realRunner, config: { ...r.svc.deps.config, retex: "auto" } });
   await real.approve("real", "alice");
   assert.equal(real.problem(readDraft(p)), undefined, `approval survives retex's write:\n${readFileSync(p, "utf8")}`);
   assert.match(readFileSync(p, "utf8"), /approved: "?alice/);
@@ -495,7 +502,7 @@ test("M5: schedules.json is locked; a job the CLI removes is dropped by the gate
 
 test("M6: drafts under a folder the agent can write are refused, at config load and at fire time", async () => {
   const home = mkdtempSync(join(tmpdir(), "carl-post-cfg-"));
-  const acct = { main: { platform: "x", profile: "https://x.com/example" } };
+  const acct = { main: { platform: "x", profile: "https://x.com/example", session: { command: "overseer-browser" } } };
   for (const dir of ["workspace/posts", "memory/notes", "spill", "shared/vault"]) {
     writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", agentWritable: [join(home, "shared")], post: { draftsDir: join(home, dir), accounts: acct } }));
     assert.throws(() => loadConfig(home), /a folder the agent can write/, dir);
@@ -506,7 +513,7 @@ test("M6: drafts under a folder the agent can write are refused, at config load 
   const r = rig();
   const shared = join(r.home, "shared");
   mkdirSync(shared);
-  const svc = new PostService({ ...r.svc.deps, config: { ...r.svc.deps.config, agentWritable: [shared] } });
+  const svc = sibling(r.svc, { ...r.svc.deps, config: { ...r.svc.deps.config, agentWritable: [shared] } });
   writeFileSync(join(shared, "x.md"), "---\nplatform: x\naccount: main\ntext: hi\n---\n");
   await assert.rejects(svc.dryRun(join(shared, "x.md"), { offline: true }), /a folder the agent can write/);
 });
@@ -554,7 +561,7 @@ test("M8: a live dry run of the exact text is required to post or schedule; the 
   assert.equal(r.x.clicks, 1);
 });
 
-test("C4(b): approved_hash is keyed; the old unkeyed hash is refused; the key file is 0600 and created once", async () => {
+test("C4(b): approved_hash is keyed by a key that is only in the gateway's memory: not on disk, new per start, and an unkeyed hash is refused", async () => {
   const r = rig();
   const p = r.write("hm", 'text: "Keyed"');
   const d = readDraft(p);
@@ -563,42 +570,75 @@ test("C4(b): approved_hash is keyed; the old unkeyed hash is refused; the key fi
   await assert.rejects(r.svc.postNow("hm"), /edited after it was approved/);
   assert.equal(r.x.calls.length, 0);
   await r.svc.approve("hm", "alice");
-  const key = join(r.home, "post-approval.key");
-  assert.equal(statSync(key).mode & 0o777, 0o600);
-  const before = readFileSync(key, "utf8");
-  assert.match(before.trim(), /^[0-9a-f]{64}$/);
   assert.match(readDraft(p).approvedHash!, /^[0-9a-f]{64}$/);
-  // A second service reuses the key (the approval stays valid); a different key voids it.
-  const again = new PostService(r.svc.deps);
-  assert.equal(again.problem(readDraft(p)), undefined);
-  assert.equal(readFileSync(key, "utf8"), before);
-  rmSync(key);
-  assert.match(new PostService(r.svc.deps).problem(readDraft(p))!, /edited after it was approved/, "a new key voids every approval");
+  // The key exists nowhere on disk: no key file, and no file under CARL_HOME or the drafts holds it.
+  const key = (r.svc as any).key as string;
+  assert.match(key, /^[0-9a-f]{64}$/);
+  assert.equal(existsSync(join(r.home, "post-approval.key")), false);
+  const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]));
+  for (const f of walk(r.home)) assert.ok(!readFileSync(f, "utf8").includes(key), `${f} must not hold the key`);
+  // A restart (a new service, so a new key) voids every approval: approvals are short-lived by design.
+  const restarted = new PostService(r.svc.deps);
+  assert.equal(r.svc.problem(readDraft(p)), undefined);
+  assert.match(restarted.problem(readDraft(p))!, /edited after it was approved/, "a new key voids every approval");
+  await assert.rejects(restarted.postNow("hm", { skipDryRun: true }), /edited after it was approved/);
+  assert.equal(r.x.clicks, 0);
 });
 
-test("C4(a): the sandbox profile denies the browser control directory, its socket and the approval key whenever posting is configured", () => {
+test("an approval is good for 24 h and for one post", async () => {
+  const r = rig();
+  r.write("ttl", 'text: "Expires"');
+  await approve(r, "ttl");
+  assert.equal(r.svc.problem(readDraft(join(r.draftsDir, "ttl.md"))), undefined);
+  r.clock.now += APPROVAL_TTL_MS + 60_000;
+  await assert.rejects(r.svc.postNow("ttl", { skipDryRun: true }), /approval expired/);
+  assert.equal(r.x.clicks, 0);
+  // A slot after the approval would expire is refused at scheduling time.
+  const r2 = rig();
+  r2.write("late", 'text: "Late"');
+  await approve(r2, "late");
+  await assert.rejects(r2.svc.schedule("late", new Date(T0 + APPROVAL_TTL_MS + 3600_000).toISOString()), /after this approval expires/);
+  await r2.svc.schedule("late", new Date(T0 + APPROVAL_TTL_MS - 3600_000).toISOString());
+  // Consumed once: after a click under an approval, starting over (here after a cleared pending record) needs a fresh press.
+  const r3 = rig();
+  r3.write("once", 'text: "Once"');
+  await approve(r3, "once");
+  r3.x.failClick = true;
+  await assert.rejects(r3.svc.postNow("once"));
+  r3.x.failClick = false;
+  await operator(r3, "clear-pending", "once");
+  await assert.rejects(r3.svc.postNow("once"), /already used for a post attempt/);
+  assert.equal(r3.x.live.length, 0);
+  r3.clock.now += 60_000;
+  await approve(r3, "once");
+  await r3.svc.postNow("once");
+  assert.equal(posted(r3.x), 1);
+});
+
+test("C4(a): the sandbox profile denies the configured browser control directory and socket whenever posting is configured, and no approval key file exists to deny", () => {
   const home = mkdtempSync(join(tmpdir(), "carl-post-sb-"));
   process.env.HOME = home;
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example" } } } }));
+  const dir = join(canonical(home), "relay-runtime");
+  const conf = (post: object) => writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post }));
+  const acct = { main: { platform: "x", profile: "https://x.com/example", session: { command: "overseer-browser" } } };
+  conf({ accounts: acct, browser: { controlDirs: [join(home, "relay-runtime")], socketPattern: "relay[^/]*\\.sock$" } });
   const cfg = loadConfig(home);
-  const dir = join(canonical(home), "Library", "Application Support", "OverSeer", "browser");
   const profile = buildProfile(cfg);
   assert.ok(profile.split("\n").some((l) => l.startsWith("(deny file-read* (subpath") && l.includes(`(subpath "${dir}")`)), "the browser control folder is unreadable");
-  assert.ok(profile.includes(`(remote unix-socket (subpath "${dir}"))`), "the control socket is unreachable");
-  assert.ok(new RegExp(`\\(deny file-write\\* [^\n]*\\(subpath "${dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\)`).test(profile), "and cannot be replaced");
-  assert.ok(profile.includes(`(literal "${join(canonical(home), "post-approval.key")}")`), "the approval key is unreadable");
-  assert.ok(secretFiles(cfg).includes(join(home, "post-approval.key")));
-  assert.ok(secretDirs(cfg).includes(join(home, "Library", "Application Support", "OverSeer", "browser")));
-  assert.ok(secretDirs(cfg).includes(join(home, ".config", "overseer-browser")));
-  // Without accounts nothing about the browser is added (the general tooling is untouched).
+  assert.ok(profile.includes(`(remote unix-socket (subpath "${dir}"))`) || secretDirs(cfg).includes(join(home, "relay-runtime")));
+  assert.ok(profile.includes('(deny network-outbound (remote unix-socket (path-regex #"relay[^/]*\\.sock$")))'), "the relay socket is refused by name");
+  assert.ok(!profile.includes("post-approval"), "there is no approval key file to protect: it lives in the gateway's memory");
+  assert.ok(!secretFiles(cfg).some((f) => f.includes("post-approval")));
+  // Nothing is assumed: with no post.browser config no directory or socket name is invented.
+  conf({ accounts: acct });
+  assert.deepEqual(secretDirs(loadConfig(home)), []);
+  // Without accounts nothing about the browser is added.
   writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b" }));
-  assert.ok(!buildProfile(loadConfig(home)).includes("OverSeer"));
-  // The guard: the CLI is a hardline refusal for the agent's shell and its files are unreadable to its file tools.
-  const rules = { denyBrowserCli: true, secretPaths: secretDirs(cfg) };
-  const managed = join(home, "Library", "Application Support", "OverSeer", "browser");
-  for (const c of ["overseer-browser --session x eval 1", "~/.local/bin/overseer-browser sessions list", 'cat "$HOME/Library/Application Support/OverSeer/browser/agent-v1/token"']) assert.equal(classifyCommand(c, rules).level, "hardline", c);
-  assert.equal(classifyCommand("overseer-browser --help", {}).level, "ok", "unaffected when posting is not configured");
-  assert.equal(readVerdict(join(managed, "agent-v1", "token"), rules).level, "hardline");
+  assert.ok(!buildProfile(loadConfig(home)).includes("relay-runtime"));
+  // The guard: shell commands naming the configured browser tooling are a hardline refusal; unaffected when posting is not configured.
+  const rules = { denyBrowserCommand: "overseer-browser", secretPaths: [dir] };
+  for (const c of ["overseer-browser --session x eval 1", "~/.local/bin/overseer-browser sessions list"]) assert.equal(classifyCommand(c, rules).level, "hardline", c);
+  assert.equal(classifyCommand("overseer-browser --help", {}).level, "ok");
 });
 
 test("H1: the gateway's trusted PATH finds the session command (resolved from the operator's PATH at init)", async (t) => {
@@ -649,7 +689,7 @@ test("Low: media and a thread's reply are refused; inline lists parse; X length 
   const slow = r.svc.deps.run;
   let entered!: () => void;
   const inside = new Promise<void>((res) => { entered = res; });
-  const svc = new PostService({ ...r.svc.deps, run: async (c, a, o) => { if (a.includes("start")) { entered(); await hold; } return slow(c, a, o); } });
+  const svc = sibling(r.svc, { ...r.svc.deps, run: async (c, a, o) => { if (a.includes("start")) { entered(); await hold; } return slow(c, a, o); } });
   const first = svc.postNow("lk");
   await inside;
   const alias = join(r.home, "alias");
@@ -686,7 +726,7 @@ test("the CLI: clear-pending only asks; the pending record goes when the operato
   writeFileSync(p, setFields(readFileSync(p, "utf8"), { pending_part: "0", pending_at: "2026-03-10T11:00:00.000Z" }));
   const out: string[] = []; const err: string[] = [];
   const io: PostCliIo = { out: (s) => out.push(s), err: (s) => err.push(s) };
-  assert.equal(await postCommand(["clear-pending", "cp"], io, () => r.svc), 0);
+  assert.equal(await postCommand(["clear-pending", "cp"], io, (q) => handlePost(r.svc, q)), 0);
   assert.match(out.join(), /waits for your answer/);
   assert.equal(readDraft(p).pendingPart, 0, "the CLI cleared nothing");
   const denied = new CardDesk(r.svc, () => Promise.resolve({ answer: "denied" }), () => {});
@@ -852,19 +892,19 @@ test("the agent's tool can draft, dry-run and schedule, and has no way to approv
   assert.equal(carlTools({} as any, r.scheduler, { send: async () => "" }).some((t) => t.name === "post_draft"), false, "no accounts, no tool");
 });
 
-test("the CLI: approve only creates a card (no terminal, no yes); now/schedule/dry-run/status work", async () => {
+test("the CLI only asks the gateway: now/approve raise cards and post nothing; the press does it, in the gateway", async () => {
   const r = rig();
   r.write("cli", 'text: "From the CLI"');
   const out: string[] = []; const err: string[] = [];
   const io: PostCliIo = { out: (s) => out.push(s), err: (s) => err.push(s) };
-  const run = (...a: string[]) => postCommand(a, io, () => r.svc);
+  const sent: string[] = [];
+  const run = (...a: string[]) => postCommand(a, io, (q) => { sent.push(q.cmd); return handlePost(r.svc, q); });
   assert.equal(await run("now", "cli"), 2);
-  assert.match(err.join("\n"), /no operator approval/);
+  assert.match(err.join("\n"), /no live dry run/);
   assert.equal(await run("approve", "cli"), 0);
   assert.match(out.join("\n"), /waits for your answer on the operator channel/);
   assert.equal(readDraft(join(r.draftsDir, "cli.md")).approved, undefined, "asking is not approving");
-  assert.equal(await run("now", "cli"), 2, "still refused");
-  const answered = await new CardDesk(r.svc, (text) => Promise.resolve({ answer: "approved", by: "4242" }), () => {}).pump();
+  await new CardDesk(r.svc, () => Promise.resolve({ answer: "approved", by: "4242" }), () => {}).pump();
   assert.match(readDraft(join(r.draftsDir, "cli.md")).approved!, /^operator 4242 2026-03-10T12:00:00/);
   assert.equal(await run("dry-run", "cli"), 0);
   assert.equal(await run("schedule", "cli"), 2);
@@ -873,65 +913,82 @@ test("the CLI: approve only creates a card (no terminal, no yes); now/schedule/d
   assert.equal(await run("schedule", "cli", "--at", "2026-03-10T15:00:00Z", "--late", "post"), 0);
   assert.equal(await run("status"), 0);
   assert.match(out.join("\n"), /cli\s+Scheduled\s+x\/main approved at 2026-03-10T15:00:00.000Z/);
+  // `now` only raises a card: nothing is posted until the operator presses it, and a denied press posts nothing.
   assert.equal(await run("now", "cli"), 0);
-  assert.equal(posted(r.x), 1);
+  assert.match(out.join("\n"), /waits for your answer.*\n?.*posted|waits for your answer/);
+  assert.equal(posted(r.x), 0, "the CLI posted nothing");
+  assert.equal(r.x.clicks, 0);
+  await new CardDesk(r.svc, (text) => { assert.match(text, /POST NOW/); return Promise.resolve({ answer: "denied" }); }, () => {}).pump();
+  assert.equal(posted(r.x), 0, "denied");
+  assert.equal(await run("now", "cli"), 0);
+  const told: string[] = [];
+  await new CardDesk(r.svc, () => Promise.resolve({ answer: "approved", by: "4242" }), (m) => told.push(m)).pump();
+  assert.equal(posted(r.x), 1, "the gateway posted after the press");
+  assert.match(told.join("\n"), /Posted cli/);
   assert.equal(await run("bogus"), 64);
+  assert.deepEqual(sent.filter((c) => c === "bogus"), [], "an unknown command is not sent");
+});
+
+test("the CLI client holds no key and no post path: its source cannot approve or post, and the gateway route is the only door", () => {
+  const cli = readFileSync(new URL("../src/post/cli.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(cli, /PostService|\.approve\(|postNow|publish|ensureKey|post-approval/);
+  assert.match(cli, /\/carl\/post/);
+});
+
+test("a scheduled fire posts from the approval the gateway holds in memory, and a restart voids it", async () => {
+  const r = rig();
+  r.write("slot", 'text: "At the slot"');
+  await approve(r, "slot");
+  const { job } = await r.svc.schedule("slot", "2026-03-10T14:00:00Z");
+  r.clock.now = Date.parse("2026-03-10T14:00:05Z");
+  // The same process (gateway) still holds the key: the slot posts.
+  const restarted = new PostService(r.svc.deps);
+  await assert.rejects(restarted.runScheduled(r.scheduler.get(job.id)), /edited after it was approved/);
+  assert.equal(r.x.clicks, 0);
+  assert.match(await r.svc.runScheduled(r.scheduler.get(job.id)), /Posted slot/);
+  assert.equal(posted(r.x), 1);
 });
 
 test("config: post accounts are validated and live only in carl.json", () => {
   const home = mkdtempSync(join(tmpdir(), "carl-post-cfg-"));
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example" } } } }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example", session: { command: "overseer-browser" } } } } }));
   const cfg = loadConfig(home);
   assert.equal(cfg.post.missedWindowMinutes, 180);
   assert.equal(cfg.post.draftsDir, join(home, "posts"));
   assert.deepEqual(cfg.post.accounts.main.session, { command: "overseer-browser", timeoutSeconds: 60, namePrefix: "carl-post" });
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "nope" } } } }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "nope", session: { command: "overseer-browser" } } } } }));
   assert.throws(() => loadConfig(home), /profile must be a URL/);
   assert.equal(existsSync(join(home, "posts")), false);
 });
 
 // ===================== Round 3: the second review (R1-R10 and the Lows) =====================
 
-test("R1: the relay's runtime root, the descriptor folder and the socket name are closed to the agent's shell", () => {
+test("R1: the relay's runtime root, the descriptor folder and env-named overrides come from post.browser config and are closed to the agent's shell", () => {
   const home = mkdtempSync(join(tmpdir(), "carl-post-r1-"));
   process.env.HOME = home;
-  const saved = { c: process.env.OVERSEER_BROWSER_CONNECTION, r: process.env.OVERSEER_BROWSER_RUNTIME };
-  delete process.env.OVERSEER_BROWSER_CONNECTION; delete process.env.OVERSEER_BROWSER_RUNTIME;
-  try {
-    // A descriptor fixture shaped like overseer-browser's runtime discovery reads it: version 1, operator-relay, an absolute runtime_root.
-    const root = join(home, ".osr-relay");
-    mkdirSync(root, { recursive: true });
-    mkdirSync(join(home, ".config", "overseer-browser"), { recursive: true });
-    writeFileSync(join(home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: root, token_sha256: "0".repeat(64) }));
-    const accounts = { main: ACCOUNT };
-    const dirs = browserControlDirs(accounts, {}, home);
-    assert.ok(dirs.includes(root) || dirs.includes(canon(root)), `runtime_root is denied: ${dirs}`);
-    assert.ok(dirs.includes(join(home, ".config", "overseer-browser")), "the descriptor folder is denied");
-    assert.ok(dirs.includes(join(home, "Library", "Application Support", "OverSeer", "browser")), "the managed runtime stays denied");
-    // OVERSEER_BROWSER_RUNTIME and an OVERSEER_BROWSER_CONNECTION descriptor elsewhere are followed too.
-    const other = join(home, "elsewhere"); mkdirSync(other);
-    writeFileSync(join(other, "conn.json"), JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: join(home, ".osr-two") }));
-    const env = { OVERSEER_BROWSER_CONNECTION: join(other, "conn.json"), OVERSEER_BROWSER_RUNTIME: join(home, ".osr-three") };
-    const more = browserControlDirs(accounts, env, home);
-    for (const d of [".osr-two", ".osr-three"]) assert.ok(more.some((m) => m.endsWith(d)), d);
-    assert.ok(more.includes(other));
-    assert.deepEqual(browserControlDirs({}, {}, home), [], "nothing without accounts");
-    // A descriptor that is garbage, or whose runtime_root is relative, adds nothing and breaks nothing.
-    writeFileSync(join(home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ runtime_root: "relative/path" }));
-    assert.ok(!browserControlDirs(accounts, {}, home).some((d) => d.endsWith("relative/path")));
-    // The profile: the root is read-denied and its sockets unreachable; any overseer-browser socket is refused by name.
-    writeFileSync(join(home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: root }));
-    writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example" } } } }));
-    const profile = buildProfile(loadConfig(home));
-    assert.ok(profile.includes(`(subpath "${canonical(root)}")`), "runtime_root in the profile");
-    assert.ok(profile.includes(`(remote unix-socket (subpath "${canonical(root)}"))`), "and its socket");
-    assert.ok(profile.includes('(deny network-outbound (remote unix-socket (path-regex #"overseer-browser[^/]*\\.sock$")))'), "the socket name is refused wherever it lives");
-    writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b" }));
-    assert.ok(!buildProfile(loadConfig(home)).includes("overseer-browser"), "unchanged without posting");
-  } finally {
-    if (saved.c !== undefined) process.env.OVERSEER_BROWSER_CONNECTION = saved.c;
-    if (saved.r !== undefined) process.env.OVERSEER_BROWSER_RUNTIME = saved.r;
-  }
+  // A descriptor fixture: an absolute runtime_root named by a JSON file the operator lists.
+  const root = join(home, ".relay-root");
+  mkdirSync(root, { recursive: true });
+  mkdirSync(join(home, ".config", "relay"), { recursive: true });
+  const descriptor = join(home, ".config", "relay", "active.json");
+  writeFileSync(descriptor, JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: root, token_sha256: "0".repeat(64) }));
+  const accounts = { main: ACCOUNT };
+  const b = { ...BROWSER, controlDirs: [join(home, "managed")], descriptors: [descriptor], descriptorEnv: ["RELAY_CONNECTION"], runtimeEnv: ["RELAY_RUNTIME"] };
+  const dirs = browserControlDirs(accounts, b, {}, home);
+  assert.ok(dirs.includes(root) || dirs.includes(canon(root)), `runtime_root is denied: ${dirs}`);
+  assert.ok(dirs.includes(join(home, ".config", "relay")), "the descriptor folder is denied");
+  assert.ok(dirs.includes(join(home, "managed")), "a configured folder is denied");
+  // Env-named descriptors and runtimes are followed too.
+  const other = join(home, "elsewhere"); mkdirSync(other);
+  writeFileSync(join(other, "conn.json"), JSON.stringify({ version: 1, mode: "operator-relay", runtime_root: join(home, ".root-two") }));
+  const more = browserControlDirs(accounts, b, { RELAY_CONNECTION: join(other, "conn.json"), RELAY_RUNTIME: join(home, ".root-three") }, home);
+  for (const d of [".root-two", ".root-three"]) assert.ok(more.some((m) => m.endsWith(d)), d);
+  assert.ok(more.includes(other));
+  assert.deepEqual(browserControlDirs({}, b, {}, home), [], "nothing without accounts");
+  assert.deepEqual(browserControlDirs(accounts, BROWSER, {}, home), [], "nothing is assumed without config");
+  // A descriptor that is garbage, or whose runtime_root is relative, adds nothing and breaks nothing.
+  writeFileSync(descriptor, JSON.stringify({ runtime_root: "relative/path" }));
+  assert.ok(!browserControlDirs(accounts, b, {}, home).some((d) => d.endsWith("relative/path")));
 });
 
 test("R1: under the rendered profile a client cannot connect to an overseer-browser socket, wherever it is", { skip: process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec") ? "needs macOS sandbox-exec" : false }, async () => {
@@ -939,7 +996,7 @@ test("R1: under the rendered profile a client cannot connect to an overseer-brow
   const { createServer } = await import("node:net");
   const home = mkdtempSync(join(tmpdir(), "carl-post-sbx-"));
   process.env.HOME = home;
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example" } } } }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example", session: { command: "overseer-browser" } } }, browser: { socketPattern: "overseer-browser[^/]*\\.sock$" } } }));
   const profile = join(home, "p.sb");
   writeFileSync(profile, buildProfile(loadConfig(home)));
   const dir = mkdtempSync("/tmp/cpsb-"); // short: unix socket paths are limited to ~104 bytes
@@ -965,7 +1022,7 @@ test("R2: asking never approves; only the operator's answer to the card does, bo
   const p = r.write("card", 'text: "Exactly this"');
   // The CLI, the agent's tool and a hand-written card file can all only ask.
   const out: string[] = [];
-  assert.equal(await postCommand(["approve", "card"], { out: (s) => out.push(s), err: (s) => out.push(s) }, () => r.svc), 0);
+  assert.equal(await postCommand(["approve", "card"], { out: (s) => out.push(s), err: (s) => out.push(s) }, (q) => handlePost(r.svc, q)), 0);
   const tools = carlTools({} as any, r.scheduler, { send: async () => "" }, r.svc);
   const tool: any = tools.find((t) => t.name === "post_draft");
   assert.match((await tool.execute("id", { action: "request_approval", name: "card" })).content[0].text, /Already asked|waits for your answer/);
@@ -1078,7 +1135,7 @@ test("R5: a session command that does not resolve is reported (status flag), ~ e
   assert.deepEqual(sessionPrograms({ a: { session: { command: "~/.local/bin/ob" } } }), { ob: join(homedir(), ".local", "bin", "ob") });
   // `carl post status` flags it.
   const r = rig();
-  const svc = new PostService({ ...r.svc.deps, sessionProblems: () => sessionProblems(acc("overseer-browser"), {}) });
+  const svc = sibling(r.svc, { ...r.svc.deps, sessionProblems: () => sessionProblems(acc("overseer-browser"), {}) });
   assert.match(svc.status(), /^SESSION COMMAND PROBLEM: account "main"/);
   assert.doesNotMatch(r.svc.status(), /SESSION COMMAND PROBLEM/);
 });
@@ -1108,7 +1165,7 @@ test("R6: a few seconds of clock difference between this machine and X does not 
 test("R7: the agent cannot schedule inside 15 minutes, and the operator is told when it schedules", async () => {
   const r = rig();
   const notes: string[] = [];
-  const svc = new PostService({ ...r.svc.deps, notify: (m) => { notes.push(m); } });
+  const svc = sibling(r.svc, { ...r.svc.deps, notify: (m) => { notes.push(m); } });
   r.write("lead", 'text: "Soon"');
   await svc.approve("lead", "alice"); await svc.dryRun("lead");
   const tool: any = carlTools({} as any, r.scheduler, { send: async () => "" }, svc).find((t) => t.name === "post_draft");
@@ -1125,10 +1182,11 @@ test("R7: the agent cannot schedule inside 15 minutes, and the operator is told 
 });
 
 test("R8: running a post job before its slot without force does nothing and changes no state; forced, it posts", async () => {
-  const r = rig();
+  const r = rig({ now: Date.now() });
+  const slot = new Date(Math.floor(Date.now() / 1000) * 1000 + 12 * 3600_000).toISOString(); // the scheduler runs on the real clock, so the slot is really in the future
   r.write("early", 'text: "Not yet"');
   await approve(r, "early");
-  const { job } = await r.svc.schedule("early", "2099-01-01T00:00:00Z");
+  const { job } = await r.svc.schedule("early", slot);
   const s = new Scheduler(r.home, log, { prompt: async () => "", builtin: { post: (j: any, o: any) => r.svc.runScheduled(j, o) }, deliver: async () => { throw new Error("nothing should be delivered"); } } as any);
   for (let i = 0; i < 7; i++) await s.runNow(job.id); // more than the five attempts a failing job gets
   const j = s.get(job.id);
@@ -1136,7 +1194,7 @@ test("R8: running a post job before its slot without force does nothing and chan
   assert.equal(j.attempts, undefined);
   assert.equal(j.lastStatus, undefined);
   assert.equal(j.lastRunAt, undefined);
-  assert.equal(j.nextRunAt, Date.parse("2099-01-01T00:00:00Z"));
+  assert.equal(j.nextRunAt, Date.parse(slot));
   assert.equal(r.x.clicks, 0);
   await s.runNow(job.id, { force: true });
   assert.equal(r.x.clicks, 1);
@@ -1247,73 +1305,46 @@ test("Low: a pending part cannot be re-approved with edited text; dropped thread
 
 // ===================== Round 4: the third review (F1-F6 and the Lows) =====================
 
-test("F1/B1: posting is refused unless every allowTools and operatorTools entry matches only verifiably read-only tools", async () => {
-  const blocked = (allow: string[], op: string[] = [], extra: Record<string, unknown> = {}) =>
-    postingBlockedReason({ accounts: { main: {} }, allowTools: allow.map((a) => [a, "x"] as [string, string]), operatorTools: op.map((a) => [a, "x"] as [string, string]), trustedMcp: ["overseer"], ...extra });
-  for (const verb of ["send", "relay", "message", "job_add", "job_dispatch", "job_approve", "schedule_add", "open", "close", "decide", "job_note", "job_wake", "job_redrive", "job_reroute", "job_switch", "job_correct"])
-    for (const prefix of ["overseer_", "coordinator_"]) assert.match(blocked([`^overseer/${prefix}${verb}$`])!, /Posting is OFF/, prefix + verb);
-  // Broad patterns match a canary and fail closed, including the real server's prefix.
-  for (const broad of [".*", "^overseer/.*", "^overseer/coordinator_.*", "^overseer/coordinator_(send|job_add)$|^overseer/coordinator_.*"]) assert.match(blocked([broad])!, /Posting is OFF/, broad);
-  assert.match(blocked([".*"])!, /any future tool/);
-  // operatorTools count (the quoted-words shortcut runs them unasked).
-  assert.match(blocked([], ["^overseer/coordinator_job_add$"])!, /guard\.operatorTools/);
-  // Read-only names pass; so does an empty config.
-  assert.equal(blocked(["^overseer/coordinator_job_list$", "^overseer/coordinator_status$"]), undefined);
-  assert.equal(blocked([], []), undefined);
-  assert.equal(postingBlockedReason({ accounts: {}, allowTools: [[".*", "x"]], trustedMcp: [] }), undefined, "no accounts, nothing to refuse");
-  // A listed tool without readOnlyHint is not verifiably read-only; with the hint it is.
-  assert.match(blocked(["^overseer/coordinator_widget$"], [], { listed: ["overseer/coordinator_widget"], readOnly: new Set() })!, /coordinator_widget/);
-  assert.equal(blocked(["^overseer/coordinator_widget$"], [], { listed: ["overseer/coordinator_widget"], readOnly: new Set(["overseer/coordinator_widget"]) }), undefined);
-  // The hint cache round-trips and loadConfig reads it.
+test("F1: posting no longer depends on which coordination tools are auto-allowed; read-only tools come from readOnlyHint and guard.readOnlyTools", async () => {
   const home = mkdtempSync(join(tmpdir(), "carl-post-f1-"));
   process.env.HOME = home;
-  const acct = { platform: "x", profile: "https://x.com/example" };
-  const conf = (guard: object, extra: object = {}) => writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", trustedMcp: ["overseer"], guard, post: { accounts: { main: acct } }, ...extra }));
-  conf({ allowTools: [["^overseer/coordinator_(send|job_add)$", "queued work"]] });
+  const acct = { platform: "x", profile: "https://x.com/example", session: { command: "overseer-browser" } };
+  const conf = (guard: object, extra: object = {}) => writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", trustedMcp: ["srv"], guard, post: { accounts: { main: acct } }, ...extra }));
+  // Entries that used to switch posting off (acting tools auto-allowed, operatorTools, a work group) are plain config now.
+  conf({ allowTools: [["^srv/(send|job_add)$", "queued work"]], operatorTools: [["^srv/job_approve$", "x"]], readOnlyTools: ["srv/peek"] }, { work: { command: ["/bin/true"] }, telegram: { enabled: true, token: "t", allowFrom: [1], groups: [{ chat: -5, work: { project: "p" } }] } });
   const cfg = loadConfig(home);
-  assert.match(cfg.post.blocked!, /Posting is OFF/);
-  assert.match(cfg.post.blocked!, /Remove that entry/);
-  assert.match(cfg.post.blocked!, /coordinator_send/);
+  assert.equal("blocked" in cfg.post, false);
+  assert.deepEqual(cfg.guard.readOnlyTools, ["srv/peek"]);
+  // The hint cache round-trips.
   mkdirSync(join(home, "state"), { recursive: true });
-  writeReadOnlyCache(home, { "overseer/coordinator_widget": true, "overseer/coordinator_gadget": false });
-  assert.deepEqual(readOnlyCache(home).listed.sort(), ["overseer/coordinator_gadget", "overseer/coordinator_widget"]);
-  conf({ allowTools: [["^overseer/coordinator_widget$", "r"]] });
-  assert.equal(loadConfig(home).post.blocked, undefined);
-  conf({ allowTools: [["^overseer/coordinator_gadget$", "r"]] });
-  assert.match(loadConfig(home).post.blocked!, /coordinator_gadget/);
-  // B2: operatorTools in the real config, and the work module.
-  conf({ operatorTools: [["^overseer/coordinator_(job_add|job_approve|job_dispatch)$", "x"]] });
-  assert.match(loadConfig(home).post.blocked!, /guard\.operatorTools/);
-  conf({}, { work: { command: ["/bin/true"] }, telegram: { enabled: true, token: "t", allowFrom: [1], groups: [{ chat: -5, work: { project: "p" } }] } });
-  assert.match(loadConfig(home).post.blocked!, /work module/);
-  conf({}, { work: { command: ["/bin/true"], sandboxed: true }, telegram: { enabled: true, token: "t", allowFrom: [1], groups: [{ chat: -5, work: { project: "p" } }] } });
-  assert.equal(loadConfig(home).post.blocked, undefined);
-  conf({}, { work: { command: ["/bin/true"] } });
-  assert.equal(loadConfig(home).post.blocked, undefined, "no work group, no work_queue tool");
-  // Every operation refuses, `status` says why, and the agent gets no post tool.
+  writeReadOnlyCache(home, { "srv/widget": true, "srv/gadget": false });
+  assert.deepEqual(readOnlyCache(home).listed.sort(), ["srv/gadget", "srv/widget"]);
+  assert.deepEqual([...readOnlyCache(home).readOnly], ["srv/widget"]);
+  // The guard runs a hinted or operator-listed read without asking; every other tool of the trusted server asks.
+  const rules = { trustedMcp: ["srv"], isReadOnly: (n: string) => cfg.guard.readOnlyTools.includes(n) || readOnlyCache(home).readOnly.has(n) };
+  assert.equal(mcpVerdict("mcp__srv__widget", rules).level, "ok", "readOnlyHint: true");
+  assert.equal(mcpVerdict("mcp__srv__peek", rules).level, "ok", "guard.readOnlyTools");
+  assert.equal(mcpVerdict("mcp__srv__gadget", rules).level, "dangerous", "listed without the hint");
+  assert.equal(mcpVerdict("mcp__srv__send", rules).level, "dangerous", "never listed");
+  assert.equal(mcpVerdict("mcp__srv__list_notes", rules).level, "ok", "the generic note reads");
+  // Posting still works with such a config: nothing refuses it.
   const r = rig();
-  const svc = new PostService({ ...r.svc.deps, config: { ...r.svc.deps.config, blocked: cfg.post.blocked } });
-  r.write("off", 'text: "Hi"');
-  for (const f of [() => svc.dryRun("off", { offline: true }), () => svc.postNow("off"), () => svc.approve("off", "alice"), () => svc.schedule("off", "2026-03-11T12:00:00Z")]) await assert.rejects(f(), /Posting is OFF/);
-  assert.throws(() => svc.requestCard("approve", "off", { by: "operator" }), /Posting is OFF/);
-  assert.match(svc.status(), /^POSTING IS OFF: Posting is OFF/);
-  assert.equal(r.x.calls.length, 0);
+  r.write("on", 'text: "Hi"');
+  await approve(r, "on");
+  assert.match(await r.svc.postNow("on"), /Posted on/);
 });
 
-test("B1: the built-in read-only list covers the real coordinator_ reads and the old overseer_ ones, and no dangerous verb", () => {
-  const ro = (n: string) => DEFAULT_TRUSTED_READONLY.some(([src]) => new RegExp(src).test(`overseer/${n}`));
-  for (const n of ["status", "job_list", "job_get", "events", "terminals", "digest", "schedule_list", "decisions_pending"])
-    for (const p of ["coordinator_", "overseer_"]) assert.ok(ro(p + n), p + n);
-  for (const t of UNSANDBOXED_TOOLS) assert.equal(ro(t), false, `${t} must not be read-only`);
-  const rules = { trustedMcp: ["overseer"] };
-  assert.equal(mcpVerdict("mcp__overseer__coordinator_job_list", rules).level, "ok");
-  assert.equal(mcpVerdict("mcp__overseer__coordinator_relay", rules).level, "dangerous");
+test("B1: Carl names no server or tool of its own: the built-in read list is generic and holds no coordination-tool name", () => {
+  for (const [src] of DEFAULT_TRUSTED_READONLY) assert.ok(!/overseer|coordinator|job_|terminals/i.test(src), src);
+  assert.equal(mcpVerdict("mcp__anything__coordinator_job_list", { trustedMcp: ["anything"] }).level, "dangerous", "unlisted, un-hinted tools ask");
 });
 
-test("F1: the approval key is a 0600 file; the docs say plainly that an unsandboxed process of the user can read it", () => {
+test("F1: the docs say where the approval key lives, what a restart does, and what Carl cannot stop", () => {
   const doc = readFileSync(new URL("../docs/POSTING.md", import.meta.url), "utf8");
-  assert.match(doc, /unsandboxed process of the same user can read/i);
-  assert.match(doc, /Keychain/);
+  assert.match(doc, /only in the (running )?gateway'?s? memory/i);
+  assert.match(doc, /restart.*(voids|invalidat)/is);
+  assert.match(doc, /same[- ]user.*browser relay/is);
+  assert.doesNotMatch(doc, /post-approval\.key/);
 });
 
 test("F2: a failed write-ahead does not wedge the draft: the rerun clicks, and a lost pending record can be cleared by card", async () => {
@@ -1322,7 +1353,7 @@ test("F2: a failed write-ahead does not wedge the draft: the rerun clicks, and a
   await approve(r, "wedge");
   const real = r.x.run;
   let tamper = true;
-  const svc = new PostService({ ...r.svc.deps, run: async (cmd, args, o) => {
+  const svc = sibling(r.svc, { ...r.svc.deps, run: async (cmd, args, o) => {
     const res = await real(cmd, args, o);
     if (tamper && args.some((a) => a.includes("composer not found"))) { tamper = false; writeFileSync(p, readFileSync(p, "utf8") + "\n"); }
     return res;
@@ -1346,6 +1377,8 @@ test("F2: a failed write-ahead does not wedge the draft: the rerun clicks, and a
   assert.match(cleared.shown[0], /click on part 1 of lost\.md was started/);
   assert.match(cleared.told.join(), /Cleared the pending record/);
   r.x.hideNew = false;
+  r.clock.now += 60_000;
+  await approve(r, "lost"); // the cleared attempt spent its approval
   assert.match(await r.svc.postNow("lost"), /Posted lost/);
 });
 
@@ -1355,7 +1388,7 @@ test("F2: a live dry run takes the draft's lock, so it cannot land in the middle
   await approve(r, "busy");
   const real = r.x.run;
   let inner: Promise<string> | undefined;
-  const svc = new PostService({ ...r.svc.deps, run: async (cmd, args, o) => {
+  const svc = sibling(r.svc, { ...r.svc.deps, run: async (cmd, args, o) => {
     if (!inner && args.some((a) => a.includes("composer not found"))) inner = r.svc.dryRun("busy").catch((e) => String(e.message));
     return real(cmd, args, o);
   } });
@@ -1426,7 +1459,7 @@ test("F6: the ledger's hashes are checked: a part live with other text is refuse
   // Parts 1 and 2 go live; then the run stops at part 3.
   const real = r.x.run;
   let clicks = 0;
-  const svc = new PostService({ ...r.svc.deps, run: async (c, a, o) => { if (a.some((x) => x.includes("clicked: button")) && ++clicks === 3) return { code: 1, stdout: JSON.stringify({ ok: false, error: "timeout" }), stderr: "" }; return real(c, a, o); } });
+  const svc = sibling(r.svc, { ...r.svc.deps, run: async (c, a, o) => { if (a.some((x) => x.includes("clicked: button")) && ++clicks === 3) return { code: 1, stdout: JSON.stringify({ ok: false, error: "timeout" }), stderr: "" }; return real(c, a, o); } });
   await assert.rejects(svc.postNow("thr6"), /may be live/);
   // A stale save drops part_hashes and the pending record, then part 2 is edited and approved again.
   writeFileSync(p, setFields(readFileSync(p, "utf8"), { part_hashes: undefined, pending_part: undefined, pending_at: undefined, pending_baseline: undefined }));
@@ -1487,36 +1520,30 @@ test("Low: the agent cannot remove or pause an operator's post job, and cannot s
   // A notice that cannot be delivered means no slot.
   r.write("tell", 'text: "Tell"');
   await approve(r, "tell");
-  const svc = new PostService({ ...r.svc.deps, notify: async () => { throw new Error("telegram down"); } });
+  const svc = sibling(r.svc, { ...r.svc.deps, notify: async () => { throw new Error("telegram down"); } });
   await assert.rejects(svc.schedule("tell", "2026-03-11T12:00:00Z", { agent: true }), /could not be told.*not kept/);
   assert.equal(r.scheduler.list().filter((j) => j.post && j.enabled && j.post.draft.endsWith("tell.md")).length, 0);
   assert.notEqual(readDraft(join(r.draftsDir, "tell.md")).status, "Scheduled");
 });
 
-test("Low: a relay descriptor that changed since Carl started refuses posting; the default descriptor is closed even when the environment names another", async () => {
+test("Low: a relay descriptor that changed since Carl started refuses posting", async () => {
   const r = rig();
+  const descriptor = join(r.home, "relay.json");
+  writeFileSync(descriptor, JSON.stringify({ version: 1, runtime_root: join(r.home, ".root-old") }));
+  const svc = sibling(r.svc, { ...r.svc.deps, config: { ...r.svc.deps.config, browser: { ...BROWSER, descriptors: [descriptor] } } });
   r.write("relay", 'text: "Relay"');
-  await approve(r, "relay");
-  mkdirSync(join(r.home, ".config", "overseer-browser"), { recursive: true });
-  writeFileSync(join(r.home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ version: 1, runtime_root: join(r.home, ".osr-new") }));
-  await assert.rejects(r.svc.postNow("relay"), /relay descriptor changed since Carl started/);
-  await assert.rejects(r.svc.dryRun("relay"), /relay descriptor changed/);
+  await svc.approve("relay", "alice");
+  writeFileSync(descriptor, JSON.stringify({ version: 1, runtime_root: join(r.home, ".root-new") }));
+  await assert.rejects(svc.postNow("relay", { skipDryRun: true }), /relay descriptor changed since Carl started/);
+  await assert.rejects(svc.dryRun("relay"), /relay descriptor changed/);
   assert.equal(r.x.clicks, 0);
-  const home = mkdtempSync(join(tmpdir(), "carl-post-env-"));
-  mkdirSync(join(home, ".config", "overseer-browser"), { recursive: true });
-  writeFileSync(join(home, ".config", "overseer-browser", "active-connection.json"), JSON.stringify({ version: 1, runtime_root: join(home, ".osr-default") }));
-  writeFileSync(join(home, "other.json"), JSON.stringify({ version: 1, runtime_root: join(home, ".osr-env") }));
-  const dirs = browserControlDirs({ main: ACCOUNT }, { OVERSEER_BROWSER_CONNECTION: join(home, "other.json") }, home);
-  assert.ok(dirs.some((d) => d.endsWith(".osr-default")), "what the posting child sees (no OVERSEER_* in its environment) is closed");
-  assert.ok(dirs.some((d) => d.endsWith(".osr-env")));
 });
 
-test("Low: the sandbox refuses the approval key by name anywhere and the loopback debug port while posting is configured", () => {
+test("Low: the sandbox refuses the loopback debug port while posting is configured", () => {
   const home = mkdtempSync(join(tmpdir(), "carl-post-sb-"));
   process.env.HOME = home;
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example" } } } }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b", post: { accounts: { main: { platform: "x", profile: "https://x.com/example", session: { command: "overseer-browser" } } } } }));
   const profile = buildProfile(loadConfig(home));
-  assert.ok(profile.includes('(deny file-read* (regex #"/post-approval\\.key$"))'));
   assert.ok(profile.includes('(deny network-outbound (remote ip "localhost:9222"))'));
   writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "a/b" }));
   assert.ok(!buildProfile(loadConfig(home)).includes("9222"));
@@ -1537,7 +1564,7 @@ test("B3: the operator notice goes straight to Telegram with no queue, so a fail
   const r = rig();
   r.write("b3", 'text: "B3"');
   await approve(r, "b3");
-  const svc = new PostService({ ...r.svc.deps, notify: (m) => sendDirect.call(fake, "home", m) });
+  const svc = sibling(r.svc, { ...r.svc.deps, notify: (m) => sendDirect.call(fake, "home", m) });
   await assert.rejects(svc.schedule("b3", "2026-03-11T12:00:00Z", { agent: true }), /could not be told.*not kept/);
   assert.equal(r.scheduler.list().filter((j) => j.post && j.enabled).length, 0);
 });
@@ -1565,13 +1592,13 @@ test("F6: the clear-pending card does not promise a re-click; the recoverBlock m
   assert.match(svc, /thread_urls \(comma-separated, in order\)/);
 });
 
-test("docs: POSTING.md states the structural rule, names the real tools and has one agent-permissions paragraph", () => {
+test("docs: POSTING.md describes the gateway-only post guard, names no coordinator tool, and has one agent-permissions paragraph", () => {
   const doc = readFileSync(new URL("../docs/POSTING.md", import.meta.url), "utf8");
   assert.match(doc, /readOnlyHint: true/);
-  assert.match(doc, /coordinator_/);
-  assert.match(doc, /guard\.operatorTools/);
-  assert.match(doc, /work\.command/);
+  assert.match(doc, /guard\.readOnlyTools/);
+  assert.match(doc, /post\.browser/);
+  assert.doesNotMatch(doc, /coordinator_|overseer/i);
+  assert.doesNotMatch(doc, /guard\.operatorTools.*OFF|posting\s+is OFF/s);
   assert.equal(doc.split("request** an approval card").length, 2, "the duplicate paragraph is gone");
   assert.doesNotMatch(doc, /never clicked\./);
-  assert.doesNotMatch(doc, /OverSeer\s+MCP server/);
 });

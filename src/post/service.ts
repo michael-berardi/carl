@@ -1,5 +1,7 @@
 // The post pipeline: draft record -> render and validate (dry run) -> post -> verify the live URL -> record the outcome.
 // Approval is a hard gate in front of every live or scheduled post, and is bound to the draft's current text.
+// Posting is something only the gateway process does: the approval key exists only in its memory (see key.ts), every approval is
+// made after an operator's press verified in this process, and `carl post` only asks the gateway to raise a card.
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -7,7 +9,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import type { PostConfig } from "../config.ts";
 import type { Job, Scheduler } from "../scheduler.ts";
 import { BAD_CHARS, type Draft, DraftStore, readDraft, sha256, syncDir, textHash, visible } from "./draft.ts";
-import { agentCanWrite, canon, ensureKey, hmac, relayFingerprint } from "./key.ts";
+import { agentCanWrite, canon, hmac, newKey, relayFingerprint } from "./key.ts";
 import type { AdapterRegistry } from "./registry.ts";
 import { type CardKind, type CardRequest, CardStore } from "./cards.ts";
 import { type AdapterContext, type PostAccount, PostError, type PostRun, type Rendered, type Runner } from "./types.ts";
@@ -23,11 +25,16 @@ export interface PostDeps {
   scheduler?: Scheduler;
   /** Told when the agent sets a slot (the operator must know a post is coming). */
   notify?: (message: string) => void | Promise<void>;
-  /** The overseer-browser relay descriptor as it is now (default: read from the operator's files). Posting refuses once it differs from what Carl saw at start. */
+  /** The browser relay descriptor as it is now (default: read from the operator's files). Posting refuses once it differs from what Carl saw at start. */
   relayFingerprint?: () => string;
+  /** Environment the relay descriptors are read with (default: this process's). */
+  env?: NodeJS.ProcessEnv;
   /** Session-command problems found at start (the gateway's own PATH check); `carl post status` shows them. */
   sessionProblems?: () => string[];
 }
+
+/** An approval is good for this long (and for one post): short-lived by design, since a gateway restart voids every approval anyway. */
+export const APPROVAL_TTL_MS = 24 * 3600_000;
 
 /** An agent may not schedule closer than this: the operator needs time to look. */
 export const AGENT_MIN_LEAD_MS = 15 * 60_000;
@@ -36,12 +43,13 @@ const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const ISO_DATE = /\d{4}-\d{2}-\d{2}/;
 
 /** Why this draft may not be posted, or undefined when the operator's approval covers its current text. `expected` is the keyed binding hash. */
-export function approvalProblem(d: Draft, expected?: string): string | undefined {
+export function approvalProblem(d: Draft, expected?: string, nowMs?: number): string | undefined {
   if (!d.approved?.trim()) return "no operator approval is recorded (run `carl post approve`)";
   const who = d.approved.replace(/\d{4}-\d{2}-\d{2}[T ]?[\d:.]*(?:Z|[+-]\d{2}:?\d{2})?/, "").replace(/\b(?:at|on|by)\b/gi, "").trim();
   if (!ISO_DATE.test(d.approved) || !who) return `approval "${d.approved}" must name who and when (for example "alice 2026-01-31T09:00:00Z"); approve it again with \`carl post approve\``;
   if (!d.approvedHash) return "the approval does not record which text it covered; approve it again";
   if (expected === undefined || d.approvedHash !== expected) return "the draft was edited after it was approved (or the approval was not made by this Carl); approve it again";
+  if (nowMs !== undefined && nowMs - approvedAt(d) > APPROVAL_TTL_MS) return `the approval expired (${d.approved} is older than ${APPROVAL_TTL_MS / 3600_000} h); approve it again`;
   return undefined;
 }
 
@@ -62,26 +70,23 @@ export interface PublishOpts { note?: string; skipDryRun?: boolean }
 export class PostService {
   readonly deps: PostDeps;
   private readonly store: DraftStore;
-  private keyCache?: string;
+  /** The approval key: random per service (the gateway makes one at start), held in memory only, never written anywhere. */
+  private readonly key = newKey();
+  /** Approvals (their stamps) that a click has been made under: one approval posts once. */
+  private readonly consumed = new Set<string>();
   constructor(deps: PostDeps) {
     this.deps = deps;
     this.store = new DraftStore(deps.run, deps.config.retex === "auto");
-    this.relayAtStart = (deps.relayFingerprint ?? relayFingerprint)();
+    this.relayAtStart = this.relayNow();
   }
   private readonly relayAtStart: string;
-
-  /** Posting is configured but unsafe (see safety.ts): nothing but `status` works. */
-  private assertOn(): void {
-    if (this.deps.config.blocked) throw new PostError(this.deps.config.blocked, true);
-  }
+  private relayNow = () => (this.deps.relayFingerprint ?? (() => relayFingerprint(this.deps.config.browser, this.deps.env)))();
   /** The sandbox closed the relay root that was named when Carl started; a different one now is open to the agent's shell. */
   private assertRelay(): void {
-    if ((this.deps.relayFingerprint ?? relayFingerprint)() !== this.relayAtStart) throw new PostError("the overseer-browser relay descriptor changed since Carl started, so the new relay root is not closed to the agent's shell yet; restart Carl (the gateway) and try again", true);
+    if (this.relayNow() !== this.relayAtStart) throw new PostError("the browser relay descriptor changed since Carl started, so the new relay root is not closed to the agent's shell yet; restart Carl (the gateway) and try again", true);
   }
 
   private now = () => (this.deps.now ?? Date.now)();
-  /** The approval key, created (0600) on first use. The gateway creates it at start. */
-  ensureKey(): string { return (this.keyCache ??= ensureKey(this.deps.home)); }
 
   /**
    * Where (platform, account, profile) and what (every part, the reply) a keyed hash covers. `purpose` keeps the hashes apart:
@@ -89,10 +94,10 @@ export class PostService {
    */
   mac(purpose: "approve" | "dry-run" | "card", d: Draft, extra: unknown = null): string {
     const profile = this.deps.config.accounts[d.account]?.profile ?? "";
-    return hmac(this.ensureKey(), JSON.stringify({ v: 4, purpose, path: canon(d.path), platform: d.platform, account: d.account, profile, parts: d.parts.map((p) => p.trim()), thread: d.isThread, reply: d.reply?.trim() ?? null, extra }));
+    return hmac(this.key, JSON.stringify({ v: 4, purpose, path: canon(d.path), platform: d.platform, account: d.account, profile, parts: d.parts.map((p) => p.trim()), thread: d.isThread, reply: d.reply?.trim() ?? null, extra }));
   }
   /** Why this draft may not be posted (approval, keyed). */
-  problem(d: Draft): string | undefined { return approvalProblem(d, this.mac("approve", d, d.approved ?? "")); }
+  problem(d: Draft): string | undefined { return approvalProblem(d, this.mac("approve", d, d.approved ?? ""), this.now()); }
 
   /** A draft by name (in the drafts folder) or, for the operator's CLI, by path. The agent's tool passes `named` only. */
   resolve(ref: string, opts: { named?: boolean } = {}): string {
@@ -144,7 +149,6 @@ export class PostService {
 
   /** Render and validate (no side effects); with `offline` false the adapter also proves the platform takes the exact text, then discards it. No approval needed. */
   async dryRun(ref: string, opts: { offline?: boolean; named?: boolean } = {}): Promise<string> {
-    this.assertOn();
     // A live dry run writes the draft; it takes the draft's lock, so it cannot land in the middle of a post (which would fail its write-ahead record).
     if (!opts.offline) return this.withLock(this.resolve(ref, opts), () => this.dryRunBody(ref, opts));
     return this.dryRunBody(ref, opts);
@@ -180,7 +184,6 @@ export class PostService {
   }
 
   private async publish(path: string, opts: PublishOpts): Promise<string> {
-    this.assertOn();
     return this.withLock(path, async () => {
       this.assertRelay();
       const d = readDraft(path);
@@ -200,6 +203,10 @@ export class PostService {
       const edited = this.liveEdit(d, rendered, eff.hashes);
       if (edited) throw new PostError(`refused: ${name}: ${edited}`, true);
       const done = eff.urls;
+      // One approval posts once: after a click was made under it, only finishing that same post (parts already live, or a click
+      // pending) may continue; starting over (say after a clear-pending) needs a fresh press.
+      const approvalId = `${canon(path)}|${d.approved}`;
+      if (this.consumed.has(approvalId) && !done.length && !eff.pending) throw new PostError(`refused: ${name}: the approval was already used for a post attempt; approve it again`, true);
       const pendingPart = eff.pending?.part;
       const pendingAt = eff.pending?.atMs ?? 0;
       const pendingBaseline = eff.pending?.baseline;
@@ -224,6 +231,7 @@ export class PostService {
                 this.ledgerAppend({ key, event: "cleared", by: "carl: the pending record could not be written, nothing was clicked" });
                 throw e;
               }
+              this.consumed.add(approvalId); // a click is now under way: this approval is spent
             },
             onPart: (urls) => {
               const hashes = urls.map((_, i) => partHash(rendered.sequence[i]));
@@ -313,7 +321,6 @@ export class PostService {
    * if the file is anything else now, nothing is approved.
    */
   async approve(ref: string, by: string, expected?: string): Promise<string> {
-    this.assertOn();
     const d = this.load(ref);
     if (d.status.toLowerCase() === "posted") throw new PostError(`${basename(d.path)} is already Posted`, true);
     if (expected !== undefined && d.textHash !== expected) throw new PostError(`${basename(d.path)} changed after it was shown to you; nothing was approved. Read it again and approve again`, true);
@@ -325,6 +332,7 @@ export class PostService {
     const who = by.trim();
     if (!who || ISO_DATE.test(who)) throw new PostError("approval needs a name (--by <name>)", true);
     const stamp = `${who} ${new Date(this.now()).toISOString()}`;
+    for (const id of [...this.consumed]) if (id.startsWith(`${canon(d.path)}|`)) this.consumed.delete(id); // a fresh approval is a fresh one-time permission
     await this.store.set(d.path, { approved: stamp, approved_hash: this.mac("approve", d, stamp), status: d.status === "Draft" ? "Ready" : d.status }, d.fileHash);
     this.deps.scheduler?.clearSkipDryRun(d.path); // an earlier --skip-dry-run belonged to the earlier approval
     return `Approved ${basename(d.path)}: ${stamp}\ntext hash ${d.textHash.slice(0, 12)}; editing the draft clears this approval.`;
@@ -334,7 +342,6 @@ export class PostService {
 
   /** What the operator is shown for a card, and the keyed value the answer is bound to. Throws a final PostError when the card cannot be acted on. */
   describeCard(card: CardRequest): { text: string; bind: string; hash: string } {
-    this.assertOn();
     const d = readDraft(card.draft);
     const name = basename(d.path);
     const { rendered, adapter, account } = this.prepare(d);
@@ -348,6 +355,15 @@ export class PostService {
       const edited = this.liveEdit(d, rendered, eff.hashes);
       if (edited) throw new PostError(`${name}: ${edited}`, true);
       return { text: `Approve posting to ${where}\n${asked}\nDraft ${name}, text hash ${d.textHash.slice(0, 12)}\n\n${parts}`, bind: this.mac("card", d, { kind: "approve", hash: d.textHash }), hash: d.textHash };
+    }
+    if (card.kind === "post-now") {
+      if (eff.pending) throw new PostError(`${name}: a click on part ${eff.pending.part + 1} was started and never recorded; settle it first (record-live or clear-pending)`, true);
+      const edited = this.liveEdit(d, rendered, eff.hashes);
+      if (edited) throw new PostError(`${name}: ${edited}`, true);
+      if (eff.recoverBlock) throw new PostError(`${name}: ${eff.recoverBlock}`, true);
+      if (!card.skipDryRun) { const dry = this.dryRunProblem(d); if (dry) throw new PostError(`${name}: ${dry}`, true); }
+      this.assertRelay();
+      return { text: `POST NOW to ${where}\n${asked}\nDraft ${name}, text hash ${d.textHash.slice(0, 12)}\nAllowing this posts the text below immediately.\n\n${parts}`, bind: this.mac("card", d, { kind: "post-now", hash: d.textHash, skip: !!card.skipDryRun }), hash: d.textHash };
     }
     if (card.kind === "clear-pending") {
       if (!eff.pending) throw new PostError(`${name} has no pending part`, true);
@@ -378,6 +394,10 @@ export class PostService {
     const path = card.draft;
     // The text hash the card was just checked against (not a fresh read): an edit after this point is refused by approve.
     if (card.kind === "approve") return this.approve(path, by, now.hash);
+    if (card.kind === "post-now") {
+      await this.approve(path, by, now.hash);
+      return this.publish(path, { skipDryRun: card.skipDryRun });
+    }
     return this.withLock(path, async () => {
       const d = readDraft(path);
       if (this.describeCard(card).bind !== bind) throw new PostError("the draft changed after the card was shown to you; nothing was done. Ask again", true);
@@ -401,7 +421,6 @@ export class PostService {
 
   /** Schedule an approved draft. Approval is checked here and again when it fires. The agent may only give a draft its first slot. */
   async schedule(ref: string, at: string, opts: { late?: "skip" | "post"; named?: boolean; agent?: boolean; skipDryRun?: boolean } = {}): Promise<{ job: Job; text: string }> {
-    this.assertOn();
     const scheduler = this.deps.scheduler;
     if (!scheduler) throw new PostError("scheduling needs the scheduler (run it through the gateway or the CLI)", true);
     const d = this.load(ref, opts);
@@ -424,6 +443,8 @@ export class PostService {
     if (when <= this.now()) throw new PostError(`--at ${at} is in the past; use \`carl post now\` to post immediately`, true);
     if (opts.agent && when < this.now() + AGENT_MIN_LEAD_MS) throw new PostError(`a slot the agent sets must be at least ${AGENT_MIN_LEAD_MS / 60_000} minutes away, so the operator can look first (got ${dur(when - this.now())}); pick a later time`, true);
     const iso = new Date(when).toISOString();
+    const expires = approvedAt(d) + APPROVAL_TTL_MS;
+    if (when > expires) throw new PostError(`--at ${at} is after this approval expires (${new Date(expires).toISOString()}; an approval lasts ${APPROVAL_TTL_MS / 3600_000} h and a gateway restart voids it); approve again closer to the slot`, true);
     for (const old of scheduler.list()) if (old.post?.draft === d.path && old.enabled) scheduler.remove(old.id);
     const job = scheduler.add({ name: `post ${basename(d.path, ".md")}`, when: `once ${iso}`, post: { draft: d.path, ...(opts.late === "post" ? { late: "post" as const } : {}), ...(opts.skipDryRun ? { skipDryRun: true } : {}) }, deliver: "home" });
     try {
@@ -451,7 +472,6 @@ export class PostService {
    * Before the slot it refuses unless the operator forces it.
    */
   async runScheduled(job: Job, opts: { force?: boolean } = {}): Promise<string> {
-    this.assertOn();
     if (!job.post) throw new PostError("job has no post", true);
     const path = job.post.draft;
     const d = readDraft(path);
@@ -477,19 +497,17 @@ export class PostService {
   }
 
   /** Put a card in front of the operator (it is shown on their channel by the gateway). It records nothing by itself. */
-  requestCard(kind: CardKind, ref: string, opts: { named?: boolean; url?: string; by: "operator" | "agent" }): string {
-    this.assertOn();
+  requestCard(kind: CardKind, ref: string, opts: { named?: boolean; url?: string; skipDryRun?: boolean; by: "operator" | "agent" }): string {
     const draft = this.resolve(ref, { named: opts.named });
     if (!existsSync(draft)) throw new PostError(`no draft at ${draft}`, true);
-    const card = { id: "", kind, draft, ...(opts.url ? { url: opts.url } : {}), by: opts.by, at: new Date(this.now()).toISOString() };
+    const card = { id: "", kind, draft, ...(opts.url ? { url: opts.url } : {}), ...(opts.skipDryRun ? { skipDryRun: true } : {}), by: opts.by, at: new Date(this.now()).toISOString() };
     this.describeCard(card); // refuses now what could never be approved
     const made = new CardStore(this.deps.home, () => this.now()).add(card);
-    return `${made.fresh ? "Asked" : "Already asked"}: card ${made.card.id} (${kind} ${basename(draft)}) waits for your answer on the operator channel (Telegram, the home chat). Nothing is ${kind === "approve" ? "approved" : "changed"} until you answer it.`;
+    return `${made.fresh ? "Asked" : "Already asked"}: card ${made.card.id} (${kind} ${basename(draft)}) waits for your answer on the operator channel (Telegram, the home chat). Nothing is ${kind === "approve" ? "approved" : kind === "post-now" ? "posted" : "changed"} until you answer it.`;
   }
 
   /** The agent's tool: a new draft. It cannot carry approval; the operator approves with the CLI. */
   createDraft(spec: { name: string; platform: string; account: string; text?: string; thread?: string[]; reply?: string }): string {
-    this.assertOn();
     if (!NAME.test(spec.name)) throw new PostError(`draft names are lowercase letters, digits, . _ - (got "${spec.name}")`, true);
     const account = this.deps.config.accounts[spec.account];
     if (!account) throw new PostError(`account "${spec.account}" is not configured (carl.json post.accounts: ${Object.keys(this.deps.config.accounts).join(", ") || "none"})`, true);
@@ -531,7 +549,7 @@ export class PostService {
     const cards = new CardStore(this.deps.home, () => this.now()).list();
     const problems = this.deps.sessionProblems?.() ?? [];
     const jobs = (this.deps.scheduler?.list() ?? []).filter((j) => j.post);
-    return [...(this.deps.config.blocked ? [`POSTING IS OFF: ${this.deps.config.blocked}`] : []), ...problems.map((p) => `SESSION COMMAND PROBLEM: ${p}`), out.length ? out.join("\n") : `No drafts in ${dir}.`, ...(cards.length ? ["", "Waiting for your answer on the operator channel:", ...cards.map((c) => `${c.id} ${c.kind} ${basename(c.draft)}${c.url ? ` ${c.url}` : ""}`)] : []), ...(jobs.length ? ["", "Scheduled posts:", ...jobs.map((j) => `${j.id} ${j.enabled ? "on " : "off"} ${basename(j.post!.draft)} ${j.when} last=${j.lastStatus ?? "-"}${j.lastError ? ` (${j.lastError.slice(0, 80)})` : ""}${j.post!.late === "post" ? " late:post" : ""}`)] : [])].join("\n");
+    return [...problems.map((p) => `SESSION COMMAND PROBLEM: ${p}`), out.length ? out.join("\n") : `No drafts in ${dir}.`, ...(cards.length ? ["", "Waiting for your answer on the operator channel:", ...cards.map((c) => `${c.id} ${c.kind} ${basename(c.draft)}${c.url ? ` ${c.url}` : ""}`)] : []), ...(jobs.length ? ["", "Scheduled posts:", ...jobs.map((j) => `${j.id} ${j.enabled ? "on " : "off"} ${basename(j.post!.draft)} ${j.when} last=${j.lastStatus ?? "-"}${j.lastError ? ` (${j.lastError.slice(0, 80)})` : ""}${j.post!.late === "post" ? " late:post" : ""}`)] : [])].join("\n");
   }
 
   /** One run per draft at a time (the CLI and the scheduler could otherwise both post it). */
