@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { PostService } from "./service.ts";
+import { permanentSendFailure } from "../channels/telegram.ts";
 
 export type CardKind = "approve" | "clear-pending" | "record-live";
 
@@ -127,6 +128,12 @@ export class CardDesk {
         if (d.answer !== "approved") return;
         try { this.tell(await this.svc.applyCard(card, described.bind, `operator ${d.by ?? "channel"}`)); } catch (e) { this.tell(`Not done (${card.kind} ${card.draft.split("/").pop()}): ${(e as Error).message}`); }
       }).catch((e) => {
+        if (permanentSendFailure(e)) {
+          // No retry can fix this (blocked bot, chat gone): stop, and say so once.
+          this.store.remove(card.id);
+          this.tell(`Card ${card.kind} ${card.draft.split("/").pop()} could not be delivered and will not be retried: ${(e as Error).message}. Nothing was done; ask again after fixing the home chat.`);
+          return;
+        }
         // The card could not be put in front of the operator: it is shown again later (not stranded until a restart).
         this.shown.delete(card.id);
         this.retryAt.set(card.id, (this.svc.deps.now ?? Date.now)() + RETRY_AFTER_FAILED_SEND_MS);

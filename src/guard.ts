@@ -353,7 +353,7 @@ export function shellGuard(approve: Approver, onBlock: (command: string, why: st
  * codemode script, because it acts outside the sandbox with the operator's permissions.
  */
 export const DEFAULT_TRUSTED_READONLY: [string, string][] = [
-  ["^overseer/overseer_(status|digest|terminals|read|profiles|events|panel|policy|concurrency|job_list|job_get|job_receiver|cleanup_status|reap_status|reap_owner_status|schedule_list|proposals|decisions_pending|decisions_packet)$", "OverSeer reads"],
+  ["^overseer/(?:overseer|coordinator)_(status|digest|terminals|read|profiles|events|panel|policy|effective_policy|concurrency|job_list|job_get|job_receiver|cleanup_status|reap_status|reap_owner_status|schedule_list|proposals|decisions_pending|decisions_packet)$", "OverSeer reads"],
   ["^[^/]+/(list_notes|search_notes|read_note|query_records|recall_context|get_links|get_schema|get_stats|get_board|memory_context|memory_recall|memory_review)$", "Retex reads"],
 ];
 

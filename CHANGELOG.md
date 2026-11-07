@@ -4,6 +4,15 @@ Releases are tagged `v<version>`; each entry says what changed for an operator.
 
 ## 0.9.0
 
+Review round 5 (the fourth review's B1-B3):
+
+- **The posting refusal is structural.** With `post.accounts` set, posting is off unless every `guard.allowTools` and `guard.operatorTools` entry can only match verifiably read-only tools: on the built-in read-only list, or listed with `readOnlyHint: true` (the gateway caches trusted servers' hints in `state/mcp-readonly.json` at session start; no cache means fail closed). Entries matching a made-up future name (`overseer/coordinator_brand_new_tool`, `.*`, `^overseer/coordinator_.*`) are refused, and the dangerous verbs (`send`, `relay`, `message`, `job_add`, `job_dispatch`, `job_approve`, `schedule_add`, `open`, `close`, `decide`, `job_note`, `job_wake`, `job_redrive`, `job_reroute`, `job_switch`, `job_correct`) are checked under both `coordinator_` and `overseer_`. `operatorTools` is included.
+- **Work module.** Posting is off when `work.command` is set and a group has a `work` project, because `work_queue` runs unasked and Carl cannot tell whether the job is sandboxed. `"work": {"command": [...], "sandboxed": true}` is the operator's statement that it is.
+- **Notice failure removes the slot.** The agent-slot notice is sent straight to Telegram, not queued, so a failed send throws and the slot is removed.
+- **Unattended reads.** The built-in read-only list now matches the real `coordinator_` tool names (and keeps `overseer_`), so unattended runs are no longer refused `coordinator_job_list` and similar.
+- **Cards.** Long cards are sent one at a time with the card id on every piece; a permanent Telegram refusal (blocked bot, chat gone) stops the retries and says so once; the clear-pending card no longer promises a re-click; the message for a ledger/draft mismatch names how to recover.
+- **Docs.** `docs/POSTING.md` states the rule as it is, names the real tools, says the descriptor check is the gateway's, drops the unsupported browser claim and the duplicate agent paragraph, and corrects "waits out" and "nothing is stranded".
+
 Review round 4 (the third review's F1-F6 and Lows):
 
 - **Posting is off while an unsandboxed tool is auto-allowed.** With `post.accounts` set, config load refuses to enable posting while any `guard.allowTools` entry auto-allows `overseer_send`, `overseer_message`, `overseer_job_add`, `overseer_open`, `overseer_close`, `overseer_job_dispatch`, `overseer_job_approve` or `overseer_schedule_add` (explicit list in `src/post/safety.ts`). The reason is delivered to the home chat, `carl post status` leads with it, and nothing posts. To turn posting on, remove those entries from `guard.allowTools` in `carl.json` (the tools then ask) and restart. The approval key stays a 0600 file readable by an unsandboxed process of the same user (a Keychain item made by `security` is equally readable); docs say so.
