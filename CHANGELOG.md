@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.9.3
+
+- **A plan that cannot run the model moves the work on.** When the provider refuses the model for the signed-in account's plan (for example a paid login that lapsed to a free plan: "model is not supported when using ... with a ... account"), the next model in `fallbackModels` answers instead of the run failing, and the refused model is benched for 6 hours. Before, the gateway stopped on every message.
+
 ## 0.9.2
 
 - **The browser relay is closed whenever `post.browser` is set, with or without `post.accounts`.** The sandbox denies (control folders, descriptors and their `runtime_root`, `socketPattern`, local port 9222) and the shell `commandPattern` hardline no longer wait for an account. **Upgrading:** an agent shell that used the relay with no accounts configured now loses it.
