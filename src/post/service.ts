@@ -48,7 +48,7 @@ export function approvalProblem(d: Draft, expected?: string, nowMs?: number): st
   const who = d.approved.replace(/\d{4}-\d{2}-\d{2}[T ]?[\d:.]*(?:Z|[+-]\d{2}:?\d{2})?/, "").replace(/\b(?:at|on|by)\b/gi, "").trim();
   if (!ISO_DATE.test(d.approved) || !who) return `approval "${d.approved}" must name who and when (for example "alice 2026-01-31T09:00:00Z"); approve it again with \`carl post approve\``;
   if (!d.approvedHash) return "the approval does not record which text it covered; approve it again";
-  if (expected === undefined || d.approvedHash !== expected) return "the draft was edited after it was approved (or the approval was not made by this Carl); approve it again";
+  if (expected === undefined || d.approvedHash !== expected) return "the approval is void: the draft was edited after it was approved, or Carl restarted since (an approval lives only in the running gateway's memory); approve it again";
   if (nowMs !== undefined && nowMs - approvedAt(d) > APPROVAL_TTL_MS) return `the approval expired (${d.approved} is older than ${APPROVAL_TTL_MS / 3600_000} h); approve it again`;
   return undefined;
 }
@@ -347,7 +347,7 @@ export class PostService {
     const { rendered, adapter, account } = this.prepare(d);
     const eff = this.effective(d, rendered);
     const where = `${d.platform}/${d.account} (${account.profile})`;
-    const asked = `Asked by: ${card.by === "agent" ? "THE AGENT (not you)" : "you (carl post)"}`;
+    const asked = `Asked by: ${card.by === "agent" ? "THE AGENT (not you)" : "API (carl post)"}`;
     const parts = rendered.sequence.map((t, i) => `[${i + 1}]${i < eff.hashes.length ? " (ALREADY LIVE, cannot be changed)" : ""} ${visible(t)}`).join("\n\n");
     if (d.status.toLowerCase() === "posted") throw new PostError(`${name} is already Posted`, true);
     if (card.kind === "approve") {
@@ -363,7 +363,7 @@ export class PostService {
       if (eff.recoverBlock) throw new PostError(`${name}: ${eff.recoverBlock}`, true);
       if (!card.skipDryRun) { const dry = this.dryRunProblem(d); if (dry) throw new PostError(`${name}: ${dry}`, true); }
       this.assertRelay();
-      return { text: `POST NOW to ${where}\n${asked}\nDraft ${name}, text hash ${d.textHash.slice(0, 12)}\nAllowing this posts the text below immediately.\n\n${parts}`, bind: this.mac("card", d, { kind: "post-now", hash: d.textHash, skip: !!card.skipDryRun }), hash: d.textHash };
+      return { text: `POST NOW to ${where}\n${asked}\nDraft ${name}, text hash ${d.textHash.slice(0, 12)}\nAllowing this posts the text below immediately.${card.skipDryRun ? "\nSKIPS THE LIVE DRY RUN (it was asked to post without one)." : ""}\n\n${parts}`, bind: this.mac("card", d, { kind: "post-now", hash: d.textHash, skip: !!card.skipDryRun }), hash: d.textHash };
     }
     if (card.kind === "clear-pending") {
       if (!eff.pending) throw new PostError(`${name} has no pending part`, true);
@@ -420,7 +420,7 @@ export class PostService {
   }
 
   /** Schedule an approved draft. Approval is checked here and again when it fires. The agent may only give a draft its first slot. */
-  async schedule(ref: string, at: string, opts: { late?: "skip" | "post"; named?: boolean; agent?: boolean; skipDryRun?: boolean } = {}): Promise<{ job: Job; text: string }> {
+  async schedule(ref: string, at: string, opts: { late?: "skip" | "post"; named?: boolean; agent?: boolean; api?: boolean; skipDryRun?: boolean } = {}): Promise<{ job: Job; text: string }> {
     const scheduler = this.deps.scheduler;
     if (!scheduler) throw new PostError("scheduling needs the scheduler (run it through the gateway or the CLI)", true);
     const d = this.load(ref, opts);
@@ -453,10 +453,10 @@ export class PostService {
       scheduler.remove(job.id);
       throw e;
     }
-    if (opts.agent) {
+    if (opts.agent || opts.api) {
       // The operator must know a post is coming: if they cannot be told, there is no slot.
       try {
-        await this.deps.notify?.(`The agent scheduled ${name} to post to ${d.platform}/${d.account} at ${iso}. The text is the one you approved. To stop it, remove the schedule or edit the draft (an edit voids the approval).`);
+        await this.deps.notify?.(`${opts.agent ? "The agent" : "An API caller (carl post)"} scheduled ${name} to post to ${d.platform}/${d.account} at ${iso}. The text is the one you approved. To stop it, remove the schedule or edit the draft (an edit voids the approval).`);
       } catch (e) {
         scheduler.remove(job.id);
         try { await this.store.set(d.path, { status: d.status, scheduled_at: undefined }); } catch {}
@@ -497,7 +497,7 @@ export class PostService {
   }
 
   /** Put a card in front of the operator (it is shown on their channel by the gateway). It records nothing by itself. */
-  requestCard(kind: CardKind, ref: string, opts: { named?: boolean; url?: string; skipDryRun?: boolean; by: "operator" | "agent" }): string {
+  requestCard(kind: CardKind, ref: string, opts: { named?: boolean; url?: string; skipDryRun?: boolean; by: "api" | "agent" }): string {
     const draft = this.resolve(ref, { named: opts.named });
     if (!existsSync(draft)) throw new PostError(`no draft at ${draft}`, true);
     const card = { id: "", kind, draft, ...(opts.url ? { url: opts.url } : {}), ...(opts.skipDryRun ? { skipDryRun: true } : {}), by: opts.by, at: new Date(this.now()).toISOString() };

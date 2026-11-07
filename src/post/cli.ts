@@ -4,6 +4,7 @@
 // account, profile and text hash) in front of the operator on their channel; the gateway acts only when the operator presses it
 // there. A terminal proves nothing (anything that can type into one can type "y"), so no answer is ever read from this process.
 import { parseArgs } from "node:util";
+import { resolve } from "node:path";
 import { loadConfig, secret } from "../config.ts";
 import type { PostApiReply, PostApiRequest } from "./api.ts";
 export const POST_HELP = `carl post <command>
@@ -32,6 +33,13 @@ const realIo: PostCliIo = {
   err: (s) => console.error(s),
 };
 
+/** A path given to the CLI is made absolute against the caller's folder (the gateway runs elsewhere); a bare name stays a name. */
+function absoluteDraft(d: string | undefined): string | undefined {
+  if (!d) return d;
+  if (d.includes("/") || d.startsWith(".") || d.startsWith("~")) return d.startsWith("~") ? d : resolve(process.cwd(), d);
+  return d;
+}
+
 export async function postCommand(args: string[], io: PostCliIo = realIo, api: PostApi = gatewayApi): Promise<number> {
   const [sub, ...rest] = args;
   if (!sub || sub === "help" || sub === "--help") { io.out(POST_HELP); return sub ? 0 : 64; }
@@ -41,7 +49,7 @@ export async function postCommand(args: string[], io: PostCliIo = realIo, api: P
   }
   try {
     const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { offline: { type: "boolean" }, at: { type: "string" }, late: { type: "string" }, "skip-dry-run": { type: "boolean" } } });
-    const req: PostApiRequest = { cmd: sub, draft: positionals[0], url: sub === "record-live" ? positionals[1] : undefined, at: values.at, late: values.late, skipDryRun: values["skip-dry-run"], offline: values.offline };
+    const req: PostApiRequest = { cmd: sub, draft: absoluteDraft(positionals[0]), url: sub === "record-live" ? positionals[1] : undefined, at: values.at, late: values.late, skipDryRun: values["skip-dry-run"], offline: values.offline };
     const reply = await api(req);
     (reply.ok ? io.out : io.err)(reply.ok ? reply.text : `carl post: ${reply.text}`);
     return reply.ok ? 0 : reply.final ? 2 : 1;

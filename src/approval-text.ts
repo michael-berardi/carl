@@ -18,7 +18,9 @@ export function approvalSummary(command: string, reason: string): string {
   const words = tool.replace(new RegExp(`^${server}_`), "").split("_").filter(Boolean);
   const verbAt = words.findIndex((w) => w in VERBS);
   const verb = verbAt >= 0 ? VERBS[words[verbAt]] : "run";
-  const noun = words.filter((_, i) => i !== verbAt).join(" ");
+  // With a real verb, the object is the last word ("<qualifier> job add" reads "add a job"); without one the whole name stays.
+  const nouns = words.filter((_, i) => i !== verbAt);
+  const noun = verbAt >= 0 ? nouns.slice(-1).join(" ") : nouns.join(" ");
   let title = "";
   try {
     const args = JSON.parse(rest || "{}");

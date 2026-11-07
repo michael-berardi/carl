@@ -2,6 +2,13 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.9.2
+
+- **The browser relay is closed whenever `post.browser` is set, with or without `post.accounts`.** The sandbox denies (control folders, descriptors and their `runtime_root`, `socketPattern`, local port 9222) and the shell `commandPattern` hardline no longer wait for an account. **Upgrading:** an agent shell that used the relay with no accounts configured now loses it.
+- **Honest cards.** A card raised through `carl post` reads `Asked by: API (carl post)` (it is a key holder, not necessarily you), the deny cool-down now covers API-raised cards too, and `POST NOW` shows when the dry run is skipped. A slot set through the API now notifies you like an agent's. The restart error names a restart as a cause of a void approval.
+- `carl post` makes a draft path absolute against your folder; a bad `post.browser.socketPattern` / `commandPattern` fails at config load; a live `readOnlyHint: false` overrides a cached `true`; approval sentences drop a qualifier word ("add a job", not "add a team job"); README and POSTING.md corrected (restarts, the key, who can force a slot).
+- The neutrality test also scans `bin/`, `scripts/`, `.mjs` and `.html` for `overseer`, `coordinator_`, `coordinator-` and `ut-coordinator`. The launcher no longer names any: `CARL_PASS_ENV` (space- or comma-separated variable names, default empty) lists extra variables it passes through; credential-looking names never pass.
+
 ## 0.9.1
 
 - **Carl names no coordinator.** No server or tool name of any one coordinator is hardcoded any more. A trusted MCP server's tool runs without asking when its listing carried `readOnlyHint: true` (read from the live listing, and cached in `state/mcp-readonly.json`) or when you list it in the new `guard.readOnlyTools` (`["server/tool", ...]`); everything else asks as before. The browser relay's folders, descriptors, environment overrides, socket-name pattern and shell-command pattern come from the new `post.browser` config (empty by default: Carl closes nothing it was not told about), and `post.accounts.<key>.session.command` is now required. `ultraterm.overseerBin` is now `ultraterm.controlBin` (optional; decision buttons and account ordering need it), and files its helpers keep secret go in `ultraterm.secretFiles`. **Upgrading:** set these in `carl.json` (see `docs/POSTING.md`, "Keeping the browser relay out of the agent's reach"); the neutrality test now fails on any `overseer` or `coordinator_` literal in `src/`.

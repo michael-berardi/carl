@@ -202,7 +202,7 @@ slot at least 15 minutes away. The operator gets a message in the home chat when
 cannot be delivered the slot is removed. It cannot approve, answer a card, post at once, change or replace a slot, choose `late`,
 or run, resume, pause or remove a scheduled post (the `schedule` tool refuses all four for post jobs). A scheduled post
 fires at its slot; run before its slot without force, the job does nothing and changes no state (no attempt is used).
-Only the portal's operator route forces it. UltraTerm's Run button does not force, so it cannot fire a post early either.
+Only a holder of the API key (the portal's operator route, or any process that has `CARL_API_KEY`) can force it. UltraTerm's Run button does not force, so it cannot fire a post early either.
 
 ### Keeping the browser relay out of the agent's reach
 
@@ -241,8 +241,8 @@ and asserts a configured relay socket is refused (macOS only; skipped elsewhere)
 ## Scheduling
 
 X's own scheduling is a paid feature, so Carl keeps the schedule. `carl post schedule` adds a one-time job to
-`schedules.json` and marks the draft `Scheduled`. The job survives restarts. If the gateway is running it picks the job
-up within about 20 seconds; if not, the job waits for the next start.
+`schedules.json` and marks the draft `Scheduled`. The job survives restarts, but a restart voids every approval, so a job that fires after one fails closed
+(approve the draft again and re-schedule). If the gateway is running it picks the job up within about 20 seconds.
 
 **Missed slots.** If Carl was down or busy and the slot is more than the window late (3 hours by default), the post is
 skipped: the draft stays `Scheduled`, a `schedule_note` records why, and the message Carl delivers says plainly that it

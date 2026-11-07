@@ -88,7 +88,13 @@ export function secretFiles(cfg: CarlConfig): string[] {
  * one through a trusted MCP server, is not affected.
  */
 export function secretDirs(cfg: CarlConfig): string[] {
-  return browserControlDirs(cfg.post.accounts, cfg.post.browser);
+  return browserControlDirs(cfg.post.browser);
+}
+
+/** Do the relay denies apply? Whenever any post.browser setting is present (accounts or not), or posting accounts exist. */
+export function browserConfigured(cfg: CarlConfig): boolean {
+  const b = cfg.post.browser;
+  return !!(Object.keys(cfg.post.accounts).length || b.controlDirs.length || b.descriptors.length || b.descriptorEnv.length || b.runtimeEnv.length || b.socketPattern || b.commandPattern);
 }
 
 /** Unix sockets of programs that run commands outside the sandbox on request (tmux servers, Docker). */
@@ -278,8 +284,8 @@ export function buildProfile(cfg: CarlConfig, input: ProfileInput = { controlPla
     ...[`#"^(/private)?/(var/run|tmp)/com\\.apple\\.launchd\\.[^/]+/Listeners$"`, `#"/ssh-[^/]+/agent\\.[0-9]+$"`, `#"(ssh|agent)[^/]*\\.sock$"`]
       .map((re) => `(deny network-outbound (remote unix-socket (path-regex ${re})))`),
     // The browser relay's control socket (post.browser.socketPattern), wherever its runtime lives: refused by name, so a descriptor
-    // that points somewhere new, or a copy of the socket, gains nothing. Only while posting is configured.
-    ...(Object.keys(cfg.post.accounts).length ? [
+    // that points somewhere new, or a copy of the socket, gains nothing. Whenever post.browser is set, with or without accounts.
+    ...(browserConfigured(cfg) ? [
       ...(cfg.post.browser.socketPattern ? [`(deny network-outbound (remote unix-socket (path-regex #"${cfg.post.browser.socketPattern.replace(/"/g, '\\"')}")))`] : []),
       `(deny network-outbound (remote ip "localhost:9222"))`] : []),
     ...["/.gnupg", "/.ssh", "/Library/Group Containers", "/Library/Containers", "/.orbstack", "/.local/share/containers", "/.lima", "/.rd"]

@@ -4,13 +4,17 @@
 #
 # Carl starts from a clean environment: only terminal, locale and UltraTerm identity variables pass, never anything
 # that looks like a credential (on macOS any program of this user can read another's startup environment).
+# CARL_PASS_ENV (set by the operator, default empty) lists more variable names to pass through, separated by spaces or commas
+# (for example the names a post.browser.descriptorEnv/runtimeEnv entry reads). A name that looks like a credential still never passes.
 # Its own secrets come from files (~/.hermes/.env), which its sandbox keeps from the agent.
 keep=(HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" SHELL=/bin/zsh CARL_HOME="$HOME/.carl"
   PATH="$HOME/.ultraterm/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+passenv=(${(s: :)${CARL_PASS_ENV//,/ }})
 for line in "${(@f)$(/usr/bin/env)}"; do
   name=${line%%=*}
   [[ $name =~ '(KEY|TOKEN|SECRET|PASSW|AUTH|CRED|COOKIE|SESSION)' ]] && continue
-  [[ $name =~ '^(ULTRATERM_|UT_UPDATE_|LC_|OVERSEER_)' || $name =~ '^(TMUX|TMUX_PANE|TMUX_BIN|TERM|TERM_PROGRAM|TERMINFO_DIRS|COLORTERM|LANG|TZ|TMPDIR)$' ]] && keep+=("$line")
+  if (( ${passenv[(Ie)$name]} )); then keep+=("$line"); continue; fi
+  [[ $name =~ '^(ULTRATERM_|UT_UPDATE_|LC_)' || $name =~ '^(TMUX|TMUX_PANE|TMUX_BIN|TERM|TERM_PROGRAM|TERMINFO_DIRS|COLORTERM|LANG|TZ|TMPDIR)$' ]] && keep+=("$line")
 done
 cd "$HOME"
 echo "Carl gateway starting $(/bin/date)"
