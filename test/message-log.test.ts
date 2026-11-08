@@ -19,14 +19,14 @@ function scratch(t: any): string {
 test("a delivered sendMessage becomes one gateway row with the text the chat shows", async (t) => {
   const dir = scratch(t);
   const log = new MessageLog(dir);
-  log.record("sendMessage", { chat_id: 1001234567, text: "Hello &lt;Mike&gt; &amp; <b>friends</b>", parse_mode: "HTML" }, { message_id: 4901, chat: { id: 1001234567 } });
+  log.record("sendMessage", { chat_id: 333333333, text: "Hello &lt;Alex&gt; &amp; <b>friends</b>", parse_mode: "HTML" }, { message_id: 4901, chat: { id: 333333333 } });
   const row = JSON.parse(readFileSync(join(dir, "hermes.jsonl"), "utf8").trim());
   assert.equal(statSync(join(dir, "hermes.jsonl")).mode & 0o777, 0o600, "the log is owner-only");
   assert.deepEqual(
     { v: row.v, writer: row.writer, gateway: row.gateway, method: row.method, chatId: row.chatId, messageId: row.messageId, status: row.status, ok: row.ok },
-    { v: 1, writer: "hermes", gateway: "carl", method: "sendMessage", chatId: "1001234567", messageId: 4901, status: "delivered", ok: true },
+    { v: 1, writer: "hermes", gateway: "carl", method: "sendMessage", chatId: "333333333", messageId: 4901, status: "delivered", ok: true },
   );
-  assert.equal(row.text, "Hello <Mike> & friends", "HTML turned back into plain text");
+  assert.equal(row.text, "Hello <Alex> & friends", "HTML turned back into plain text");
   assert.equal(row.buttons, null);
   assert.equal(row.job, null);
 });

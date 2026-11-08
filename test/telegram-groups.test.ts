@@ -9,10 +9,10 @@ import { Log } from "../src/log.ts";
 import { FakeTelegram } from "./fake-telegram.ts";
 
 const OP = 4242;
-const GROUP = -1001234567;
-const Dana = 1001234567;
+const GROUP = -1001234567890;
+const MEMBER = 111111111;
 const STRANGER = 99;
-const NICO = 1001234567;
+const OTHER_MEMBER = 222222222;
 
 function setup(groups: unknown) {
   const home = mkdtempSync(join(tmpdir(), "carl-groups-"));
@@ -21,7 +21,7 @@ function setup(groups: unknown) {
 }
 
 test("telegram.groups is validated with errors that name the cause", () => {
-  for (const [bad, why] of [[{ chat: 5, members: {} }, /negative/], [{ chat: -1, members: { Dana: "Dana" } }, /numeric/], [{ chat: -1, members: { "1": " " } }, /name/]] as const) {
+  for (const [bad, why] of [[{ chat: 5, members: {} }, /negative/], [{ chat: -1, members: { dana: "Dana" } }, /numeric/], [{ chat: -1, members: { "1": " " } }, /name/]] as const) {
     const home = setup([bad]);
     assert.throws(() => loadConfig(home), (e: Error) => e instanceof ConfigError && why.test(e.message));
     rmSync(home, { recursive: true, force: true });
@@ -33,7 +33,7 @@ test("in a listed group Carl answers listed members only when addressed, names t
   await tg.start();
   const home = mkdtempSync(join(tmpdir(), "carl-groups-"));
   mkdirSync(join(home, "state"), { recursive: true });
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: false, groups: [{ chat: GROUP, members: { [String(Dana)]: "Dana (attorney)", [String(NICO)]: "Nico" } }] }, api: { enabled: false } }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: false, groups: [{ chat: GROUP, members: { [String(MEMBER)]: "Dana (reviewer)", [String(OTHER_MEMBER)]: "Lee" } }] }, api: { enabled: false } }));
   const asked: { text: string; member?: string }[] = [];
   const brain: any = {
     ask: async (_k: string, i: any) => { asked.push({ text: i.text, member: i.member }); return { ok: true, text: "noted", aborted: false, toolCalls: 0 }; },
@@ -43,21 +43,21 @@ test("in a listed group Carl answers listed members only when addressed, names t
   await channel.start();
   t.after(async () => { await channel.stop(); await tg.stop(); rmSync(home, { recursive: true, force: true }); });
 
-  tg.groupMessage(GROUP, Dana, "just chatting with the team");              // not addressed: ignored
-  tg.groupMessage(GROUP, NICO, "plain message from Nico");                   // not addressed: ignored
+  tg.groupMessage(GROUP, MEMBER, "just chatting with the team");              // not addressed: ignored
+  tg.groupMessage(GROUP, OTHER_MEMBER, "plain message from Lee");                   // not addressed: ignored
   tg.groupMessage(GROUP, STRANGER, "@carl_test_bot hello", { firstName: "X" });   // not a member: ignored
-  tg.groupMessage(GROUP, Dana, "@carl_test_bot the fee is USD 185", { firstName: "Dana" }); // addressed: answered
-  tg.groupMessage(-1, Dana, "@carl_test_bot other group");                         // member, but not in this group: ignored
-  tg.groupMessage(GROUP, Dana, "/model claude", { firstName: "Dana" });       // operator command: refused
-  tg.groupMessage(GROUP, OP, "@carl_test_bot status please", { firstName: "Mike" }); // operator in the group: answered
-  tg.groupMessage(GROUP, Dana, "2) notary first", { firstName: "Dana", replyTo: { message_id: 1, date: 0, chat: { id: GROUP, type: "group" }, from: { id: 1, is_bot: true }, text: "Questions for Dana" } }); // reply to the bot: answered
+  tg.groupMessage(GROUP, MEMBER, "@carl_test_bot the fee is USD 185", { firstName: "Dana" }); // addressed: answered
+  tg.groupMessage(-1, MEMBER, "@carl_test_bot other group");                         // member, but not in this group: ignored
+  tg.groupMessage(GROUP, MEMBER, "/model claude", { firstName: "Dana" });       // operator command: refused
+  tg.groupMessage(GROUP, OP, "@carl_test_bot status please", { firstName: "Alex" }); // operator in the group: answered
+  tg.groupMessage(GROUP, MEMBER, "2) stamp first", { firstName: "Dana", replyTo: { message_id: 1, date: 0, chat: { id: GROUP, type: "group" }, from: { id: 1, is_bot: true }, text: "Questions for Dana" } }); // reply to the bot: answered
   await tg.waitFor(() => asked.length >= 3 && tg.texts(GROUP).some((x) => /Only the operator/.test(x)), 10_000, "group answers");
   await new Promise((r) => setTimeout(r, 400));
 
   assert.equal(asked.length, 3, `only addressed member/operator messages reach the brain: ${JSON.stringify(asked)}`);
-  assert.match(asked[0].text, /^\[from Dana \(attorney\) \(Dana\)\]/);
+  assert.match(asked[0].text, /^\[from Dana \(reviewer\) \(Dana\)\]/);
   assert.match(asked[0].text, /the fee is USD 185/);
-  assert.equal(asked[0].member, "Dana (attorney)", "a member's words are marked, so they never approve operator-only tools");
+  assert.equal(asked[0].member, "Dana (reviewer)", "a member's words are marked, so they never approve operator-only tools");
   assert.match(asked[1].text, /^\[from the operator/);
   assert.equal(asked[1].member, undefined);
   assert.match(asked[2].text, /\[replying to: "Questions for Dana"\]/, "a reply to the bot counts as addressed and carries its context");
@@ -69,17 +69,17 @@ test("while an ask waits on a member, their plain messages in that chat reach Ca
   await tg.start();
   const home = mkdtempSync(join(tmpdir(), "carl-groups-"));
   mkdirSync(join(home, "state"), { recursive: true });
-  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: false, groups: [{ chat: GROUP, members: { [String(Dana)]: "Dana (attorney)", [String(NICO)]: "Nico" } }] }, api: { enabled: false } }));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: false, groups: [{ chat: GROUP, members: { [String(MEMBER)]: "Dana (reviewer)", [String(OTHER_MEMBER)]: "Lee" } }] }, api: { enabled: false } }));
   const asked: string[] = [];
   const brain: any = { ask: async (_k: string, i: any) => { asked.push(i.text); return { ok: true, text: "ok", aborted: false, toolCalls: 0 }; }, whenRegistered: async () => {}, status: () => ({}), routerState: new Map() };
   const channel = new TelegramChannel(loadConfig(home), "123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz", brain, new Log(undefined));
   channel.expecting = (chat, member) => chat === GROUP && member.startsWith("Dana");
   await channel.start();
   t.after(async () => { await channel.stop(); await tg.stop(); rmSync(home, { recursive: true, force: true }); });
-  tg.groupMessage(GROUP, NICO, "unrelated chatter");
-  tg.groupMessage(GROUP, Dana, "1 yes 2 notary 3 approved", { firstName: "Dana" });
+  tg.groupMessage(GROUP, OTHER_MEMBER, "unrelated chatter");
+  tg.groupMessage(GROUP, MEMBER, "1 yes 2 stamp 3 approved", { firstName: "Dana" });
   await tg.waitFor(() => asked.length >= 1, 10_000, "Dana's plain answer");
   await new Promise((r) => setTimeout(r, 400));
   assert.equal(asked.length, 1);
-  assert.match(asked[0], /1 yes 2 notary 3 approved/);
+  assert.match(asked[0], /1 yes 2 stamp 3 approved/);
 });

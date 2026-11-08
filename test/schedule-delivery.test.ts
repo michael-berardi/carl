@@ -9,7 +9,7 @@ const log = { info() {}, warn() {}, error() {}, debug() {} } as any;
 
 test("silence markers are recognised (synthetic)", () => {
   for (const text of ["[SILENT]", " [silent] ", "NO_REPLY", "HEARTBEAT_OK.", "[ SILENT ]\n"]) assert.equal(isSilentReply(text), true, text);
-  for (const text of ["", "Nothing needs Mike, but J-1 is stuck.", "[SILENT] except J-2 failed"]) assert.equal(isSilentReply(text), false, text);
+  for (const text of ["", "Nothing needs the operator, but J-1 is stuck.", "[SILENT] except J-2 failed"]) assert.equal(isSilentReply(text), false, text);
 });
 
 async function runOnce(reply: string, onlyIfOutput: boolean) {
