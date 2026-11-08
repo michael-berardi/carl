@@ -126,6 +126,7 @@ export interface CarlConfig {
   asks: boolean;
   /** The work module (src/work.ts): the operator's argv that queues a work request (JSON on stdin). Off when unset. */
   work?: { command: string[]; /** The operator states the queue script runs its jobs in a sandbox; Carl cannot check. Without it posting stays off while a work group exists. */ sandboxed?: boolean };
+  feedback?: { intervalMinutes: number; sources: { name: string; url: string; tokenEnv: string; project: string; chat?: string; instructions?: string }[] };
   /** The post primitive (src/post): where drafts live, the accounts they may post to, and the missed-slot window.
    *  Accounts exist only here: a draft names a key, never a login or profile. */
   post: PostConfig;
@@ -282,6 +283,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     hooks: hooksOf(raw.hooks),
     asks: raw.asks === undefined ? false : bool(raw.asks, "asks"),
     work: workOf(raw.work, home),
+    feedback: feedbackOf(raw.feedback),
     post: postOf(raw.post, home),
     guard: { hardline: pairs(raw.guard?.hardline, "guard.hardline"), dangerous: pairs(raw.guard?.dangerous, "guard.dangerous"), allowTools: pairs(raw.guard?.allowTools, "guard.allowTools"), operatorTools: pairs(raw.guard?.operatorTools, "guard.operatorTools"), readOnlyTools: strList(raw.guard?.readOnlyTools, "guard.readOnlyTools") },
     claude: {
@@ -290,6 +292,8 @@ export function loadConfig(home = carlHome()): CarlConfig {
       configDirs: strList(raw.claude?.configDirs, "claude.configDirs").map((p) => abs(p, home)),
     },
   };
+  if (cfg.feedback && !cfg.work) throw new ConfigError("feedback needs work.command");
+  if (cfg.feedback && !cfg.work?.sandboxed) throw new ConfigError("feedback needs work.sandboxed: true");
   for (const n of cfg.trustedMcp) if (!/^[A-Za-z0-9_-]{1,32}$/.test(n))
     throw new ConfigError(`trustedMcp: "${n}" must be 1-32 letters, digits, - or _ (longer names get shortened tool names the guard could not attribute)`);
   if ((cfg.home + "/").startsWith(cfg.workspace.replace(/\/+$/, "") + "/"))
@@ -386,6 +390,27 @@ function hooksOf(v: unknown): Record<string, { prompt: string; deliver: string; 
     out[name] = { prompt: h.prompt, deliver: typeof h.deliver === "string" ? h.deliver : "home", secretEnv: typeof h.secretEnv === "string" ? h.secretEnv : undefined };
   }
   return out;
+}
+
+function feedbackOf(v: unknown): CarlConfig["feedback"] {
+  if (v === undefined || v === null || v === false) return undefined;
+  const raw = v as any;
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.sources) || !raw.sources.length) throw new ConfigError("feedback.sources must be a non-empty array");
+  const names = new Set<string>();
+  const sources = raw.sources.map((s: any, i: number) => {
+    if (!s || typeof s !== "object" || typeof s.name !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(s.name) || names.has(s.name)) throw new ConfigError(`feedback.sources[${i}].name must be unique letters, digits, _ or -`);
+    names.add(s.name);
+    for (const key of ["url", "tokenEnv", "project"]) if (typeof s[key] !== "string" || !s[key].trim()) throw new ConfigError(`feedback.sources[${i}].${key} is required`);
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(s.project)) throw new ConfigError(`feedback.sources[${i}].project is invalid`);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(s.tokenEnv)) throw new ConfigError(`feedback.sources[${i}].tokenEnv is invalid`);
+    let url: URL; try { url = new URL(s.url); } catch { throw new ConfigError(`feedback.sources[${i}].url is invalid`); }
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) throw new ConfigError(`feedback.sources[${i}].url must be HTTP(S) without credentials, query or fragment`);
+    if (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) throw new ConfigError(`feedback.sources[${i}].url requires HTTPS`);
+    if (s.chat !== undefined && (typeof s.chat !== "string" || !s.chat.trim())) throw new ConfigError(`feedback.sources[${i}].chat must be a send target`);
+    if (s.instructions !== undefined && typeof s.instructions !== "string") throw new ConfigError(`feedback.sources[${i}].instructions must be a string`);
+    return { name: s.name, url: url.href.replace(/\/+$/, ""), tokenEnv: s.tokenEnv, project: s.project, ...(s.chat ? { chat: s.chat } : {}), ...(s.instructions !== undefined ? { instructions: s.instructions } : {}) };
+  });
+  return { intervalMinutes: int(raw.intervalMinutes, 15, "feedback.intervalMinutes", 1), sources };
 }
 
 function workOf(v: unknown, home: string): { command: string[]; sandboxed?: boolean } | undefined {
