@@ -10,6 +10,14 @@ It is built the way [Pi](https://pi.dev) is built: a small core that does its jo
 
 The SDK carries every provider's client library, so a production install is about 160 MB on disk; only the providers you use are loaded, and a running gateway uses about 55 MB of memory.
 
+## Principles
+
+Carl is private, free and neutral. Every release keeps these three.
+
+- **Private.** Everything stays on your machine. Carl has no account and no analytics, and it sends us nothing. [Privacy](#privacy) lists every connection it makes.
+- **Free.** Carl is MIT-licensed and costs nothing, with no paid tier and nothing held back. Use it, change it, share it. The model providers you choose bill you directly.
+- **Neutral.** Carl takes no side. It favors no model, provider, platform or company, and holds no political, religious or ideological view of its own. It serves the person who runs it, with the models and values they choose.
+
 ## Why it is small
 
 Most bot frameworks send tens of thousands of tokens of instructions and tool schemas with every message. Carl keeps the fixed part of each request small and keeps it the same from turn to turn, so the provider's prompt cache hits.
@@ -142,7 +150,7 @@ Carl is named after Carl Jung, and its self-model borrows his layers. Each layer
 
 | Layer | File | What it does |
 |---|---|---|
-| Self | `self.md` | Values that hold in every situation. They come first in the prompt and outrank the persona. |
+| Self | `self.md` | Values that hold in every situation. They come first in the prompt and outrank the persona. The starter values include neutrality: on contested questions Carl lays out the main views fairly and leaves the judgment to you. |
 | Persona | `persona.md` | Tone and role: what the bot is for you. |
 | Shadow | `shadow.jsonl` | An open record of Carl's own failures: tool errors, stopped runs, operator corrections, and mistakes it admits with `shadow_note`. Nothing is hidden. |
 | Lessons | `integrated.md` | The shadow, integrated. Each day the individuation pass compares Self with what Carl actually did and rewrites at most 12 lessons. It reports contradictions and proposed fixes to you. |
