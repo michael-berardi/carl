@@ -7,6 +7,7 @@ import { MIRROR_INSTRUCTION } from "../psyche.ts";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { FileOutput } from "../tools.ts";
 import { downloadCapped, MAX_FILE_BYTES, saveMedia } from "./attachment.ts";
+import { isAudio, type Ultravox, voiceNote } from "../ultravox.ts";
 
 export interface DiscordConfig {
   enabled: boolean;
@@ -38,7 +39,8 @@ export class DiscordChannel {
   private readonly brain: Brain;
   private readonly log: Log;
 
-  constructor(cfg: DiscordConfig, token: string, brain: Brain, log: Log, mediaDir: string) {
+  constructor(cfg: DiscordConfig, token: string, brain: Brain, log: Log, mediaDir: string, ultravox?: Ultravox) {
+    this.ultravox = ultravox;
     this.cfg = cfg;
     this.token = token;
     this.brain = brain;
@@ -46,6 +48,7 @@ export class DiscordChannel {
     this.mediaDir = mediaDir;
   }
   private readonly mediaDir: string;
+  private readonly ultravox?: Ultravox;
 
   async rest<T = any>(method: string, path: string, body?: unknown): Promise<T> {
     for (let attempt = 0; ; attempt++) {
@@ -155,7 +158,8 @@ export class DiscordChannel {
         if (typeof a.size === "number" && a.size > MAX_FILE_BYTES) throw new Error(`attachment exceeds ${MAX_FILE_BYTES} byte limit`);
         const data = await downloadCapped(a.url, MAX_FILE_BYTES);
         const path = saveMedia(this.mediaDir, a.filename ?? "file", data);
-        if (a.content_type?.startsWith("image/")) images.push({ type: "image", data: data.toString("base64"), mimeType: a.content_type });
+        if (this.ultravox && isAudio(a.content_type, a.filename)) notes.push(await voiceNote(this.ultravox, path, this.log));
+        else if (a.content_type?.startsWith("image/")) images.push({ type: "image", data: data.toString("base64"), mimeType: a.content_type });
         else notes.push(`[file received: ${path}]`);
       } catch (e) {
         notes.push(`[attachment could not be fetched: ${(e as Error).message}]`);

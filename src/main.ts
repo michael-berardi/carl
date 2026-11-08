@@ -323,6 +323,12 @@ async function doctor(): Promise<number> {
   for (const f of c.contextFiles) await check("context file", () => { if (!existsSync(f)) throw new Error(`${f} is missing`); return f; });
   for (const d of c.skills) await check("skills dir", () => { if (!existsSync(d)) throw new Error(`${d} is missing`); return d; });
   if (c.stt) await check("speech-to-text", () => { if (!existsSync(c.stt![0])) throw new Error(`${c.stt![0]} is missing`); return c.stt!.join(" "); });
+  if (c.ultravox) await check("ultravox", async () => {
+    const { Ultravox } = await import("./ultravox.ts");
+    const uv = new Ultravox(c, () => brain.shellSandbox);
+    const { control, version } = await uv.ready();
+    return `${control} ${version}, model ${uv.model()}`;
+  });
   await check("mcp", () => (existsSync(mcpFile(c)) ? `${mcpFile(c)} (servers via codemode)` : "no mcp.json (no MCP servers)"));
   await brain.shutdown(); // removes its state/run/<pid> folder
   return failed ? 1 : 0;

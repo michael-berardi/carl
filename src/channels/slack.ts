@@ -8,6 +8,7 @@ import { MIRROR_INSTRUCTION } from "../psyche.ts";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { FileOutput } from "../tools.ts";
 import { downloadCapped, MAX_FILE_BYTES, saveMedia } from "./attachment.ts";
+import { isAudio, type Ultravox, voiceNote } from "../ultravox.ts";
 
 export interface SlackConfig {
   enabled: boolean;
@@ -55,7 +56,8 @@ export class SlackChannel {
   /** Channels an allowed user has talked in: the only places Carl may deliver to besides home. */
   readonly known = new Set<string>();
 
-  constructor(cfg: SlackConfig, appToken: string, botToken: string, brain: Brain, log: Log, mediaDir: string) {
+  constructor(cfg: SlackConfig, appToken: string, botToken: string, brain: Brain, log: Log, mediaDir: string, ultravox?: Ultravox) {
+    this.ultravox = ultravox;
     this.cfg = cfg;
     this.appToken = appToken;
     this.botToken = botToken;
@@ -64,6 +66,7 @@ export class SlackChannel {
     this.mediaDir = mediaDir;
   }
   private readonly mediaDir: string;
+  private readonly ultravox?: Ultravox;
 
   async api<T = any>(method: string, body: Record<string, unknown>, token = this.botToken): Promise<T> {
     for (let attempt = 0; ; attempt++) {
@@ -169,7 +172,8 @@ export class SlackChannel {
         if (host !== "files.slack.com" && host !== new URL(this.cfg.apiBase).hostname) throw new Error(`file URL host ${host} is not Slack's`);
         const data = await downloadCapped(file.url_private_download, MAX_FILE_BYTES, { headers: { authorization: `Bearer ${this.botToken}` } });
         const path = saveMedia(this.mediaDir, file.name ?? "file", data);
-        if (file.mimetype?.startsWith("image/")) images.push({ type: "image", data: data.toString("base64"), mimeType: file.mimetype });
+        if (this.ultravox && isAudio(file.mimetype, file.name)) notes.push(await voiceNote(this.ultravox, path, this.log));
+        else if (file.mimetype?.startsWith("image/")) images.push({ type: "image", data: data.toString("base64"), mimeType: file.mimetype });
         else notes.push(`[file received: ${path}]`);
       } catch (e) {
         notes.push(`[attachment could not be fetched: ${(e as Error).message}]`);
