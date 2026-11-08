@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.11.2
+
+- **Neutral, stated in full.** Carl's neutrality covers more than models: it takes no side in politics, religion or ideology, and none between nations or governments. The README now says so, the starter `self.md` adds nations and governments to the contested questions it stays neutral on (an existing `self.md` is yours and is not changed), and a test keeps the README wording complete.
+
 ## 0.11.1
 
 - **Claude keeps working after an update.** Restarting in place after `carl update` could leave the private link to `claude` pointing at itself, so every Claude call and scheduled job failed with "Claude Code is not installed" until the next full restart. Carl now links each program to its real file and keeps your original PATH across the restart.
