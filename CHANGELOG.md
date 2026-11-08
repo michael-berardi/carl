@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.11.3
+
+- **Neutral, said plainly.** The README states it in two words: Carl is ideologically neutral, and favors no model, provider, platform or company. The starter `self.md` is unchanged from 0.11.2.
+
 ## 0.11.2
 
 - **Neutral, stated in full.** Carl's neutrality covers more than models: it takes no side in politics, religion or ideology, and none between nations or governments. The README now says so, the starter `self.md` adds nations and governments to the contested questions it stays neutral on (an existing `self.md` is yours and is not changed), and a test keeps the README wording complete.
