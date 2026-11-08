@@ -11,7 +11,7 @@ import { loadConfig } from "../src/config.ts";
 import { Gateway } from "../src/gateway.ts";
 import { FakeTelegram } from "./fake-telegram.ts";
 
-const OP = 4242, GROUP = -1001234567, Dana = 1001234567;
+const OP = 4242, GROUP = -1001234567890, MEMBER = 111111111;
 const tg = new FakeTelegram();
 await tg.start();
 const root = mkdtempSync(join(tmpdir(), "carl-asks-e2e-"));
@@ -23,7 +23,7 @@ writeFileSync(join(home, "carl.json"), JSON.stringify({
   model: process.env.CARL_E2E_MODEL ?? "openai-codex/gpt-6.1-terra",
   agentDir: process.env.CARL_E2E_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
   thinking: "low", tools: ["read"], asks: true, api: { enabled: false },
-  telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: false, groups: [{ chat: GROUP, members: { [String(Dana)]: "Dana" } }] },
+  telegram: { allowFrom: [OP], homeChat: OP, apiBase: tg.base, stream: false, groups: [{ chat: GROUP, members: { [String(MEMBER)]: "Dana" } }] },
 }));
 const marker = join(root, "released");
 const done = join(root, "done.sh");
@@ -32,7 +32,7 @@ chmodSync(done, 0o755);
 const answersFile = join(root, "answers.md");
 writeFileSync(join(home, "asks", "pub.json"), JSON.stringify({
   id: "pub", chat: GROUP, askee: "Dana", title: "Before the new pages go live",
-  questions: [{ n: 1, text: "Is USD 185 still the B1/B2 visa fee?" }, { n: 2, text: "Is the CEMLA certificate apostilled directly, or notarized first?" }, { n: 3, text: "Approve the author page text?" }],
+  questions: [{ n: 1, text: "Is USD 185 still the listed fee?" }, { n: 2, text: "Is the certificate signed directly, or stamped first?" }, { n: 3, text: "Approve the about page text?" }],
   answersFile, onComplete: [done, "J-GATE"], status: "open", postedMessageId: 500,
 }));
 
@@ -41,12 +41,12 @@ await gw.start();
 const started = Date.now();
 try {
   // A plain message, neither a reply nor a mention: the open ask waiting on Dana is what lets it through.
-  tg.groupMessage(GROUP, Dana, "1) yes, 185 is right\n2) it needs a notary first, then Cancillería\n3) approved", { firstName: "Dana" });
+  tg.groupMessage(GROUP, MEMBER, "1) yes, 185 is right\n2) it needs a stamp first, then a signature\n3) approved", { firstName: "Dana" });
   await tg.waitFor(() => existsSync(marker), 240_000, "the ask to finish and run onComplete");
   assert.equal(readFileSync(marker, "utf8").trim(), "J-GATE");
   const md = readFileSync(answersFile, "utf8");
   assert.match(md, /185/);
-  assert.match(md, /notar/i);
+  assert.match(md, /stamp/i);
   assert.match(md, /approv/i);
   const ask = JSON.parse(readFileSync(join(home, "asks", "pub.json"), "utf8"));
   assert.equal(ask.status, "done");

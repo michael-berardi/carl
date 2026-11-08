@@ -14,7 +14,7 @@ function home(t: any) {
 
 function write(h: string, extra: Record<string, unknown> = {}) {
   mkdirSync(join(h, "asks"), { recursive: true });
-  const ask = { id: "pub", chat: -1001234567, askee: "Dana", title: "Before the pages go live", questions: [{ n: 1, text: "Fee?" }, { n: 2, text: "Notary first?" }], answersFile: join(h, "out", "answers.md"), status: "open", ...extra };
+  const ask = { id: "pub", chat: -1001234567890, askee: "Dana", title: "Before the pages go live", questions: [{ n: 1, text: "Fee?" }, { n: 2, text: "Stamp first?" }], answersFile: join(h, "out", "answers.md"), status: "open", ...extra };
   writeFileSync(join(h, "asks", "pub.json"), JSON.stringify(ask));
 }
 
@@ -37,13 +37,13 @@ test("answers are recorded, an incomplete ask cannot finish, and finishing saves
   write(h, { onComplete: [script, "J-1"] });
   const tools = askTools(new Asks(h));
   assert.match(await run(tools, "ask_open", {}), /Unanswered: 1, 2/);
-  assert.match(await run(tools, "ask_answer", { ask: "pub", question: 1, answer: "USD 185 plus the USD 250 integrity fee", answered_by: "Dana" }), /Unanswered: 2/);
+  assert.match(await run(tools, "ask_answer", { ask: "pub", question: 1, answer: "USD 185 plus the USD 250 service fee", answered_by: "Dana" }), /Unanswered: 2/);
   await assert.rejects(run(tools, "ask_finish", { ask: "pub" }), /questions 2 have no answer/);
-  await run(tools, "ask_answer", { ask: "pub", question: 2, answer: "Notary first", answered_by: "Dana" });
-  assert.match(await run(tools, "ask_finish", { ask: "pub", note: "Dana prefers the notary route" }), /waiting work was started/);
+  await run(tools, "ask_answer", { ask: "pub", question: 2, answer: "Stamp first", answered_by: "Dana" });
+  assert.match(await run(tools, "ask_finish", { ask: "pub", note: "Dana prefers the stamp route" }), /waiting work was started/);
   const md = readFileSync(join(h, "out", "answers.md"), "utf8");
-  assert.match(md, /USD 185 plus the USD 250 integrity fee/);
-  assert.match(md, /Dana prefers the notary route/);
+  assert.match(md, /USD 185 plus the USD 250 service fee/);
+  assert.match(md, /Dana prefers the stamp route/);
   assert.equal(statSync(join(h, "out", "answers.md")).mode & 0o777, 0o600);
   assert.equal(readFileSync(marker, "utf8"), "J-1", "onComplete runs as an argv, with its own arguments");
   assert.equal(JSON.parse(readFileSync(join(h, "asks", "pub.json"), "utf8")).status, "done");
@@ -71,19 +71,19 @@ test("bad asks and bad input are refused with their cause", async (t) => {
   assert.throws(() => asks.record("pub", 9, "a", "Dana"), /no question 9/);
   assert.throws(() => asks.record("pub", 1, " ", "Dana"), /answer is empty/);
   assert.equal(existsSync(join(h, "out")), false);
-  assert.match(Asks.message(asks.load("pub")), /1\. Fee\?\n2\. Notary first\?[\s\S]*Dana, reply to this message/);
+  assert.match(Asks.message(asks.load("pub")), /1\. Fee\?\n2\. Stamp first\?[\s\S]*Dana, reply to this message/);
 });
 
 test("waitingOn matches the askee to a member's configured name, only for open asks in that chat", (t) => {
   const h = home(t);
   write(h);
   const asks = new Asks(h);
-  assert.equal(asks.waitingOn(-1001234567, "Dana"), true);
-  assert.equal(asks.waitingOn(-1001234567, "Dana (attorney)"), true);
-  assert.equal(asks.waitingOn(-1001234567, "Nico"), false);
+  assert.equal(asks.waitingOn(-1001234567890, "Dana"), true);
+  assert.equal(asks.waitingOn(-1001234567890, "Dana (reviewer)"), true);
+  assert.equal(asks.waitingOn(-1001234567890, "Lee"), false);
   assert.equal(asks.waitingOn(-1, "Dana"), false);
   write(h, { status: "done" });
-  assert.equal(asks.waitingOn(-1001234567, "Dana"), false);
+  assert.equal(asks.waitingOn(-1001234567890, "Dana"), false);
 });
 
 test("every place that builds Carl's tool set adds the asks tools when the module is on", () => {

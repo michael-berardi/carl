@@ -34,8 +34,11 @@ test("source and README ship no default model or fallback choice", () => {
   assert.deepEqual(hits, []);
 });
 
-test("source and README name no person, client or project", () => {
-  const hits = shipped
+// Tests and fixtures are public too: a real chat id or a client's name copied into a fixture leaks as surely as source does.
+const PUBLIC = [...shipped, ...files(join(root, "test")).filter((f) => !f.endsWith("neutrality.test.ts")), ...files(join(root, "docs"))];
+
+test("source, docs, tests and README name no person, client or project", () => {
+  const hits = [...new Set(PUBLIC)]
     .flatMap((f) => readFileSync(f, "utf8").split("\n").map((line, i) => [f, i + 1, line] as const))
     .filter(([f, , line]) => PERSONAL.test(line) && !(f.endsWith("src/guard.ts") && line.includes('"/Users"')))
     .map(([f, n, line]) => `${f.slice(root.length)}:${n}: ${line.trim().slice(0, 120)}`);

@@ -1,5 +1,5 @@
 // A send that never left this machine is a plain failure (retried), not an "unknown delivery" held for the operator;
-// a held reply expires after 24 h instead of nagging forever. (Mike, 2026-11-02: stale held reply from Oct 28.)
+// a held reply expires after 24 h instead of nagging forever. (Regression: a stale held reply was resent days later.)
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";

@@ -12,7 +12,7 @@ import { FakeTelegram } from "./fake-telegram.ts";
 
 const OP = 4242;
 const TOKEN = "123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz";
-const ANSWER = "Hello <Mike>: the answer is **42** & that is all.";
+const ANSWER = "Hello <Alex>: the answer is **42** & that is all.";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Turn {
@@ -128,7 +128,7 @@ test("the delivered answer is recorded for `utp ultrabot audit` as one plain-tex
   assert.equal(row.status, "delivered");
   assert.equal(row.ok, true);
   assert.ok(row.ts && !Number.isNaN(Date.parse(row.ts)), "a timestamp the audit can order");
-  assert.ok(row.text.includes("42") && row.text.includes("Hello <Mike>"), "the text the chat shows");
+  assert.ok(row.text.includes("42") && row.text.includes("Hello <Alex>"), "the text the chat shows");
   assert.ok(!row.text.includes("<b>") && !row.text.includes("**"), "HTML and markdown turned back into plain text");
 });
 

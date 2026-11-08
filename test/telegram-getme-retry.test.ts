@@ -10,9 +10,9 @@ test("a transient getMe failure (502) is retried and startup continues", async (
   const me = await getMeWithRetry(async () => {
     calls++;
     if (calls < 3) throw new TelegramError("getMe", 502, "Bad Gateway");
-    return { id: 1, username: "acme" };
+    return { id: 1, username: "ExampleBot" };
   }, (attempt) => retries.push(attempt), [1, 1, 1], noSleep);
-  assert.deepEqual(me, { id: 1, username: "acme" });
+  assert.deepEqual(me, { id: 1, username: "ExampleBot" });
   assert.deepEqual(retries, [1, 2]);
 });
 
