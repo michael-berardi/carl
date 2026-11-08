@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { cleanEnv, readNoFollow, sandboxArgv } from "../sandbox.ts";
+import { type Ultravox, voiceNote } from "../ultravox.ts";
 import { type Brain, type RunResult, toolsRanAfter } from "../brain.ts";
 import type { CarlConfig } from "../config.ts";
 import type { Log } from "../log.ts";
@@ -95,7 +96,9 @@ export class TelegramChannel {
   private readonly cfg: CarlConfig;
   private readonly brain: Brain;
   private readonly log: Log;
-  constructor(cfg: CarlConfig, token: string, brain: Brain, log: Log) {
+  private readonly ultravox?: Ultravox;
+  constructor(cfg: CarlConfig, token: string, brain: Brain, log: Log, ultravox?: Ultravox) {
+    this.ultravox = ultravox;
     this.cfg = cfg;
     this.brain = brain;
     this.log = log;
@@ -339,9 +342,12 @@ export class TelegramChannel {
         const ext = m.voice ? "ogg" : (m.audio?.file_name?.split(".").pop() ?? "mp3");
         const path = this.mediaPath(m, `.${ext.replace(/[^\w]+/g, "")}`);
         await this.api.download(audio.file_id, path);
-        const transcript = await this.transcribe(path);
-        const missing = this.cfg.stt?.length ? `[voice note at ${path} could not be transcribed; see carl.log]` : `[voice note saved at ${path}; no speech-to-text is configured]`;
-        text = [transcript ? `[voice note] ${transcript}` : missing, text].filter(Boolean).join("\n\n");
+        if (this.ultravox) text = [await voiceNote(this.ultravox, path, this.log), text].filter(Boolean).join("\n\n");
+        else {
+          const transcript = await this.transcribe(path);
+          const missing = this.cfg.stt?.length ? `[voice note at ${path} could not be transcribed; see carl.log]` : `[voice note saved at ${path}; no speech-to-text is configured]`;
+          text = [transcript ? `[voice note] ${transcript}` : missing, text].filter(Boolean).join("\n\n");
+        }
       }
       if (m.document) {
         const name = (m.document.file_name ?? "file").replace(/[^\w.-]+/g, "_");

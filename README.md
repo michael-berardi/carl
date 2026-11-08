@@ -232,6 +232,8 @@ A scheduled slot survives a restart, but the restart voids the approval, so the 
 }
 ```
 
+**Voice notes with UltraVox (optional).** `"ultravox": {"enabled": true}` transcribes Telegram voice notes and audio files, and Slack and Discord audio attachments (`audio/*`, ogg, m4a, mp3, wav), locally with the UltraVox app (0.13 or newer); the agent sees `[voice note] <text>`. It is off unless you enable it. Options: `app` (the UltraVox.app folder, default `/Applications` then `~/Applications`), `model` (`"v2"` English or `"v3"` multilingual; default is UltraVox's own setting) and `dictionary` (a file of extra `Word = heard one, heard two` lines, applied after UltraVox's own custom dictionary). The control program runs inside the shell sandbox, one file at a time, with a 120 s limit. A failure is logged and the note says why (not installed, too old, no speech, timeout). `carl doctor` shows the program, its version and the model, and `carl setup` asks (default No) only when UltraVox is installed. `ultravox` and `stt` cannot both be set: Carl refuses that config and names both.
+
 MCP servers go in `~/.carl/mcp.json` (the same format as Claude Desktop). Give them `"exposure": "codemode"` so they stay behind the codemode tool.
 
 ## Commands

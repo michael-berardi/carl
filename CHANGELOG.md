@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.12.0
+
+- **Voice notes, transcribed locally with UltraVox (optional).** Set `"ultravox": {"enabled": true}` and Telegram voice notes and audio files, and Slack and Discord audio attachments, are transcribed on your Mac by the UltraVox app and reach the agent as `[voice note] <text>`. Off by default; nothing changes without it. UltraVox's own custom dictionary is applied (plus `ultravox.dictionary`, an optional extra word list), `ultravox.model` picks `v2` or `v3`, and `ultravox.app` points at an install in another folder. It runs inside the shell sandbox, one file at a time, with a 120 s limit; when it fails, the note names the cause. `carl doctor` reports the control program, version and model, and `carl setup` offers it (default No) only where UltraVox is installed. Setting both `ultravox` and `stt` is a config error. Needs UltraVox 0.13 or newer.
+
 ## 0.11.4
 
 - **Neutral, in one line.** The README now reads: Carl is a neutral tool, with no preferred model, harness or ideology. You give it its values.

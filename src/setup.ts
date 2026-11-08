@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { carlHome, loadConfig, secret } from "./config.ts";
 import { TelegramApi } from "./channels/telegram-api.ts";
+import { findControl } from "./ultravox.ts";
 import { configuredProviders, login, providerModels } from "./login.ts";
 
 type Options = {
@@ -14,6 +15,8 @@ type Options = {
   telegramBase?: string;
   slackBase?: string;
   discordBase?: string;
+  /** Where UltraVox is installed, or undefined (for tests; default looks in the usual folders). */
+  detectUltravox?: () => string | undefined;
 };
 
 /** Validate a Slack credential without exposing it in errors. */
@@ -151,6 +154,11 @@ export async function setup(opts: Options): Promise<number> {
         const model = await ask("Model name (empty to skip):");
         if (model) { raw.model = `${selected}/${model}`; save(); }
       }
+    }
+    // Only where UltraVox is installed, and only if nothing else already handles voice notes.
+    if (!cfg.ultravox && !cfg.stt && (opts.detectUltravox ?? (() => findControl()))()) {
+      const yes = await ask("Transcribe voice notes locally with UltraVox? [y/N]:");
+      if (/^y(es)?$/i.test(yes)) { raw.ultravox = { ...(raw.ultravox ?? {}), enabled: true }; save(); }
     }
     const result = await opts.doctor();
     cfg = loadConfig(home);

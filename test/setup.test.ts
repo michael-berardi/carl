@@ -29,7 +29,7 @@ test("setup captures and acknowledges a Telegram user and preserves existing set
     };
     const answers = ["", token, "", "", ""];
     const ask = async () => { assert.ok(answers.length, "unexpected prompt"); return answers.shift()!; };
-    assert.equal(await setup({ init, doctor: async () => 0, ask, telegramBase: fake.base }), 0);
+    assert.equal(await setup({ init, doctor: async () => 0, ask, telegramBase: fake.base, detectUltravox: () => undefined }), 0);
     const config = JSON.parse(readFileSync(join(home, "carl.json"), "utf8"));
     assert.deepEqual(config.telegram.allowFrom, [456]);
     assert.equal(config.telegram.homeChat, 456);
@@ -42,7 +42,7 @@ test("setup captures and acknowledges a Telegram user and preserves existing set
     assert.ok(fake.calls.some((call) => call.method === "getMe"));
     assert.ok(polls.some((poll) => poll.offset === 2 && poll.timeout === 0));
     const again = ["", ""];
-    assert.equal(await setup({ init, doctor: async () => 0, ask: async () => { assert.ok(again.length); return again.shift()!; }, telegramBase: fake.base }), 0);
+    assert.equal(await setup({ init, doctor: async () => 0, ask: async () => { assert.ok(again.length); return again.shift()!; }, telegramBase: fake.base, detectUltravox: () => undefined }), 0);
     assert.equal(readFileSync(join(home, ".env"), "utf8"), env);
     assert.deepEqual(JSON.parse(readFileSync(join(home, "carl.json"), "utf8")), config);
   } finally {

@@ -135,10 +135,12 @@ export class Gateway {
     this.claimPid();
     this.log.info("carl starting", { version: VERSION, commit: COMMIT, home: this.cfg.home, model: this.cfg.model, pid: process.pid });
     await this.brain.init();
+    // One transcriber for every channel, so only one transcription runs at a time.
+    const ultravox = this.cfg.ultravox ? new (await import("./ultravox.ts")).Ultravox(this.cfg, () => this.brain.shellSandbox) : undefined;
     if (this.cfg.telegram.enabled) {
       const token = secret(this.cfg.home, this.cfg.telegram.tokenEnv, this.cfg.envFiles);
       if (!token) throw new Error(`telegram is enabled but ${this.cfg.telegram.tokenEnv} is not set (environment or ${join(this.cfg.home, ".env")})`);
-      this.telegram = new TelegramChannel(this.cfg, token, this.brain, this.log);
+      this.telegram = new TelegramChannel(this.cfg, token, this.brain, this.log, ultravox);
       this.telegram.onStatus = () => this.writeStatus();
       if (this.asks) { const asks = this.asks; this.telegram.expecting = (chat, member) => asks.waitingOn(chat, member); }
       this.registerCommands(this.telegram);
@@ -158,13 +160,13 @@ export class Gateway {
       const app = secret(this.cfg.home, this.cfg.slack.appTokenEnv, this.cfg.envFiles);
       const bot = secret(this.cfg.home, this.cfg.slack.botTokenEnv, this.cfg.envFiles);
       if (!app || !bot) throw new Error(`slack is enabled but ${!app ? this.cfg.slack.appTokenEnv : this.cfg.slack.botTokenEnv} is not set`);
-      this.slack = new SlackChannel(this.cfg.slack, app, bot, this.brain, this.log, join(this.cfg.home, "media"));
+      this.slack = new SlackChannel(this.cfg.slack, app, bot, this.brain, this.log, join(this.cfg.home, "media"), ultravox);
     }
     if (this.cfg.discord.enabled) {
       const { DiscordChannel } = await import("./channels/discord.ts");
       const token = secret(this.cfg.home, this.cfg.discord.tokenEnv, this.cfg.envFiles);
       if (!token) throw new Error(`discord is enabled but ${this.cfg.discord.tokenEnv} is not set`);
-      this.discord = new DiscordChannel(this.cfg.discord, token, this.brain, this.log, join(this.cfg.home, "media"));
+      this.discord = new DiscordChannel(this.cfg.discord, token, this.brain, this.log, join(this.cfg.home, "media"), ultravox);
     }
     const baseApprover = this.brain.approver;
     this.brain.approver = (key) => async (command, reason) => {

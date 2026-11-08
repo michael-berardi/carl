@@ -110,6 +110,8 @@ export interface CarlConfig {
   api: ApiConfig;
   /** Speech-to-text command for voice notes: "{file}" is the audio path; the transcript is "{output}" when given, else stdout. */
   stt?: string[];
+  /** The UltraVox module (src/ultravox.ts): local voice-note transcription. Present only when "ultravox.enabled" is true. */
+  ultravox?: { app?: string; model?: "v2" | "v3"; dictionary?: string };
   /** Idle minutes after which a chat starts a fresh session on its next message (0 = never). */
   idleResetMinutes: number;
   /** UltraTerm compatibility (the UltraBot slot): home UltraTerm reads, and the control binary (ultraterm.controlBin) and secret files its helpers keep. */
@@ -266,6 +268,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
       keyEnv: str(api.keyEnv, "CARL_API_KEY", "api.keyEnv"),
     },
     stt: raw.stt === undefined ? undefined : strList(raw.stt, "stt").map((p, i) => (i === 0 ? expandHome(p) : p)),
+    ultravox: ultravoxOf(raw.ultravox, home),
     idleResetMinutes: int(raw.idleResetMinutes, 0, "idleResetMinutes", 0),
     ultraterm: raw.ultraterm
       ? { home: abs(str(raw.ultraterm.home, "~/.hermes", "ultraterm.home"), home), ...(raw.ultraterm.controlBin !== undefined ? { controlBin: abs(str(raw.ultraterm.controlBin, "", "ultraterm.controlBin"), home) } : {}), secretFiles: strList(raw.ultraterm.secretFiles, "ultraterm.secretFiles").map((p: string) => abs(p, home)) }
@@ -292,6 +295,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
       configDirs: strList(raw.claude?.configDirs, "claude.configDirs").map((p) => abs(p, home)),
     },
   };
+  if (cfg.ultravox && cfg.stt) throw new ConfigError("ultravox and stt are both set: remove one (ultravox.enabled false, or delete stt)");
   if (cfg.feedback && !cfg.work) throw new ConfigError("feedback needs work.command");
   if (cfg.feedback && !cfg.work?.sandboxed) throw new ConfigError("feedback needs work.sandboxed: true");
   for (const n of cfg.trustedMcp) if (!/^[A-Za-z0-9_-]{1,32}$/.test(n))
@@ -411,6 +415,19 @@ function feedbackOf(v: unknown): CarlConfig["feedback"] {
     return { name: s.name, url: url.href.replace(/\/+$/, ""), tokenEnv: s.tokenEnv, project: s.project, ...(s.chat ? { chat: s.chat } : {}), ...(s.instructions !== undefined ? { instructions: s.instructions } : {}) };
   });
   return { intervalMinutes: int(raw.intervalMinutes, 15, "feedback.intervalMinutes", 1), sources };
+}
+
+function ultravoxOf(v: unknown, home: string): CarlConfig["ultravox"] {
+  if (v === undefined || v === null || v === false) return undefined;
+  const raw = v as any;
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new ConfigError("ultravox must be an object like {\"enabled\": true}");
+  if (!bool(raw.enabled ?? false, "ultravox.enabled")) return undefined;
+  if (raw.model !== undefined && raw.model !== "v2" && raw.model !== "v3") throw new ConfigError('ultravox.model must be "v2" or "v3"');
+  return {
+    ...(raw.app !== undefined ? { app: abs(str(raw.app, "", "ultravox.app"), home) } : {}),
+    ...(raw.model !== undefined ? { model: raw.model } : {}),
+    ...(raw.dictionary !== undefined ? { dictionary: abs(str(raw.dictionary, "", "ultravox.dictionary"), home) } : {}),
+  };
 }
 
 function workOf(v: unknown, home: string): { command: string[]; sandboxed?: boolean } | undefined {
