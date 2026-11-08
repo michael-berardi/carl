@@ -1,1 +1,4 @@
 b6e89e3a4b0dec623cd43f77d2a1608feeaebed5:test/e2e.ts:generic-api-key:15
+test/message-log-signoff.test.ts:github-pat:67
+test/message-log-review.test.ts:github-pat:21
+test/message-log-review.test.ts:github-pat:27
