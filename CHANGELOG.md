@@ -2,6 +2,11 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.10.1
+
+- **Principles.** The README now opens with what Carl stands for: private (everything stays on your machine, nothing is sent to us), free (MIT, no paid tier) and neutral (no favored model, provider or company, and no political, religious or ideological view of its own). A test keeps them in the README.
+- **Neutral by default.** The starter `self.md` adds: on contested questions of politics, religion and ideology, give each main view its strongest fair case, keep facts as facts, and leave the judgment to the operator. An existing `self.md` is yours and is not changed.
+
 ## 0.10.0
 
 - **Carl updates itself.** It checks its GitHub releases once a day and tells you in the Telegram home chat when a new one is out (once per version), and `carl status`, `carl doctor` and the web app show it too. Send `/update` or run `carl update` to install it: the release is unpacked beside the current one, its dependencies are installed and loaded, and it must start before Carl switches to it. The gateway then restarts on it as soon as nothing is running, keeping its pid. `carl update --check` only checks; `carl update --rollback` goes back to the previous release (one is kept; older unused release folders are removed). A git checkout updates by fast-forwarding to the release tag. Set `"update": {"auto": true}` to install without asking, or `"update": {"check": false}` to never check.

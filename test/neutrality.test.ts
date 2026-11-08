@@ -62,3 +62,11 @@ test("shipped code names no coordinator: no overseer, coordinator_, coordinator-
     .map(([f, n, line]) => `${f.slice(root.length)}:${n}: ${line.trim().slice(0, 120)}`);
   assert.deepEqual(hits, []);
 });
+
+test("the principles ship: README states private, free and neutral, and the starter Self holds neutrality", async () => {
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  assert.match(readme, /## Principles\n\nCarl is private, free and neutral\./);
+  for (const p of ["Private", "Free", "Neutral"]) assert.match(readme, new RegExp(`- \\*\\*${p}\\.\\*\\*`));
+  const { DEFAULT_SELF } = await import("../src/psyche.ts");
+  assert.match(DEFAULT_SELF, /Stay neutral on contested questions/);
+});

@@ -1,6 +1,6 @@
 # Contributing
 
-Keep Carl small: a change should earn its lines. Keep it neutral: no built-in model, provider or fallback choice, and no names of the people, clients or projects it serves (`test/neutrality.test.ts` enforces this); those belong in each operator's own `carl.json`. New integrations belong in modules (`src/channels/`, `src/compat/`, SDK extensions), not in the core.
+Keep Carl private, free and neutral (see Principles in the README): no telemetry, no paid tier, no side taken. Keep it small: a change should earn its lines. Keep it neutral: no built-in model, provider or fallback choice, and no names of the people, clients or projects it serves (`test/neutrality.test.ts` enforces this); those belong in each operator's own `carl.json`. New integrations belong in modules (`src/channels/`, `src/compat/`, SDK extensions), not in the core.
 
 ```sh
 npm ci
