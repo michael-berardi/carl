@@ -275,3 +275,7 @@ npm run test:e2e        # real model, fake Telegram: 20 end-to-end steps
 ## License
 
 MIT. `vendor/ultracompress` is the UltraCompress adapter for the Pi SDK (MIT). See `vendor/ultracompress/UPSTREAM.txt`.
+
+---
+
+Part of [Pareto Cybernetics](https://paretocybernetics.com/projects/carl/): free, private, open-source tools for working with AI agents.
