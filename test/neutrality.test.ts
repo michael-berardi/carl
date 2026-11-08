@@ -2,9 +2,26 @@
 // names: those belong in the operator's own carl.json and files. This test keeps it that way.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+
+function privateTerms(path = process.env.OSS_PRIVATE_TERMS ?? join(homedir(), ".config/oss-audit/names.txt")): RegExp[] {
+  let content: string;
+  try { content = readFileSync(path, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  return content.split(/\r?\n/).map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((term) => {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`${/^\w/.test(term) ? "\\b" : ""}${escaped}${/\w$/.test(term) ? "\\b" : ""}`, "i");
+    });
+}
+const hasPrivateTerm = (text: string, terms: RegExp[]) => terms.some((term) => term.test(text));
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 function files(dir: string): string[] {
@@ -24,7 +41,7 @@ const shipped = [
 const MODEL_CHOICE = /\b(?:gpt-\d[\w.-]*|deepseek-v\d[\w.-]*|opencode-go\/|:exacto\b|mimo-v\d|glm-\d)/i;
 const ADAPTERS = ["src/providers/claude-code.ts", "src/compat/ultraterm.ts"];
 // Names of the people and organisations Carl was first built for: never in the shipped tool.
-const PERSONAL = /\b(?:acme|Mike|Berardi|Dana|Felix|acme|acme|Mouseia|libertydesign|acme)\b|\/Users\/[a-z]/;
+const PERSONAL = /\b(?:Mike|Berardi|Felix|Mouseia|libertydesign)\b|\/Users\/[a-z]/;
 
 test("source and README ship no default model or fallback choice", () => {
   const hits = shipped.filter((f) => !ADAPTERS.some((a) => f.endsWith(a)))
@@ -43,6 +60,28 @@ test("source, docs, tests and README name no person, client or project", () => {
     .filter(([f, , line]) => PERSONAL.test(line) && !(f.endsWith("src/guard.ts") && line.includes('"/Users"')))
     .map(([f, n, line]) => `${f.slice(root.length)}:${n}: ${line.trim().slice(0, 120)}`);
   assert.deepEqual(hits, []);
+  const terms = privateTerms();
+  const privateHits = [...new Set(PUBLIC)].filter((f) =>
+    readFileSync(f, "utf8").split("\n").some((line) =>
+      hasPrivateTerm(line, terms) && !(f.endsWith("src/guard.ts") && line.includes('"/Users"'))));
+  assert.deepEqual(privateHits.map((f) => f.slice(root.length)), []);
+});
+
+test("private term loader matches literal terms", () => {
+  const dir = mkdtempSync(join(tmpdir(), "neutrality-"));
+  try {
+    const path = join(dir, "terms.txt");
+    writeFileSync(path, "# comment\n\nzzqx-private.term\n");
+    const sample = join(dir, "sample.txt");
+    writeFileSync(sample, "a ZZQX-private.term here");
+    const terms = privateTerms(path);
+    assert.equal(hasPrivateTerm(readFileSync(sample, "utf8"), terms), true);
+    writeFileSync(sample, "a neutral line");
+    assert.equal(hasPrivateTerm(readFileSync(sample, "utf8"), terms), false);
+    assert.equal(hasPrivateTerm("zzqx-privateXterm", terms), false);
+    assert.equal(hasPrivateTerm("xzzqx-private.term", terms), false);
+    assert.deepEqual(privateTerms(join(dir, "missing")), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("the post primitive ships no account, handle or platform preference: accounts come from operator config only", () => {
