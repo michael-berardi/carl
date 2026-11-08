@@ -16,6 +16,7 @@ import { cleanEnv, sandboxArgv } from "./sandbox.ts";
 import { ApiServer, json } from "./server.ts";
 import { carlTools, type FileOutput, type Outbox } from "./tools.ts";
 import { GroupArchive, groupHistoryTool } from "./group-archive.ts";
+import { Feedback } from "./feedback.ts";
 import { WorkLedger, workTools } from "./work.ts";
 import { COMMIT, VERSION } from "./version.ts";
 import { PostService } from "./post/service.ts";
@@ -98,9 +99,10 @@ export class Gateway {
     this.psyche.seed();
     this.pidFile = join(cfg.home, "state", "gateway.pid");
     const outbox: Outbox = { send: (target, text) => this.send(target, text) };
+    const feedback = new Feedback(cfg, this.log, (target, text) => this.send(target, text));
     this.scheduler = new Scheduler(cfg.home, this.log, {
       prompt: (job) => this.runPromptJob(job),
-      builtin: { individuation: () => this.individuate(), post: (job, o) => this.post.runScheduled(job, o) },
+      builtin: { feedback: () => cfg.feedback ? feedback.tick() : Promise.resolve(""), individuation: () => this.individuate(), post: (job, o) => this.post.runScheduled(job, o) },
       // The message is the job's own words. Its internal schedule id/name is not shown to the operator
       // Failures already name the job.
       deliver: async (job, text) => {
@@ -202,6 +204,8 @@ export class Gateway {
     if (this.discord) await this.discord.start();
     if (this.cfg.learning === "carl") this.scheduler.ensureBuiltin("individuation", "Individuation", "40 5 * * *");
     else this.scheduler.pauseBuiltin("individuation", "learning"); // UltraTerm Dream and Nightmare own the learning loop
+    if (this.cfg.feedback) this.scheduler.ensureBuiltin("feedback", "Feedback intake", `every ${this.cfg.feedback.intervalMinutes}m`, "none");
+    else this.scheduler.pauseBuiltin("feedback", "config");
     this.scheduler.start();
     this.writeStatus();
     this.statusTimer = setInterval(() => this.writeStatus(), 15_000);

@@ -193,12 +193,15 @@ export class Scheduler {
     const existing = this.jobs.find((j) => j.builtin === builtin);
     if (existing) {
       // Turned back on after another system owned it; an operator's own pause stays.
-      if (existing.pausedBy === "learning") {
+      let changed = false;
+      if (builtin === "feedback" && existing.when !== when) { existing.when = when; existing.nextRunAt = this.next(existing, Date.now()); changed = true; }
+      if (existing.pausedBy === "learning" || (builtin === "feedback" && existing.pausedBy === "config")) {
         existing.enabled = true;
         delete existing.pausedBy;
         existing.nextRunAt = this.next(existing, Date.now()); // not a run missed while paused
-        this.save();
+        changed = true;
       }
+      if (changed) this.save();
       return;
     }
     this.add({ name, when, builtin, deliver });

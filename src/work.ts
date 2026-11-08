@@ -41,7 +41,7 @@ export class WorkLedger {
   }
 }
 
-export function runWorkCommand(argv: string[], req: WorkRequest, timeoutMs = 120_000): Promise<string> {
+export function runWorkCommand(argv: string[], req: WorkRequest | Record<string, unknown>, timeoutMs = 120_000): Promise<string> {
   const [cmd, ...args] = argv;
   if (!cmd || !existsSync(cmd)) return Promise.reject(new Error(`work.command ${cmd ?? "(empty)"} does not exist`));
   return new Promise((resolve, reject) => {
@@ -67,7 +67,7 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
       description:
         "Turn requests from this group into one queued work job that a worker carries out and reports back to this group. Use only when someone asks you to queue or start the work. Put the requests in `request` faithfully (who said what, with message ids); do not invent requirements. Returns the job id; then tell the group in two or three short lines what will be done.",
       parameters: Type.Object({
-        title: Type.String({ description: "short job title, e.g. 'acme Network: Sam's feedback of Oct 31'" }),
+        title: Type.String({ description: "short job title, e.g. 'Example: feedback'" }),
         request: Type.String({ description: "the requests to act on, faithful to what was said, grouped by site or topic" }),
         message_ids: Type.Array(Type.Number(), { description: "the group message ids these requests come from" }),
         requested_by: Type.String({ description: "who asked for the work to be queued" }),

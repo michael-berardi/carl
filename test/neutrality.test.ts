@@ -16,7 +16,7 @@ function files(dir: string): string[] {
 const shipped = [
   ...files(join(root, "src")), ...files(join(root, "bin")), ...files(join(root, "scripts")), join(root, "README.md"),
   // The post primitive: its docs, changelog and tests ship neutral too (accounts and handles live only in an operator's carl.json).
-  join(root, "docs", "POSTING.md"), join(root, "CHANGELOG.md"), join(root, "test", "post.test.ts"), join(root, "test", "post-fake.ts"),
+  join(root, "docs", "POSTING.md"), join(root, "CHANGELOG.md"), join(root, "test", "post.test.ts"), join(root, "test", "post-fake.ts"), join(root, "test", "feedback.test.ts"), join(root, "test", "group-work.test.ts"),
 ];
 
 // Concrete model ids that only an operator should choose. Adapter code for a provider (src/providers/claude-code.ts
@@ -24,7 +24,7 @@ const shipped = [
 const MODEL_CHOICE = /\b(?:gpt-\d[\w.-]*|deepseek-v\d[\w.-]*|opencode-go\/|:exacto\b|mimo-v\d|glm-\d)/i;
 const ADAPTERS = ["src/providers/claude-code.ts", "src/compat/ultraterm.ts"];
 // Names of the people and organisations Carl was first built for: never in the shipped tool.
-const PERSONAL = /\b(?:Mike|Berardi|Dana|Felix|acme|acme|Mouseia|libertydesign|acme)\b|\/Users\/[a-z]/;
+const PERSONAL = /\b(?:acme|Mike|Berardi|Dana|Felix|acme|acme|Mouseia|libertydesign|acme)\b|\/Users\/[a-z]/;
 
 test("source and README ship no default model or fallback choice", () => {
   const hits = shipped.filter((f) => !ADAPTERS.some((a) => f.endsWith(a)))

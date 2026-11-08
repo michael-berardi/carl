@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.11.0
+
+- **Feedback intake.** Optional feed polling requires `work.command` and `work.sandboxed: true` (the operator must ensure sandboxing). The command receives email and context; queue commands should deduplicate on feedbackId + source. Successfully queued items are acknowledged.
+
 ## 0.10.1
 
 - **Principles.** The README now opens with what Carl stands for: private (everything stays on your machine, nothing is sent to us), free (MIT, no paid tier) and neutral (no favored model, provider or company, and no political, religious or ideological view of its own). A test keeps them in the README.
