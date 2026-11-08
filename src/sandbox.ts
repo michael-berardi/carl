@@ -150,30 +150,45 @@ export const CREDENTIAL_NAME = /(API_KEY|_KEY|_TOKEN|_SECRET|PASSWORD|PASSWD|CRE
 
 /** The PATH the operator's shell had: the agent's commands keep it, while Carl's own children use a trusted one. */
 let agentPath: string | undefined;
+/** Carefully kept across an in-place restart (`carl update` re-executes with Carl's environment, whose PATH is the trusted one). */
+const OPERATOR_PATH_ENV = "CARL_OPERATOR_PATH";
 
 /**
  * Give Carl's unsandboxed children (Claude Code, UltraTerm helpers, UltraCompress) a PATH made only of folders the
  * agent cannot write: a private bin folder of links to programs resolved once now, UltraTerm's helper folder and the
  * system folders. Returns the resolved programs so their link chains can be pinned.
+ *
+ * Every link points at the program's real file, resolved before the folder is rebuilt: a program found through the
+ * folder itself (a restart that inherited the trusted PATH) would otherwise be linked to itself and vanish. The
+ * operator's PATH is kept in CARL_OPERATOR_PATH so a restart in place starts from it, never from the trusted one.
  */
 export function adoptTrustedPath(binDir: string, programs: Record<string, string | undefined>, extraDirs: string[] = []): Record<string, string> {
-  agentPath ??= process.env.PATH ?? "";
+  // Recomputed on every call: CARL_OPERATOR_PATH (set below) keeps a later call from reading the trusted PATH.
+  agentPath = operatorPathFrom(process.env, binDir);
+  const found: Record<string, string> = {}, target: Record<string, string> = {};
+  for (const [name, given] of Object.entries(programs)) {
+    const candidates = given ? [given] : agentPath.split(delimiter).filter(Boolean).map((d) => join(d, name));
+    for (const candidate of candidates) {
+      try { target[name] = realpathSync(candidate); found[name] = candidate; break; } catch { /* missing or a broken link: try the next */ }
+    }
+  }
   rmSync(binDir, { recursive: true, force: true });
   mkdirSync(binDir, { recursive: true, mode: 0o700 });
-  const found: Record<string, string> = {};
-  for (const [name, given] of Object.entries(programs)) {
-    const path = given ?? agentPath.split(delimiter).filter(Boolean).map((d) => join(d, name)).find((c) => existsSync(c));
-    if (!path) continue;
-    found[name] = path;
-    symlinkSync(path, join(binDir, name));
-  }
+  for (const [name, path] of Object.entries(target)) symlinkSync(path, join(binDir, name));
+  process.env[OPERATOR_PATH_ENV] = agentPath;
   process.env.PATH = [binDir, ...extraDirs, "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(delimiter);
   return found;
 }
 
+/** The operator's PATH: the one a restart in place carried over, else this process's, without Carl's own bin folder. */
+export function operatorPathFrom(env: NodeJS.ProcessEnv, binDir: string): string {
+  const path = env[OPERATOR_PATH_ENV] || env.PATH || "";
+  return path.split(delimiter).filter((d) => d && d !== binDir).join(delimiter);
+}
+
 /** The operator's PATH (Carl's own PATH once adoptTrustedPath ran is the trusted one). */
 export function operatorPath(): string {
-  return agentPath ?? process.env.PATH ?? "";
+  return agentPath ?? process.env[OPERATOR_PATH_ENV] ?? process.env.PATH ?? "";
 }
 
 /** Folders of the operator's PATH (where a planted `node` would win at Carl's next start). */

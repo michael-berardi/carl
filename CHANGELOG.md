@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.11.1
+
+- **Claude keeps working after an update.** Restarting in place after `carl update` could leave the private link to `claude` pointing at itself, so every Claude call and scheduled job failed with "Claude Code is not installed" until the next full restart. Carl now links each program to its real file and keeps your original PATH across the restart.
+
 ## 0.11.0
 
 - **Feedback intake.** Optional feed polling requires `work.command` and `work.sandboxed: true` (the operator must ensure sandboxing). The command receives email and context; queue commands should deduplicate on feedbackId + source. Successfully queued items are acknowledged.
