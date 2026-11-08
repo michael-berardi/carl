@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.11.4
+
+- **Neutral, in one line.** The README now reads: Carl is a neutral tool, with no preferred model, harness or ideology. You give it its values.
+
 ## 0.11.3
 
 - **Neutral, said plainly.** The README states it in two words: Carl is ideologically neutral, and favors no model, provider, platform or company. The starter `self.md` is unchanged from 0.11.2.

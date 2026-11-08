@@ -70,9 +70,9 @@ test("the principles ship: README states private, free and neutral, and the star
   const readme = readFileSync(join(root, "README.md"), "utf8");
   assert.match(readme, /## Principles\n\nCarl is private, free and neutral\./);
   for (const p of ["Private", "Free", "Neutral"]) assert.match(readme, new RegExp(`- \\*\\*${p}\\.\\*\\*`));
-  // Neutral means ideologically neutral, not only no favored model.
+  // Neutral: no preferred model, harness or ideology; the operator gives Carl its values.
   const neutral = /- \*\*Neutral\.\*\*([^\n]*)/.exec(readme)?.[1] ?? "";
-  for (const word of ["ideologically neutral", "model"]) assert.match(neutral, new RegExp(word), word);
+  for (const word of ["model", "harness", "ideology", "values"]) assert.match(neutral, new RegExp(word), word);
   const { DEFAULT_SELF } = await import("../src/psyche.ts");
   assert.match(DEFAULT_SELF, /Stay neutral on contested questions/);
 });

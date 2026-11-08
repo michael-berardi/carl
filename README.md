@@ -16,7 +16,7 @@ Carl is private, free and neutral. Every release keeps these three.
 
 - **Private.** Everything stays on your machine. Carl has no account and no analytics, and it sends us nothing. [Privacy](#privacy) lists every connection it makes.
 - **Free.** Carl is MIT-licensed and costs nothing, with no paid tier and nothing held back. Use it, change it, share it. The model providers you choose bill you directly.
-- **Neutral.** Carl is ideologically neutral, and favors no model, provider, platform or company. It serves the person who runs it, with the models and values they choose.
+- **Neutral.** Carl is a neutral tool, with no preferred model, harness or ideology. You give it its values.
 
 ## Why it is small
 
