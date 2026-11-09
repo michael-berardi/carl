@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.12.2
+
+- **A restart never fails a running schedule.** Stopping or restarting the gateway used to kill a running command job and record `schedule failed ... exit null`, with a failure message delivered, even though the job was healthy. Now a running command job gets a short grace (2 s) to finish on its own, then SIGTERM, then SIGKILL; whatever is still running is recorded as `interrupted by restart (<signal>)`, which is not an error and delivers nothing. A job found interrupted at the next start (including one left `running` by a hard kill) runs once more right away if it began within the last 12 hours and was not itself a rerun; otherwise it waits for its next slot. The job's own lock files still decide whether it may start. Prompt and built-in jobs aborted by the shutdown are treated the same way. Scheduled posts keep their own retry rules (a click that started is never repeated). A command killed by a signal reports `killed by signal SIGTERM`, never `exit null`. No config change.
+
 ## 0.12.1
 
 - **Every model call follows the fallback chain.** One-off runs (the nightly individuation, conversation titles, any side call) used to call their model directly, so a usage-limit refusal failed the run even when chat turns fell back fine. They now behave like a turn: a usage limit, quota, credit or 5xx refusal before any output benches that model for its cooldown, logs `primary model unavailable; retrying the one-off run on the next model in the fallback chain`, and repeats on the next configured model. A model already benched is skipped up front. As for turns on a model picked by hand, a call whose model is not part of `model` + `fallbackModels` has no fallback and fails with the provider's own words, as does any call when no fallback is configured. No config change.

@@ -219,7 +219,7 @@ export class Gateway {
     if (this.stopping) return;
     this.stopping = true;
     this.log.info("carl stopping", { reason });
-    this.scheduler.stop();
+    await this.scheduler.stop(reason);
     await this.telegram?.stop();
     await this.slack?.stop();
     await this.discord?.stop();
