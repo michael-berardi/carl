@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.12.3
+
+- **A download, not just a clone.** Every release now carries `carl.tar.gz` (the 0.5 MB bundle), `install.sh` (macOS and Linux), `install.ps1` (Windows, through WSL) and `SHA256SUMS`. `curl -fsSL https://github.com/michael-berardi/carl/releases/latest/download/install.sh | sh` checks the checksum, uses your Node 22.19+ or fetches the official Node into `~/.carl/app/runtime`, installs the dependencies, proves the new copy starts, and links `carl` into `~/.local/bin`. The layout is the one `carl update` keeps, so updates and `carl update --rollback` work right after install. `scripts/build-release.sh` builds the assets; a test runs the installer against a fake release under `sh` and `dash`. Cloning still works.
+
 ## 0.12.2
 
 - **A restart never fails a running schedule.** Stopping or restarting the gateway used to kill a running command job and record `schedule failed ... exit null`, with a failure message delivered, even though the job was healthy. Now a running command job gets a short grace (2 s) to finish on its own, then SIGTERM, then SIGKILL; whatever is still running is recorded as `interrupted by restart (<signal>)`, which is not an error and delivers nothing. A job found interrupted at the next start (including one left `running` by a hard kill) runs once more right away if it began within the last 12 hours and was not itself a rerun; otherwise it waits for its next slot. The job's own lock files still decide whether it may start. Prompt and built-in jobs aborted by the shutdown are treated the same way. Scheduled posts keep their own retry rules (a click that started is never repeated). A command killed by a signal reports `killed by signal SIGTERM`, never `exit null`. No config change.
