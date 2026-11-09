@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.12.1
+
+- **Every model call follows the fallback chain.** One-off runs (the nightly individuation, conversation titles, any side call) used to call their model directly, so a usage-limit refusal failed the run even when chat turns fell back fine. They now behave like a turn: a usage limit, quota, credit or 5xx refusal before any output benches that model for its cooldown, logs `primary model unavailable; retrying the one-off run on the next model in the fallback chain`, and repeats on the next configured model. A model already benched is skipped up front. As for turns on a model picked by hand, a call whose model is not part of `model` + `fallbackModels` has no fallback and fails with the provider's own words, as does any call when no fallback is configured. No config change.
+
 ## 0.12.0
 
 - **Voice notes, transcribed locally with UltraVox (optional).** Set `"ultravox": {"enabled": true}` and Telegram voice notes and audio files, and Slack and Discord audio attachments, are transcribed on your Mac by the UltraVox app and reach the agent as `[voice note] <text>`. Off by default; nothing changes without it. UltraVox's own custom dictionary is applied (plus `ultravox.dictionary`, an optional extra word list), `ultravox.model` picks `v2` or `v3`, and `ultravox.app` points at an install in another folder. It runs inside the shell sandbox, one file at a time, with a 120 s limit; when it fails, the note names the cause. `carl doctor` reports the control program, version and model, and `carl setup` offers it (default No) only where UltraVox is installed. Setting both `ultravox` and `stt` is a config error. Needs UltraVox 0.13 or newer.
