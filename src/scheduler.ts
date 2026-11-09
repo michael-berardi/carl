@@ -44,7 +44,10 @@ export interface Job {
   noRetry?: boolean;
   createdAt: string;
   lastRunAt?: number;
-  lastStatus?: "ok" | "error" | "running";
+  /** "interrupted": a restart or stop cut the run short. It is not a failure; the job runs once more at the next start. */
+  lastStatus?: "ok" | "error" | "running" | "interrupted";
+  /** Set when the rerun of an interrupted run was scheduled; a second interruption waits for the next slot instead of looping. */
+  resumed?: boolean;
   lastError?: string;
   nextRunAt?: number;
 }
@@ -61,6 +64,13 @@ export class Scheduler {
   readonly children = new Set<number>();
   /** Agent and built-in runs are cut off after this long. */
   static readonly RUN_TIMEOUT_MS = 30 * 60_000;
+  /** An interrupted run is rerun at the next start only if it began within this long. */
+  static readonly RESUME_WINDOW_MS = 12 * 3_600_000;
+  /** On stop, running command jobs get this long to finish by themselves, then SIGTERM, then SIGKILL after TERM_WAIT_MS. */
+  static readonly STOP_GRACE_MS = 2_000;
+  static readonly TERM_WAIT_MS = 500;
+  private stopping = false;
+  private stopSignal = "restart";
   static readonly POST_ATTEMPTS = 5;
   static readonly POST_RETRY_MS = 60_000;
   /** Job ids that were in schedules.json when this instance last read or wrote it. A file without one of them means another process removed it; a file with an id not here means another process added it. */
@@ -100,14 +110,27 @@ export class Scheduler {
     }
     if (this.passive) return; // the CLI reads; it must not mark the gateway's running jobs interrupted or rewrite their timing
     for (const job of this.jobs) {
-      const interrupted = job.lastStatus === "running";
+      const wasRunning = job.lastStatus === "running";
+      // A scheduled post keeps its own retry rules (a click that started is never repeated); it waits for its retry slot.
+      const interrupted = wasRunning && !!job.post;
       if (interrupted) {
         job.lastStatus = "error";
         job.lastError = "interrupted by a restart";
       }
+      let rerun = false;
+      if (!job.post && (wasRunning || job.lastStatus === "interrupted")) {
+        // A restart (or a hard kill) is not the job's failure: it runs once more now if the run began recently and it was
+        // not already a rerun; otherwise it waits for its next slot. The job's own lock files decide whether it may start.
+        job.lastStatus = "interrupted";
+        job.lastError ||= "interrupted by restart";
+        rerun = job.enabled && !job.resumed && Date.now() - (job.lastRunAt ?? 0) < Scheduler.RESUME_WINDOW_MS;
+        job.resumed = rerun;
+        if (rerun) this.log.info("schedule interrupted by a restart: running it again", { id: job.id, name: job.name });
+      }
       try {
+        if (rerun) job.nextRunAt = Date.now();
         // An interrupted run waits for its next slot instead of firing again the moment Carl starts.
-        if (job.nextRunAt === undefined || interrupted) job.nextRunAt = this.next(job, Date.now());
+        else if (job.nextRunAt === undefined || interrupted || job.lastStatus === "interrupted") job.nextRunAt = this.next(job, Date.now());
       } catch (e) {
         job.enabled = false;
         job.lastError = (e as Error).message;
@@ -180,12 +203,35 @@ export class Scheduler {
     void this.tick();
   }
 
-  stop(): void {
+  /**
+   * Stop ticking and wind down running jobs without failing them. Command jobs get `graceMs` to finish by themselves,
+   * then SIGTERM, then SIGKILL. Any job still running afterwards is recorded as interrupted (saved now, because the
+   * process exits right after) and runs once more at the next start.
+   */
+  async stop(reason = "restart", graceMs = Scheduler.STOP_GRACE_MS): Promise<void> {
     if (this.timer) clearInterval(this.timer);
-    for (const pid of this.children) {
-      try { process.kill(-pid, "SIGKILL"); } catch {}
-    }
+    this.stopping = true;
+    this.stopSignal = reason;
+    const settle = async (ms: number) => {
+      for (const end = Date.now() + ms; this.children.size && Date.now() < end;) await new Promise((r) => setTimeout(r, 25));
+    };
+    await settle(graceMs);
+    for (const pid of this.children) { try { process.kill(-pid, "SIGTERM"); } catch {} }
+    await settle(Scheduler.TERM_WAIT_MS);
+    for (const pid of this.children) { try { process.kill(-pid, "SIGKILL"); } catch {} }
     this.children.clear();
+    let changed = false;
+    for (const job of this.jobs) {
+      if (!this.running.has(job.id) || job.post) continue;
+      this.markInterrupted(job);
+      changed = true;
+    }
+    if (changed) { try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); } }
+  }
+
+  private markInterrupted(job: Job): void {
+    job.lastStatus = "interrupted";
+    job.lastError = `interrupted by restart (${this.stopSignal})`;
   }
 
   /** Make sure a built-in job exists; the operator may edit its timing or pause it afterwards. */
@@ -330,12 +376,21 @@ export class Scheduler {
       }
       job.lastStatus = "ok";
       job.lastError = undefined;
+      job.resumed = undefined;
     } catch (e) {
-      job.lastStatus = "error";
-      job.lastError = (e as Error).message.slice(0, 500);
-      if (job.post && (e as { final?: boolean }).final) job.noRetry = true;
-      output = `Schedule "${job.name}" failed: ${job.lastError}`;
-      this.log.error("schedule failed", { id: job.id, error: job.lastError });
+      if (this.stopping && !job.post) {
+        // The gateway is shutting down: this run was cut short, it did not fail. No failure is delivered.
+        this.markInterrupted(job);
+        output = "";
+        this.log.info("schedule interrupted by a restart; it runs again at the next start", { id: job.id, name: job.name });
+      } else {
+        job.lastStatus = "error";
+        job.lastError = (e as Error).message.slice(0, 500);
+        job.resumed = undefined;
+        if (job.post && (e as { final?: boolean }).final) job.noRetry = true;
+        output = `Schedule "${job.name}" failed: ${job.lastError}`;
+        this.log.error("schedule failed", { id: job.id, error: job.lastError });
+      }
     } finally {
       this.running.delete(job.id);
       try {
@@ -343,7 +398,7 @@ export class Scheduler {
       } catch {
         job.nextRunAt = undefined;
       }
-      if (job.when.startsWith("once") && job.nextRunAt === undefined) job.enabled = false;
+      if (job.when.startsWith("once") && job.nextRunAt === undefined && job.lastStatus !== "interrupted") job.enabled = false;
       if (job.post && job.lastStatus === "error" && job.nextRunAt !== undefined) output += ` It will retry in ${Scheduler.POST_RETRY_MS / 60_000} min, resuming from the profile check; a part already live is not posted again.`;
       try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); }
     }
@@ -383,10 +438,10 @@ export function runCommand(command: string, timeoutMs: number, groups?: Set<numb
       reject(new Error(`command timed out after ${timeoutMs / 1000}s`));
     }, timeoutMs);
     child.on("error", (e) => { clearTimeout(timer); reject(e); });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
       if (code === 0) resolve(out.trim());
-      else reject(new Error(`exit ${code}: ${out.trim().slice(-400)}`));
+      else reject(new Error(`${code === null ? `killed by signal ${signal ?? "unknown"}` : `exit ${code}`}${out.trim() ? `: ${out.trim().slice(-400)}` : ""}`));
     });
   });
 }
