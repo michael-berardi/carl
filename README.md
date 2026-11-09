@@ -57,10 +57,26 @@ Your provider still sees what you send it, under its own terms. Choose a provide
 
 ## Install
 
+macOS and Linux:
+
+```sh
+curl -fsSL https://github.com/michael-berardi/carl/releases/latest/download/install.sh | sh
+carl setup
+```
+
+Windows (PowerShell; Carl runs inside WSL, which the script checks for):
+
+```powershell
+irm https://github.com/michael-berardi/carl/releases/latest/download/install.ps1 | iex
+```
+
+The download is a 0.5 MB bundle plus its dependencies (about 160 MB installed). The installer checks the bundle's SHA-256, uses the Node 22.19+ you already have or fetches the official Node into `~/.carl/app/runtime` (nothing global), and puts `carl` in `~/.local/bin`. It installs in the same layout `carl update` maintains, so updates and `carl update --rollback` work from the first day. The files (`carl.tar.gz`, `install.sh`, `install.ps1`, `SHA256SUMS`) are on each [release](https://github.com/michael-berardi/carl/releases/latest).
+
+From source instead (any system with Node 22.19+ and git):
+
 ```sh
 git clone https://github.com/michael-berardi/carl && cd carl
 npm ci --omit=dev && npm link      # puts `carl` on your PATH
-carl setup
 ```
 
 `carl setup` walks you through the first run:
