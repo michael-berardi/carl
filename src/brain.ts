@@ -924,9 +924,40 @@ export class Brain extends EventEmitter {
     if (!this.opts.shared) rmSync(this.stateDir, { recursive: true, force: true });
   }
 
-  /** One-off run in a throwaway in-memory session (individuation, titles). No tools unless given. */
+  /**
+   * One-off run in a throwaway in-memory session (individuation, titles). No tools unless given. It follows the same
+   * fallback chain as a turn: a refusal before any output (usage limit, quota, credits, 5xx) benches the model and
+   * the run repeats on the next link. Like a turn on an explicitly chosen model, a call whose model is not a link of
+   * the chain has no fallback and fails with the provider's own words.
+   */
   async oneShot(prompt: string, opts: { model?: string; system?: string; tools?: string[] } = {}): Promise<string> {
-    const model = this.model(opts.model ?? this.cfg.sideModel ?? this.cfg.model);
+    let ref = opts.model ?? this.cfg.sideModel ?? this.cfg.model;
+    this.model(ref); // fail fast, naming the model, when it is unknown
+    const chain = [this.cfg.model, ...this.fallbackRefs];
+    // A link already benched (or without a login) is skipped up front, as the router does for a turn.
+    if (this.routerReady && chain.includes(ref) && ((this.routerState.get(ref) ?? 0) > Date.now() || !this.usableModel(ref))) {
+      ref = this.nextFallback(ref) ?? ref;
+    }
+    for (let attempt = 0; ; attempt++) {
+      const run = await this.oneShotOn(ref, prompt, opts);
+      if (run.ok) return run.text;
+      const failed = { stopReason: "error" as const, errorMessage: run.error };
+      if (!this.routerReady || !chain.includes(ref) || !isExhaustion(failed)) throw new Error(run.error);
+      const until = Date.now() + cooldownMs(run.error);
+      this.routerState.set(ref, until);
+      const next = !run.wrote && attempt < this.fallbackRefs.length ? this.nextFallback(ref) : undefined;
+      if (!next) throw new Error(run.error);
+      const reason = run.error.slice(0, 200);
+      this.log.warn("primary model unavailable; retrying the one-off run on the next model in the fallback chain",
+        { from: ref, to: next, until: new Date(until).toISOString(), reason });
+      this.emit("fallback", { from: ref, to: next, reason, until });
+      ref = next;
+    }
+  }
+
+  /** One attempt of oneShot on one named model. `wrote` is true when it produced text or ran a tool before failing. */
+  private async oneShotOn(ref: string, prompt: string, opts: { system?: string; tools?: string[] }): Promise<{ ok: true; text: string } | { ok: false; error: string; wrote: boolean }> {
+    const model = this.model(ref);
     const loader = new DefaultResourceLoader({
       cwd: this.cfg.workspace,
       agentDir: this.piDir,
@@ -952,9 +983,13 @@ export class Brain extends EventEmitter {
     });
     try {
       await session.prompt(prompt, { expandPromptTemplates: false } as any);
-      const last = [...session.messages].reverse().find((m: any) => m.role === "assistant") as any;
-      if (last?.stopReason === "error") throw new Error(last.errorMessage ?? "model error");
-      return last ? assistantText(last) : "";
+      const messages = session.messages as any[];
+      const last = [...messages].reverse().find((m: any) => m.role === "assistant");
+      if (last?.stopReason === "error") {
+        const wrote = !!assistantText(last).trim() || messages.some((m) => m.role === "toolResult");
+        return { ok: false, error: last.errorMessage ?? "model error", wrote };
+      }
+      return { ok: true, text: last ? assistantText(last) : "" };
     } finally {
       await this.closeSession(session);
     }
