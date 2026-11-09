@@ -17,9 +17,9 @@ printf '%s\n' "$commit" > "$stage/COMMIT"
 # Deterministic: sorted names, fixed owner and times.
 ( cd "$stage" && find . -mindepth 1 | LC_ALL=C sort | sed 's|^\./||' > "$stage.list" )
 if tar --version 2>/dev/null | grep -qi gnu; then
-  tar -C "$stage" --owner=0 --group=0 --numeric-owner --mtime=@0 -czf "$OUT/carl.tar.gz" -T "$stage.list" --no-recursion
+  tar -C "$stage" --owner=0 --group=0 --numeric-owner --mtime=@0 --no-recursion -czf "$OUT/carl.tar.gz" -T "$stage.list"
 else
-  COPYFILE_DISABLE=1 tar -C "$stage" -czf "$OUT/carl.tar.gz" --no-recursion -T "$stage.list"
+  COPYFILE_DISABLE=1 tar -C "$stage" --uid 0 --gid 0 --uname root --gname root --no-xattrs --no-recursion -czf "$OUT/carl.tar.gz" -T "$stage.list"
 fi
 rm -f "$stage.list"
 cp scripts/install.sh scripts/install.ps1 "$OUT/"
