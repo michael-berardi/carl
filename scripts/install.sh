@@ -10,8 +10,10 @@ set -eu
 REPO="michael-berardi/carl"
 NODE_MIN_MAJOR=22; NODE_MIN_MINOR=19
 HOME_DIR="${CARL_HOME:-$HOME/.carl}"
+case "$HOME_DIR" in /*) ;; *) HOME_DIR="$(pwd)/$HOME_DIR" ;; esac
 APP="$HOME_DIR/app"
 BIN_DIR="${CARL_BIN_DIR:-$HOME/.local/bin}"
+case "$BIN_DIR" in /*) ;; *) BIN_DIR="$(pwd)/$BIN_DIR" ;; esac
 if [ -n "${CARL_RELEASE_BASE:-}" ]; then BASE="$CARL_RELEASE_BASE"
 elif [ -n "${CARL_VERSION:-}" ]; then BASE="https://github.com/$REPO/releases/download/v${CARL_VERSION#v}"
 else BASE="https://github.com/$REPO/releases/latest/download"; fi
@@ -28,8 +30,11 @@ if command -v sha256sum >/dev/null 2>&1; then sha256() { sha256sum "$1" | cut -d
 elif command -v shasum >/dev/null 2>&1; then sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
 else die "needs sha256sum or shasum"; fi
 
+main() {
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/carl-install.XXXXXX") || die "cannot create a temporary folder"
-trap 'rm -rf "$TMP"' EXIT INT TERM
+trap 'rm -rf "$TMP"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # expect <file> <name> <sums-file>: the file's SHA-256 must equal the line for <name> in the sums file.
 expect() {
@@ -62,6 +67,7 @@ NODE_BIN=""
 if command -v node >/dev/null 2>&1 && node_ok "$(command -v node)"; then
   NODE_BIN=$(command -v node)
 else
+  ls /lib/ld-musl-* >/dev/null 2>&1 && die "this system uses musl (Alpine): install Node 22.19+ with its package manager (apk add nodejs npm), then run this again"
   case "$(uname -s)" in Darwin) os=darwin ;; Linux) os=linux ;; *) die "unsupported system $(uname -s); on Windows use install.ps1" ;; esac
   case "$(uname -m)" in x86_64|amd64) arch=x64 ;; arm64|aarch64) arch=arm64 ;; *) die "unsupported CPU $(uname -m)" ;; esac
   say "Node 22.19 or newer not found; fetching the official Node 22 LTS for $os-$arch..."
@@ -94,8 +100,8 @@ if [ ! -d "$REL" ]; then
   PATH="$(dirname "$NODE_BIN"):$PATH"; export PATH
   NPM="$(dirname "$NODE_BIN")/npm"; [ -x "$NPM" ] || NPM=npm
   ( cd "$REL.tmp" && npm_config_update_notifier=false npm_config_fund=false npm_config_audit=false \
-      "$NPM" ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) || { rm -rf "$REL.tmp"; die "dependencies did not install; nothing was changed"; }
-  got=$("$REL.tmp/bin/carl" --version 2>&1) || { rm -rf "$REL.tmp"; die "the new copy does not start: $got"; }
+      "$NPM" ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error </dev/null ) || { rm -rf "$REL.tmp"; die "dependencies did not install; nothing was changed"; }
+  got=$("$REL.tmp/bin/carl" --version 2>&1 </dev/null) || { rm -rf "$REL.tmp"; die "the new copy does not start: $got"; }
   case "$got" in "$VERSION"*) ;; *) rm -rf "$REL.tmp"; die "the new copy reports '$got', not $VERSION; nothing was changed" ;; esac
   mv "$REL.tmp" "$REL"
 else
@@ -111,9 +117,21 @@ swap_link() { # swap_link <target> <link>
 swap_link "$REL" "$APP/current"
 # The one previous release stays for `carl update --rollback`.
 if [ -n "$OLD" ] && [ "$OLD" != "$REL" ]; then swap_link "$OLD" "$APP/current.previous"; fi
-for d in "$APP"/release-*; do # keep only what a link uses
-  [ -d "$d" ] || continue
-  [ "$d" = "$REL" ] || [ "$d" = "$OLD" ] || rm -rf "$d"
+# Remove only Carl release folders no link in $APP resolves to (another bot's link may use one).
+keep=""
+for l in "$APP"/*; do
+  [ -L "$l" ] && [ -d "$l" ] && keep="$keep
+$(cd "$l" && pwd -P)"
+done
+for d in "$APP"/release-*; do
+  [ -d "$d" ] && [ ! -L "$d" ] || continue
+  case "${d##*/}" in release-[0-9]*.[0-9]*.[0-9]*-????????????) ;; *) continue ;; esac
+  real=$(cd "$d" && pwd -P)
+  case "
+$keep
+" in *"
+$real
+"*) ;; *) rm -rf "$d" ;; esac
 done
 
 # `carl` on PATH: a wrapper, so the running copy always knows it came through <app>/current (self-update relies on it).
@@ -126,3 +144,6 @@ chmod 755 "$BIN_DIR/carl.tmp.$$"; mv -f "$BIN_DIR/carl.tmp.$$" "$BIN_DIR/carl"
 say "Carl $VERSION installed ($BIN_DIR/carl)."
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) say "Add $BIN_DIR to your PATH:  export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
 say "Next: carl setup"
+}
+
+main "$@"

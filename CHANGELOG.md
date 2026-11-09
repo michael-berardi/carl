@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.12.4
+
+- **Installer and update hardening.** `carl update` now works on a machine whose Node was fetched by the installer (npm finds its own Node) and on Linux systems without `/usr/bin/tar`. The installer no longer deletes a release another link uses or the rollback when you reinstall the same version, ignores a truncated download, stops on Ctrl-C, accepts a relative `CARL_HOME`, stops early on Alpine (musl) with what to install, and the Windows script handles user names with spaces and restores your environment. Release bundles build the same way on macOS and Linux.
+
 ## 0.12.3
 
 - **A download, not just a clone.** Every release now carries `carl.tar.gz` (the 0.5 MB bundle), `install.sh` (macOS and Linux), `install.ps1` (Windows, through WSL) and `SHA256SUMS`. `curl -fsSL https://github.com/michael-berardi/carl/releases/latest/download/install.sh | sh` checks the checksum, uses your Node 22.19+ or fetches the official Node into `~/.carl/app/runtime`, installs the dependencies, proves the new copy starts, and links `carl` into `~/.local/bin`. The layout is the one `carl update` keeps, so updates and `carl update --rollback` work right after install. `scripts/build-release.sh` builds the assets; a test runs the installer against a fake release under `sh` and `dash`. Cloning still works.

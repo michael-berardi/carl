@@ -55,6 +55,19 @@ test("installs a release in the layout carl update maintains, and a second relea
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("reinstalling the same version keeps the release and its rollback", () => {
+  const dir = mkdtempSync(join(tmpdir(), "carl-inst-"));
+  try {
+    const home = join(dir, "home"); const bin = join(dir, "bin"); mkdirSync(home);
+    const a = fakeRelease(dir, "1.0.0"); const b = fakeRelease(dir, "1.1.0");
+    for (const base of [a, b, b]) assert.equal(run(base, home, bin).status, 0);
+    const app = join(home, ".carl", "app");
+    assert.equal(readlinkSync(join(app, "current")), join(app, "release-1.1.0-0123456789ab"));
+    assert.equal(readlinkSync(join(app, "current.previous")), join(app, "release-1.0.0-0123456789ab"));
+    assert.ok(existsSync(join(app, "release-1.0.0-0123456789ab")));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a checksum mismatch installs nothing", () => {
   const dir = mkdtempSync(join(tmpdir(), "carl-inst-"));
   try {

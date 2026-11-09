@@ -80,7 +80,7 @@ export function detectInstall(root = ROOT, entry = process.env.CARL_ENTRY): Inst
 
 function run(cmd: string, args: string[], cwd: string, timeoutMs = 600_000, input?: Buffer): string {
   const r = spawnSync(cmd, args, { cwd, input, timeout: timeoutMs, maxBuffer: 64 << 20,
-    env: { ...process.env, npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" } });
+    env: { ...process.env, PATH: `${dirname(realpathSync(process.execPath))}:${process.env.PATH ?? "/usr/bin:/bin"}`, npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" } });
   if (r.error) throw new UpdateError(`${basename(cmd)} ${args[0]} failed: ${r.error.message}`);
   if (r.status !== 0) throw new UpdateError(`${basename(cmd)} ${args.join(" ").slice(0, 80)} failed (exit ${r.status}): ${String(r.stderr).trim().slice(-600)}`);
   return String(r.stdout);
@@ -135,7 +135,7 @@ export async function install(rel: Release, inst: Install, slug = repoSlug(inst.
   const incoming = join(inst.appDir, `.incoming-${rel.version}-${randomBytes(4).toString("hex")}`);
   mkdirSync(incoming, { mode: 0o700 });
   try {
-    run("/usr/bin/tar", ["-xzf", "-", "-C", incoming, "--strip-components=1"], incoming, 120_000, Buffer.from(await tar.arrayBuffer()));
+    run(["/usr/bin/tar", "/bin/tar"].find((t) => existsSync(t)) ?? "tar", ["-xzf", "-", "-C", incoming, "--strip-components=1"], incoming, 120_000, Buffer.from(await tar.arrayBuffer()));
     const version = JSON.parse(readFileSync(join(incoming, "package.json"), "utf8")).version;
     if (version !== rel.version) throw new UpdateError(`${rel.tag} contains version ${version}; nothing was switched`);
     // The release's own runtime link (a host that bundles Node puts one beside bin/) carries over.
