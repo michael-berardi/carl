@@ -10,6 +10,12 @@ It is built the way [Pi](https://pi.dev) is built: a small core that does its jo
 
 The SDK carries every provider's client library, so a production install is about 160 MB on disk; only the providers you use are loaded, and a running gateway uses about 55 MB of memory.
 
+## Download
+
+- **macOS and Linux:** [install.sh](https://github.com/michael-berardi/carl/releases/latest/download/install.sh) (checks the SHA-256 of the 0.3 MB bundle before it installs anything). One command: `curl -fsSL https://github.com/michael-berardi/carl/releases/latest/download/install.sh | sh`
+- **Windows (PowerShell, runs Carl in WSL):** [install.ps1](https://github.com/michael-berardi/carl/releases/latest/download/install.ps1). One command: `irm https://github.com/michael-berardi/carl/releases/latest/download/install.ps1 | iex`
+- All releases and checksums (`SHA256SUMS`): [latest release](https://github.com/michael-berardi/carl/releases/latest).
+
 ## Principles
 
 Carl is private, free and neutral. Every release keeps these three.
