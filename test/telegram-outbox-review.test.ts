@@ -205,3 +205,19 @@ test("sign-off: a resend that expires before the flush is reported as dropped, n
   assert.match(sent[0], /dropped/i);
   assert.doesNotMatch(sent[0], /Resent held reply/);
 });
+
+test("a reply answered by a fallback model carries no model or usage-limit footnote", async (t) => {
+  const brain = {
+    routerState: new Map([["a/primary", Date.now() + 3_600_000]]), whenRegistered: async () => {},
+    ask: async () => ({ ok: true, text: "final answer", aborted: false, toolCalls: 0, model: "b/fallback" }),
+  };
+  const { instance } = channel(t, { stream: false, brain });
+  (instance as any).cfg.model = "a/primary";
+  const out: string[] = [];
+  t.mock.method(instance.api, "sendChatAction", async () => true);
+  t.mock.method(instance.api, "sendMessage", async (_chat: number, text: string) => { out.push(text); return { message_id: out.length }; });
+  t.mock.method(instance.api, "editMessageText", async (_chat: number, _id: number, text: string) => { out.push(text); return true; });
+  await (instance as any).converseInner({ chat: { id: 1 }, message_id: 10 }, "test", { text: "ask" }, () => {});
+  assert.ok(out.some((x) => x.includes("final answer")), "the answer is delivered");
+  assert.ok(!out.some((x) => /answered:|usage limit|fallback/i.test(x)), `no routing footnote in chat: ${JSON.stringify(out)}`);
+});

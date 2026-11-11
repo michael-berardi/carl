@@ -2,6 +2,12 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.13.2
+
+- **Chat replies no longer say which model answered.** When the primary model was at its usage limit, a Telegram reply
+  ended with a note such as "(sonnet answered: terra is at its usage limit until 07:02 PM)". Group members don't need
+  that. The operator still sees fallbacks in the gateway log (the `fallback` event) and in the portal's `limits`.
+
 ## 0.13.1
 
 - **A provider content-filter refusal moves the turn to the next model instead of failing it.** A provider's input

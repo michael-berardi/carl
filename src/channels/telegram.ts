@@ -402,10 +402,7 @@ export class TelegramChannel {
     if (result.aborted) final = final ? `${final}\n\n_(stopped)_` : "Stopped.";
     else if (!result.ok) final = `${final ? final + "\n\n" : ""}Run failed: ${result.error}`;
     else if (!final) final = result.toolCalls ? "Done." : "(no reply)";
-    const benched = [...this.brain.routerState.entries()].find(([ref, until]) => ref === this.cfg.model && until > Date.now());
-    if (benched && result.ok && result.model !== this.cfg.model) {
-      final += `\n\n_(${result.model.split("/").pop()} answered: ${this.cfg.model.split("/").pop()} is at its usage limit until ${new Date(benched[1]).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})_`;
-    }
+    // Which model answered is operator telemetry (the gateway's `fallback` event and log, the portal's limits), never chat text.
     await this.deliverFinal(draft, chatId, threadId, final);
   }
 
