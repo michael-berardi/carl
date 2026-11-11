@@ -1,4 +1,5 @@
 // The gateway process: wires config, psyche, brain, channels, API and schedules; owns status and shutdown.
+import { refuseUnconfiguredChat } from "./send-target.ts";
 import { execFileSync } from "node:child_process";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -313,8 +314,8 @@ export class Gateway {
     if (route?.kind === "telegram") {
       if (!this.telegram) throw new Error("telegram is not enabled");
       const { chatId, threadId } = route;
-      if (!this.cfg.telegram.allowFrom.includes(chatId) && chatId !== this.cfg.telegram.homeChat && !this.cfg.telegram.groups.some((g) => g.chat === chatId))
-        throw new Error(`chat ${chatId} is not the home chat, an allowed user or a configured group`);
+      const refusal = refuseUnconfiguredChat(this.cfg, chatId);
+      if (refusal) throw new Error(refusal);
       return file ? this.sendTelegramFile(chatId, text, file, threadId) : this.sendTelegramText(chatId, text, threadId);
     }
     if (route?.kind === "slack") {
@@ -330,8 +331,8 @@ export class Gateway {
     if (!this.telegram) throw new Error("no messaging channel is enabled");
     const chatId = target === "home" ? this.cfg.telegram.homeChat : Number(target);
     if (!chatId || !Number.isSafeInteger(chatId)) throw new Error(target === "home" ? "telegram.homeChat is not configured" : `bad chat id "${target}"`);
-    if (!this.cfg.telegram.allowFrom.includes(chatId) && chatId !== this.cfg.telegram.homeChat && !this.cfg.telegram.groups.some((g) => g.chat === chatId))
-      throw new Error(`chat ${chatId} is not the home chat, an allowed user or a configured group`);
+    const refusal = refuseUnconfiguredChat(this.cfg, chatId);
+    if (refusal) throw new Error(refusal);
     return file ? this.sendTelegramFile(chatId, text, file) : this.sendTelegramText(chatId, text);
   }
 

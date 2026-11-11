@@ -80,6 +80,9 @@ export interface CarlConfig {
   /** Models used, in order, when the primary cannot answer: out of quota, out of credits, a 5xx outage or a
    *  route with no endpoints. Empty unless carl.json names them. */
   fallbackModels: string[];
+  /** The subset of `model` and `fallbackModels` that is pay-per-use (metered), not a subscription plan. Empty unless
+   *  carl.json marks one. Carl logs and emits a fallback to one of these as paid use, and `carl doctor` checks the chain has one. */
+  meteredFallbackModels: string[];
   /** Cheaper model for reflection, titles and schedule runs that ask for it. Defaults to `model`. */
   sideModel?: string;
   /** Working context ceiling in tokens: Carl compacts once a conversation passes it, whatever the model's window. */
@@ -217,6 +220,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     model: str(raw.model, "", "model"),
     thinking: (raw.thinking ?? "medium") as CarlConfig["thinking"],
     fallbackModels: strList(raw.fallbackModels, "fallbackModels"),
+    meteredFallbackModels: strList(raw.meteredFallbackModels, "meteredFallbackModels"),
     sideModel: raw.sideModel === undefined ? undefined : str(raw.sideModel, "", "sideModel"),
     contextBudget: int(raw.contextBudget, 96_000, "contextBudget", 8_000),
     keepRecentTokens: int(raw.keepRecentTokens, 16_000, "keepRecentTokens", 1_000),
@@ -308,6 +312,10 @@ export function loadConfig(home = carlHome()): CarlConfig {
   if (!THINKING.has(cfg.thinking)) throw new ConfigError(`thinking must be one of ${[...THINKING].join(", ")}`);
   if (cfg.model && !cfg.model.includes("/")) throw new ConfigError(`model "${cfg.model}" must be "provider/model"`);
   if (cfg.keepRecentTokens >= cfg.contextBudget) throw new ConfigError("keepRecentTokens must be below contextBudget");
+  const chain = [cfg.model, ...cfg.fallbackModels];
+  for (const ref of cfg.meteredFallbackModels) {
+    if (!chain.includes(ref)) throw new ConfigError(`meteredFallbackModels names "${ref}", which is not in "model" or "fallbackModels": list it there too, or remove it`);
+  }
   return cfg;
 }
 

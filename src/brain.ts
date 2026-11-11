@@ -121,6 +121,8 @@ export class Brain extends EventEmitter {
   /** Fallbacks that resolve in this runtime. One that does not (its provider is off or unregistered) is skipped with
    *  a named warning instead of blocking startup: a configured Claude link is skipped when claude.enabled is false. */
   private fallbackRefs: string[] = [];
+  /** Per benched model: when its pay-per-use fallback notice was last logged. One notice per bench window. */
+  private meteredNotice = new Map<string, number>();
   /** True once the carl/auto router is registered. */
   private routerReady = false;
   /** The model sessions select: the router when fallbacks are configured and resolvable, else the primary. */
@@ -370,11 +372,10 @@ export class Brain extends EventEmitter {
         fallbacks: () => this.fallbackRefs,
         resolve: (ref) => this.model(ref),
         usable: (ref) => this.usableModel(ref),
+        metered: (ref) => this.cfg.meteredFallbackModels.includes(ref),
         events: {
-          onFallback: (from, to, reason, until) => {
-            this.log.warn("primary model unavailable; using the next model in the fallback chain", { from, to, until: new Date(until).toISOString(), reason });
-            this.emit("fallback", { from, to, reason, until });
-          },
+          onFallback: (from, to, reason, until) =>
+            this.noteFallback(from, to, reason, until, "primary model unavailable; using the next model in the fallback chain"),
         },
       });
       this.routerState = router.exhaustedUntil;
@@ -709,9 +710,7 @@ export class Brain extends EventEmitter {
       const next = attempt < this.fallbackRefs.length ? this.nextFallback(failedRef) : undefined;
       if (!next) break;
       const reason = (failed.errorMessage ?? "").slice(0, 200);
-      this.log.warn("primary model unavailable; retrying the turn on the next model in the fallback chain",
-        { from: failedRef, to: next, until: new Date(until).toISOString(), reason });
-      this.emit("fallback", { from: failedRef, to: next, reason, until });
+      this.noteFallback(failedRef, next, reason, until, "primary model unavailable; retrying the turn on the next model in the fallback chain");
       attempt++;
     }
     unsubscribe();
@@ -925,6 +924,21 @@ export class Brain extends EventEmitter {
   }
 
   /**
+   * Logs and emits one fallback. A pay-per-use (metered) fallback is logged once per bench window of the model it
+   * replaces, so the operator sees the paid use without a line per turn; the `fallback` event carries `metered` each time.
+   */
+  private noteFallback(from: string, to: string, reason: string, until: number, message: string): void {
+    const metered = this.cfg.meteredFallbackModels.includes(to);
+    const data = { from, to, until: new Date(until).toISOString(), reason };
+    if (!metered) this.log.warn(message, data);
+    else if ((this.meteredNotice.get(from) ?? 0) <= Date.now()) {
+      this.meteredNotice.set(from, until);
+      this.log.warn(`pay-per-use fallback in use: ${from} is benched, so ${to} (metered, billed per use) answers until it recovers`, data);
+    }
+    this.emit("fallback", { from, to, reason, until, metered });
+  }
+
+  /**
    * One-off run in a throwaway in-memory session (individuation, titles). No tools unless given. It follows the same
    * fallback chain as a turn: a refusal before any output (usage limit, quota, credits, 5xx) benches the model and
    * the run repeats on the next link. Like a turn on an explicitly chosen model, a call whose model is not a link of
@@ -948,9 +962,7 @@ export class Brain extends EventEmitter {
       const next = !run.wrote && attempt < this.fallbackRefs.length ? this.nextFallback(ref) : undefined;
       if (!next) throw new Error(run.error);
       const reason = run.error.slice(0, 200);
-      this.log.warn("primary model unavailable; retrying the one-off run on the next model in the fallback chain",
-        { from: ref, to: next, until: new Date(until).toISOString(), reason });
-      this.emit("fallback", { from: ref, to: next, reason, until });
+      this.noteFallback(ref, next, reason, until, "primary model unavailable; retrying the one-off run on the next model in the fallback chain");
       ref = next;
     }
   }

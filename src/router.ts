@@ -51,11 +51,14 @@ export function cooldownMs(errorMessage: string, now = Date.now(), fallbackMs = 
 }
 
 export interface RouterEvents {
-  onFallback(from: string, to: string, reason: string, untilMs: number): void;
+  /** `metered` is true when the model taken on is pay-per-use (see carl.json meteredFallbackModels). */
+  onFallback(from: string, to: string, reason: string, untilMs: number, metered: boolean): void;
 }
 
 /** Route definition for ModelRuntime.registerVirtualModel. */
 export function createRouter(opts: { primary: string | (() => string); fallbacks: string[] | (() => string[]); resolve: (ref: string) => Model<Api>; events: RouterEvents;
+  /** Whether a model is pay-per-use. Absent means none is. */
+  metered?: (ref: string) => boolean;
   /** Whether a model can be called at all (its provider has a login). A model without one is skipped, never routed to:
    * 2026-10-29 the primary had no Codex login and every turn failed with "has no credentials" while Sonnet sat unused. */
   usable?: (ref: string) => boolean }) {
@@ -78,7 +81,7 @@ export function createRouter(opts: { primary: string | (() => string); fallbacks
         exhaustedUntil.set(failed, Date.now() + ms);
         const next = silent ? chain.find((r) => r !== failed && available(r)) : undefined;
         if (next) {
-          opts.events.onFallback(failed, next, (request.failed.message.errorMessage ?? "").slice(0, 200), Date.now() + ms);
+          opts.events.onFallback(failed, next, (request.failed.message.errorMessage ?? "").slice(0, 200), Date.now() + ms, opts.metered?.(next) ?? false);
           return { model: opts.resolve(next), thinkingLevel: request.thinkingLevel };
         }
         // The failure came after output: finish this turn on the model that started it (its caches and tool calls

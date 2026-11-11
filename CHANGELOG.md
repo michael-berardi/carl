@@ -2,6 +2,14 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.13.0
+
+- **Plan first, pay-per-use last.** A subscription plan stops answering when it is used up, so a chain of plans alone goes quiet. Mark a pay-per-use model in `carl.json` with `"meteredFallbackModels": ["<provider>/<model>"]` (each entry must also be in `model` or `fallbackModels`; a name that is not is a config error). A turn or one-off run that moves to a marked model logs one warning per bench window of the model it replaces, and the `fallback` event carries `metered: true`, so paid use is visible. `carl doctor` warns, without failing, when no model in the chain is marked, and labels each marked model's login `(pay-per-use)`. `carl init` prints the recommended order as step 3b and writes `meteredFallbackModels: []`. No config is required: a file without the key behaves as before.
+
+- **`carl send` cannot post to a chat this bot is not configured for.** It now applies the gateway's own check (home
+  chat, allowed users, configured groups) before reading the token, with a named refusal that points to the operator's
+  reporting route. A send to a group the bot is not in used to reach Telegram and fail with "chat not found".
+
 ## 0.12.4
 
 - **Installer and update hardening.** `carl update` now works on a machine whose Node was fetched by the installer (npm finds its own Node) and on Linux systems without `/usr/bin/tar`. The installer no longer deletes a release another link uses or the rollback when you reinstall the same version, ignores a truncated download, stops on Ctrl-C, accepts a relative `CARL_HOME`, stops early on Alpine (musl) with what to install, and the Windows script handles user names with spaces and restores your environment. Release bundles build the same way on macOS and Linux.

@@ -164,6 +164,18 @@ Carl is not affiliated with Anthropic. Use of Claude through your subscription i
 
 The work moves before any output was written. A failure after output, or after a tool ran, finishes the turn on the model that started it, so the partial answer or the tool call is never duplicated. The warning in the log and the `fallback` event name the provider's own words. A failed model stays benched: until the reset time the provider gave, 2 minutes after a 5xx outage, 10 minutes for a route with no endpoints, or 30 minutes when a quota refusal gave no hint. A bad login or an unknown error fails with its own message instead of quietly moving your work to another model.
 
+**Recommended: plan first, pay-per-use last.** A subscription plan answers until its quota runs out and then refuses until it resets, so a chain made only of plans goes quiet once they are all used up. End the chain with a pay-per-use model, sign in to it with `carl login <provider> --api-key`, and mark it in `meteredFallbackModels`:
+
+```json
+{
+  "model": "provider-a/plan-model",
+  "fallbackModels": ["provider-b/metered-model"],
+  "meteredFallbackModels": ["provider-b/metered-model"]
+}
+```
+
+The metered model takes a turn only after the plans above it are refused. Carl logs that once per bench window and marks the `fallback` event `metered: true`, so paid use is visible. `carl doctor` warns, without failing, when no model in the chain is marked.
+
 Carl uses exactly the `fallbackModels` you list, in order; without the key there are none. A fallback whose provider is unavailable (Claude Code when `claude.enabled` is false, a provider with no login) is skipped with a named warning rather than blocking startup. A model your provider's catalog does not list can be added in the agent folder's `models.json`.
 
 ## The psyche
