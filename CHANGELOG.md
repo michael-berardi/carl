@@ -2,6 +2,16 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.13.1
+
+- **A provider content-filter refusal moves the turn to the next model instead of failing it.** A provider's input
+  inspection can refuse ordinary engineering text before any output: an HTTP 400 whose error code names content
+  inspection or moderation (`data_inspection_failed`, `content_policy_violation`, `content_filter` and similar). The
+  router now treats that refusal as a fall-through cause, matched by the response shape only, never by provider name.
+  Before output the next model answers the same turn; the refusal is not a bench, so the model is not held out for
+  the next turn. After output the turn finishes on the model that started it, as for every other refusal. A bare 400
+  (bad request, context length) still fails with its own named cause.
+
 ## 0.13.0
 
 - **Plan first, pay-per-use last.** A subscription plan stops answering when it is used up, so a chain of plans alone goes quiet. Mark a pay-per-use model in `carl.json` with `"meteredFallbackModels": ["<provider>/<model>"]` (each entry must also be in `model` or `fallbackModels`; a name that is not is a config error). A turn or one-off run that moves to a marked model logs one warning per bench window of the model it replaces, and the `fallback` event carries `metered: true`, so paid use is visible. `carl doctor` warns, without failing, when no model in the chain is marked, and labels each marked model's login `(pay-per-use)`. `carl init` prints the recommended order as step 3b and writes `meteredFallbackModels: []`. No config is required: a file without the key behaves as before.

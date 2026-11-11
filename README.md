@@ -161,6 +161,7 @@ Carl is not affiliated with Anthropic. Use of Claude through your subscription i
 
 - out of quota or credits: a plan, usage or session limit, an HTTP 402 or 429 (OpenRouter's "insufficient credits" included);
 - a 5xx outage, or an OpenRouter route with no endpoints (404 "No endpoints available").
+- a provider's content-filter refusal: an HTTP 400 whose error code names content inspection or moderation (`data_inspection_failed`, `content_policy_violation`). It judges the input, not the model, so the next model answers and the model is not benched.
 
 The work moves before any output was written. A failure after output, or after a tool ran, finishes the turn on the model that started it, so the partial answer or the tool call is never duplicated. The warning in the log and the `fallback` event name the provider's own words. A failed model stays benched: until the reset time the provider gave, 2 minutes after a 5xx outage, 10 minutes for a route with no endpoints, or 30 minutes when a quota refusal gave no hint. A bad login or an unknown error fails with its own message instead of quietly moving your work to another model.
 
