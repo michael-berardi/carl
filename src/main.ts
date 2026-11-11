@@ -1,4 +1,5 @@
 // carl <command>: gateway | setup | update | init | status | doctor | ask | send | reflect | schedules
+import { refuseUnconfiguredChat } from "./send-target.ts";
 import "./privacy.ts"; // first: private defaults before any SDK module loads
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -165,6 +166,7 @@ function init(): number {
         name: "Carl",
         model: "",
         fallbackModels: [],
+        meteredFallbackModels: [],
         thinking: "medium",
         contextBudget: 96000,
         tools: ["read", "bash"],
@@ -186,6 +188,10 @@ Next:
   3. Choose your model: sign in with \`carl login <provider>\` (\`carl login\` lists providers; for Claude, install Claude
      Code and run \`claude auth login\`), then set "model": "provider/model" in ${file}, and optionally
      "fallbackModels" (tried in order when the model cannot answer).
+  3b. Recommended: plan first, pay-per-use last. A subscription plan stops answering when it is used up, so end the chain
+     with a pay-per-use model, list it in "meteredFallbackModels", and sign in with \`carl login <provider> --api-key\`.
+     For example: "fallbackModels": ["provider-a/plan-model", "provider-b/metered-model"],
+     "meteredFallbackModels": ["provider-b/metered-model"].
   4. Edit ${join(home, "psyche", "persona.md")} and self.md, then run \`carl doctor\` and \`carl gateway\`.`);
   return 0;
 }
@@ -247,13 +253,14 @@ async function doctor(): Promise<number> {
     return `${c.model} (window ${m.contextWindow.toLocaleString()} tokens; Carl compacts at ${Math.min(c.contextBudget, m.contextWindow).toLocaleString()})`;
   });
   for (const [i, ref] of [c.model, ...c.fallbackModels].entries()) {
+    const metered = c.meteredFallbackModels.includes(ref);
     const provider = ref.split("/")[0].trim();
     if (!provider) {
       if (i === 0) console.log('skip  login: set "model" first; then sign in with `carl login <provider>`');
       else console.log(`warn  login: fallbackModels[${i - 1}] has no provider`);
       continue;
     }
-    await check(`login ${provider}`, async () => {
+    await check(`login ${provider}${metered ? " (pay-per-use)" : ""}`, async () => {
       if (provider === "claude-code") {
         const dirs = c.claude.configDirs.length ? c.claude.configDirs : [undefined];
         const lines: string[] = [];
@@ -276,6 +283,9 @@ async function doctor(): Promise<number> {
       return `${provider} signed in`;
     }, i > 0);
   }
+  // A chain of plans alone stops answering when every plan is used up: say so, and how to add a paid last link.
+  if (c.model && !c.meteredFallbackModels.length)
+    console.log('warn  fallbacks: every model is a subscription plan; when all are used up Carl stops answering. Add a pay-per-use fallback last (`carl login <provider> --api-key`) and list it in "meteredFallbackModels".');
   if (c.telegram.enabled) {
     await check("telegram", async () => {
       const token = secret(c.home, c.telegram.tokenEnv, c.envFiles);
@@ -384,6 +394,9 @@ async function send(args: string[]): Promise<number> {
   if (!text.trim()) return out({ success: false, error: "no message text" }, 64);
   try {
     const cfg = loadConfig();
+    // Refused before any token is read or request is made: `carl send` is not a way around the gateway's chat checks.
+    const refusal = refuseUnconfiguredChat(cfg, Number(m[1]));
+    if (refusal) return out({ success: false, error: refusal }, 1);
     const token = secret(cfg.home, cfg.telegram.tokenEnv, cfg.envFiles);
     if (!token) throw new Error(`${cfg.telegram.tokenEnv} is not set`);
     const api = new TelegramApi(token, cfg.telegram.apiBase);
