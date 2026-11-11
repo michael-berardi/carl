@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cooldownMs, createRouter, isExhaustion, isOutage } from "../src/router.ts";
+import { cooldownMs, createRouter, isContentFilter, isExhaustion, isOutage } from "../src/router.ts";
 
 const err = (errorMessage: string) => ({ stopReason: "error" as const, errorMessage, content: [] });
 
@@ -106,4 +106,35 @@ test("router: a model with no login is skipped, not routed to", () => {
   // A broken check never blocks routing.
   const broken = createRouter({ primary: "a/p", fallbacks: ["b/f"], resolve: (x) => models[x], usable: () => { throw new Error("x"); }, events: { onFallback: () => {} } });
   assert.equal(broken.route({ reason: "user", thinkingLevel: "low" }).model.id, "p");
+});
+
+test("a provider content-filter refusal (HTTP 400 naming a content-inspection code) is a fall-through cause, never a bench", () => {
+  const refusal = '400: {"code":"data_inspection_failed","message":"Input text data may contain inappropriate content.","type":"data_inspection_failed"}';
+  assert.ok(isContentFilter(refusal));
+  assert.ok(isExhaustion(err(refusal)));
+  assert.ok(!isOutage(err(refusal)));
+  assert.equal(cooldownMs(refusal), 0);
+  for (const message of ["HTTP 400: messages must not be empty", "400 context length exceeded", "data_inspection_failed without a status"]) {
+    assert.ok(!isContentFilter(message), message);
+  }
+  assert.ok(!isExhaustion(err("HTTP 400: messages must not be empty")));
+});
+
+test("router: a content-filter refusal before output moves the turn to the next model and benches neither", () => {
+  const models: Record<string, any> = { "a/p": { provider: "a", id: "p" }, "b/f": { provider: "b", id: "f" } };
+  const fell: string[] = [];
+  const r = createRouter({ primary: "a/p", fallbacks: ["b/f"], resolve: (x) => models[x], events: { onFallback: (from, to) => fell.push(`${from}->${to}`) } });
+  const refusal = '400 {"error":{"code":"data_inspection_failed"}}';
+  assert.equal(r.route({ reason: "retry", thinkingLevel: "low", failed: { model: models["a/p"], message: err(refusal) } }).model.id, "f");
+  assert.deepEqual(fell, ["a/p->b/f"]);
+  assert.equal(r.route({ reason: "user", thinkingLevel: "low" }).model.id, "p", "the primary is not benched by an input refusal");
+});
+
+test("router: a content-filter refusal after output never switches models mid-turn", () => {
+  const models: Record<string, any> = { "a/p": { provider: "a", id: "p" }, "b/f": { provider: "b", id: "f" } };
+  const fell: string[] = [];
+  const r = createRouter({ primary: "a/p", fallbacks: ["b/f"], resolve: (x) => models[x], events: { onFallback: (from, to) => fell.push(`${from}->${to}`) } });
+  const partial = { ...err('400 {"code":"content_policy_violation"}'), content: [{ type: "text", text: "partial answer" }] };
+  assert.equal(r.route({ reason: "retry", thinkingLevel: "low", failed: { model: models["a/p"], message: partial } }).model.id, "p");
+  assert.deepEqual(fell, []);
 });

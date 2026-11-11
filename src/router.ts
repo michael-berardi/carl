@@ -3,7 +3,8 @@
 // route has no endpoints (OpenRouter's 404 "No endpoints available"), or a 5xx outage before any output. Anything
 // else (a bad login, a malformed request, an unknown error) fails with its own named cause instead of quietly
 // moving the work to another model. A model that failed stays benched for its reset hint, or a short cooldown when
-// it gave none.
+// it gave none. A provider's content-filter refusal (an HTTP 400 naming a content-inspection code) judges the input,
+// not the model: the next model answers that turn and the model is not benched.
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 
 const QUOTA = /\b(402|429)\b|rate.?limit|usage limit|session limit|weekly limit|limit reached|quota|insufficient_quota|insufficient credits|billing|credit balance|resets? (at|in)\b/i;
@@ -14,11 +15,20 @@ const NO_ENDPOINTS = /no endpoints? (?:available|found)|no available (?:endpoint
 // The signed-in account's plan cannot run this model at all (a lapsed paid login that fell back to a free plan, say). Like a
 // quota refusal it is the provider saying no before any output, so the next model in the chain answers instead of every run failing.
 const PLAN_REFUSED = /model is not supported when using \w+ with a [\w ]+account|not (?:available|supported) (?:on|for) (?:your|this) (?:plan|account)|requires? a (?:paid|pro|plus|team) (?:plan|subscription)/i;
+// A provider's input inspection refused the request before output: an HTTP 400 whose error code or type names content
+// inspection, moderation or safety filtering (data_inspection_failed, content_policy_violation, ...). Matched by that
+// shape only, never by provider name.
+const CONTENT_FILTER_CODE = /\b(?:data_inspection_failed|content_filter|content_policy_violation|content_moderation|moderation_blocked|safety_filter|safety_violation|responsible_ai_policy_violation)\b/i;
+
+/** True when the message is an HTTP 400 that names a content-inspection, moderation or safety-filter code or type. */
+export function isContentFilter(message: string | undefined): boolean {
+  return typeof message === "string" && /\b400\b/.test(message) && CONTENT_FILTER_CODE.test(message);
+}
 
 export function isExhaustion(message: Pick<AssistantMessage, "stopReason" | "errorMessage"> | undefined): boolean {
   if (!message || message.stopReason !== "error") return false;
   const text = message.errorMessage ?? "";
-  return QUOTA.test(text) || OUTAGE.test(text) || NO_ENDPOINTS.test(text) || PLAN_REFUSED.test(text);
+  return QUOTA.test(text) || OUTAGE.test(text) || NO_ENDPOINTS.test(text) || PLAN_REFUSED.test(text) || isContentFilter(text);
 }
 
 /** True when the failure is a provider outage or a route with no endpoints, not a quota refusal. */
@@ -33,6 +43,8 @@ export function isOutage(message: Pick<AssistantMessage, "stopReason" | "errorMe
  * 10 minutes for a route with no endpoints (the model or its provider set is unavailable), else the default.
  */
 export function cooldownMs(errorMessage: string, now = Date.now(), fallbackMs = 30 * 60_000): number {
+  // An input refusal says nothing about the model: the next turn may be served by it, so nothing is benched.
+  if (isContentFilter(errorMessage)) return 0;
   const rel = errorMessage.match(/resets? in (\d+)\s*(m|min|minutes?|h|hours?)/i);
   if (rel) return Number(rel[1]) * (rel[2][0].toLowerCase() === "h" ? 3_600_000 : 60_000);
   const abs = errorMessage.match(/resets? at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
