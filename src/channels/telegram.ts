@@ -74,6 +74,8 @@ export async function getMeWithRetry<T>(getMe: () => Promise<T>, onRetry: (attem
   }
 }
 
+const SHARED_FAILURE = "I could not answer that just now. Please send it again in a little while.";
+
 export class TelegramChannel {
   readonly api: TelegramApi;
   status: ChannelStatus = { state: "connecting", updatedAt: new Date().toISOString() };
@@ -389,7 +391,9 @@ export class TelegramChannel {
       result = await running;
     } catch (e) {
       clearInterval(typing);
-      await draft.finish(`Carl could not run that: ${(e as Error).message}`);
+      const cause = (e as Error).message;
+      await draft.finish(this.ownerChat(m) ? `Carl could not run that: ${cause}` : SHARED_FAILURE);
+      if (!this.ownerChat(m)) await this.tellOperator(m, cause);
       return;
     }
     clearInterval(typing);
@@ -400,10 +404,34 @@ export class TelegramChannel {
     }
     let final = result.text;
     if (result.aborted) final = final ? `${final}\n\n_(stopped)_` : "Stopped.";
-    else if (!result.ok) final = `${final ? final + "\n\n" : ""}Run failed: ${result.error}`;
+    else if (!result.ok) {
+      // A provider's error text (usage limits, account details) is for the operator; a shared chat only learns to retry.
+      final = `${final ? final + "\n\n" : ""}${this.ownerChat(m) ? `Run failed: ${result.error}` : SHARED_FAILURE}`;
+      if (!this.ownerChat(m)) await this.tellOperator(m, result.error);
+    }
     else if (!final) final = result.toolCalls ? "Done." : "(no reply)";
     // Which model answered is operator telemetry (the gateway's `fallback` event and log, the portal's limits), never chat text.
     await this.deliverFinal(draft, chatId, threadId, final);
+  }
+
+  /** The operator's own private chat: the only place a run's raw failure cause may be shown. */
+  private ownerChat(m: TgMessage): boolean {
+    return m.chat.type === "private" && this.allowed(m.from?.id);
+  }
+
+  /** Cause of a failed run in a shared chat goes to the home chat; never throws. */
+  private async tellOperator(m: TgMessage, cause: string | undefined): Promise<void> {
+    const chatId = m.chat.id;
+    this.log.error("run failed in a shared chat; cause sent to the operator, not the chat", { chatId, error: cause });
+    const home = this.cfg.telegram.homeChat;
+    if (home === undefined || home === chatId) return;
+    const title = (m.chat as { title?: string }).title || String(chatId);
+    const said = (m.text ?? m.caption ?? "").replace(/\s+/g, " ").trim().slice(0, 160);
+    try {
+      await this.api.sendMessage(home, `Run failed in ${title}: ${cause ?? "unknown cause"}\nMessage: ${said || "(no text)"}`);
+    } catch (e) {
+      this.log.warn("could not tell the operator about a failed run", { chatId, error: (e as Error).message });
+    }
   }
 
   // ---- Durable delivery: explicit refusals may retry; unknown outcomes are held for reconciliation. ----

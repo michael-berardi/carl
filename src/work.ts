@@ -5,7 +5,7 @@
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CarlConfig } from "./config.ts";
 import { readableScope } from "./group-archive.ts";
@@ -17,6 +17,21 @@ export interface WorkRequest {
   request: string;
   messageIds: number[];
   requestedBy: string;
+  /** Absolute paths of files Carl saved for these messages (attachments). */
+  files: string[];
+}
+
+/** Files Carl saved for the given messages: `<home>/media/<chat>-<id>-*`, regular files only, sorted by name. */
+export function filesForMessages(home: string, chat: number, ids: number[]): string[] {
+  const dir = join(home, "media");
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return []; }
+  const prefixes = ids.map((id) => `${chat}-${id}-`);
+  return names
+    .filter((n) => prefixes.some((p) => n.startsWith(p)))
+    .sort()
+    .map((n) => join(dir, n))
+    .filter((f) => { try { return lstatSync(f).isFile(); } catch { return false; } });
 }
 
 export class WorkLedger {
@@ -65,7 +80,7 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
       name: "work_queue",
       label: "Queue work",
       description:
-        "Turn requests from this group into one queued work job that a worker carries out and reports back to this group. Use only when someone asks you to queue or start the work. Put the requests in `request` faithfully (who said what, with message ids); do not invent requirements. Returns the job id; then tell the group in two or three short lines what will be done.",
+        "Turn requests from this group into one queued work job that a worker carries out and reports back to this group. Use only when someone asks you to queue or start the work. Files attached to the messages named in `message_ids` are passed along automatically, so include the id of every message that carried a file. Put the requests in `request` faithfully (who said what, with message ids); do not invent requirements. Returns the job id; then tell the group in two or three short lines what will be done.",
       parameters: Type.Object({
         title: Type.String({ description: "short job title, e.g. 'Example: feedback'" }),
         request: Type.String({ description: "the requests to act on, faithful to what was said, grouped by site or topic" }),
@@ -83,7 +98,7 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
         if (!group?.work) throw new Error(`group ${chat} has no work set up (telegram.groups[].work)`);
         if (!p.title.trim() || !p.request.trim()) throw new Error("title and request are required");
         const ids = p.message_ids.filter((n) => Number.isSafeInteger(n));
-        const req: WorkRequest = { chat, project: group.work.project, title: p.title.trim(), request: p.request.trim(), messageIds: ids, requestedBy: p.requested_by.trim() || "unknown" };
+        const req: WorkRequest = { chat, project: group.work.project, title: p.title.trim(), request: p.request.trim(), messageIds: ids, requestedBy: p.requested_by.trim() || "unknown", files: filesForMessages(cfg.home, chat, ids) };
         const out = await runWorkCommand(command, req);
         const job = out.match(/\bJ-\d+\b/)?.[0] ?? "";
         if (ids.length) ledger.markQueued(chat, ids, job || out.slice(0, 80));
