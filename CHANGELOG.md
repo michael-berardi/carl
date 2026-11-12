@@ -2,6 +2,17 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.14.0
+
+- **Queued work now carries the files people attached.** The JSON your work command receives has a new `files` list:
+  the absolute paths of the files Carl saved for the messages named in the request (empty when there are none). Before,
+  a photo or document sent with a request never reached the job. The agent is told to include the ids of messages
+  that carried a file.
+- **A failed run no longer shows its cause in a shared chat.** A provider's error text, such as a usage-limit notice,
+  was posted into groups and member chats. Those chats now get "I could not answer that just now" and a prompt to
+  resend. The cause goes to the gateway log and, as one message, to `telegram.homeChat` with the chat name and an
+  excerpt of the message that failed. Your own private chat still shows `Run failed: <cause>`.
+
 ## 0.13.2
 
 - **Chat replies no longer say which model answered.** When the primary model was at its usage limit, a Telegram reply

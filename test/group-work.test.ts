@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TelegramChannel } from "../src/channels/telegram.ts";
 import { loadConfig, ConfigError } from "../src/config.ts";
 import { GroupArchive, groupHistoryTool, readableScope } from "../src/group-archive.ts";
 import { Log } from "../src/log.ts";
-import { WorkLedger, workTools } from "../src/work.ts";
+import { WorkLedger, filesForMessages, workTools } from "../src/work.ts";
 import { FakeTelegram } from "./fake-telegram.ts";
 
 const OP = 4242, GROUP = -10001, OTHER = -10002, MEMBER = 10003, STRANGER = 77;
@@ -69,12 +69,19 @@ test("work_queue runs the operator's fixed command with the group and project fr
   const cfg = loadConfig(home);
   const [tool] = workTools(cfg);
   const groupDir = join(home, "sessions", `telegram_group_${GROUP}`);
+  mkdirSync(join(home, "media"));
+  writeFileSync(join(home, "media", `${GROUP}-6562-0a1b2c3d.jpg`), "img");
+  writeFileSync(join(home, "media", `${OTHER}-6562-0a1b2c3d.jpg`), "other chat");
+  writeFileSync(join(home, "secret.txt"), "secret");
+  symlinkSync(join(home, "secret.txt"), join(home, "media", `${GROUP}-6561-deadbeef.txt`));
   const r = text(await tool.execute("x", { title: "Example: Member's feedback", request: "Eat Example: add casual eats (#6561)", message_ids: [6561, 6562], requested_by: "Member", chat: GROUP }, undefined, undefined, ctx(groupDir) as any));
   assert.match(r, /J-4242/);
   const sent = JSON.parse(readFileSync(got, "utf8"));
   assert.equal(sent.chat, GROUP);
   assert.equal(sent.project, "example-project");
   assert.deepEqual(sent.messageIds, [6561, 6562]);
+  assert.deepEqual(sent.files, [join(home, "media", `${GROUP}-6562-0a1b2c3d.jpg`)], "only the regular file saved for a queued id is passed along");
+  assert.deepEqual(filesForMessages(join(home, "nowhere"), GROUP, [1]), []);
   assert.equal(new WorkLedger(home).lastQueued(GROUP), 6562);
   await assert.rejects(tool.execute("x", { title: "t", request: "r", message_ids: [], requested_by: "Member", chat: OTHER }, undefined, undefined, ctx(groupDir) as any), /only for that group/);
   await assert.rejects(tool.execute("x", { title: "t", request: "r", message_ids: [], requested_by: "x" }, undefined, undefined, ctx(join(home, "sessions", "telegram_dm_99")) as any), /team group or by the operator/);
