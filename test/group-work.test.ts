@@ -7,7 +7,7 @@ import { TelegramChannel } from "../src/channels/telegram.ts";
 import { loadConfig, ConfigError } from "../src/config.ts";
 import { GroupArchive, groupHistoryTool, readableScope } from "../src/group-archive.ts";
 import { Log } from "../src/log.ts";
-import { WorkLedger, filesForMessages, workTools } from "../src/work.ts";
+import { WorkLedger, filesForMessages, runStopCommand, workTools } from "../src/work.ts";
 import { FakeTelegram } from "./fake-telegram.ts";
 
 const OP = 4242, GROUP = -10001, OTHER = -10002, MEMBER = 10003, STRANGER = 77;
@@ -89,8 +89,46 @@ test("work_queue runs the operator's fixed command with the group and project fr
   rmSync(home, { recursive: true, force: true });
 });
 
+test("work_stop runs the operator's stop command for the conversation's own group and never queues anything", async () => {
+  const home = mkdtempSync(join(tmpdir(), "carl-gw-"));
+  const got = join(home, "stop.json"), queued = join(home, "queued.json");
+  const queue = join(home, "queue.sh"), stop = join(home, "stop.sh");
+  writeFileSync(queue, `#!/bin/sh\ncat > ${JSON.stringify(queued)}\necho "queued J-1"\n`);
+  // Exits 3 with its answer on stdout when the request names J-9: "not halted, and why" is an answer, not a tool failure.
+  writeFileSync(stop, `#!/bin/sh\ncat > ${JSON.stringify(got)}\nif grep -q J-9 ${JSON.stringify(got)}; then echo "J-9: NOT halted: the cancel was refused: unfinished repairs"; exit 3; fi\necho "J-7: halted. It was running; it now reads cancelled and its worker is closed"\n`);
+  chmodSync(queue, 0o755); chmodSync(stop, 0o755);
+  const base = { telegram: { allowFrom: [OP], groups: [{ chat: GROUP, members: { [String(MEMBER)]: "Member" }, work: { project: "example-project" } }, { chat: OTHER, members: {} }] }, api: { enabled: false } };
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ ...base, work: { command: [queue] } }));
+  assert.deepEqual(workTools(loadConfig(home)).map((t) => t.name), ["work_queue"], "no stop command, no stop tool");
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ ...base, work: { command: [queue], stopCommand: [stop, "now"] } }));
+  const tools = workTools(loadConfig(home));
+  assert.deepEqual(tools.map((t) => t.name), ["work_stop", "work_queue"]);
+  const tool = tools[0];
+  assert.match(tool.description, /Never use work_queue for this/);
+  assert.match(tools[1].description, /never queued as a job/);
+  const groupDir = join(home, "sessions", `telegram_group_${GROUP}`);
+  const r = text(await tool.execute("x", { reason: "I'll handle this", requested_by: "Member", job: "J-7", chat: GROUP }, undefined, undefined, ctx(groupDir) as any));
+  assert.match(r, /^J-7: halted/);
+  const sent = JSON.parse(readFileSync(got, "utf8"));
+  assert.deepEqual(sent, { chat: GROUP, project: "example-project", job: "J-7", all: false, reason: "I'll handle this", requestedBy: "Member" }, "chat and project come from the conversation and config");
+  assert.throws(() => readFileSync(queued), "stopping queues nothing");
+  assert.equal(new WorkLedger(home).lastQueued(GROUP), undefined, "stopping marks no message as queued");
+  const refused = text(await tool.execute("x", { reason: "stop", requested_by: "Member", job: "J-9" }, undefined, undefined, ctx(groupDir) as any));
+  assert.match(refused, /^NOT fully stopped/);
+  assert.match(refused, /J-9: NOT halted: the cancel was refused: unfinished repairs/);
+  await assert.rejects(tool.execute("x", { reason: "r", requested_by: "Member", chat: OTHER }, undefined, undefined, ctx(groupDir) as any), /only for that group/);
+  await assert.rejects(tool.execute("x", { reason: "r", requested_by: "x" }, undefined, undefined, ctx(join(home, "sessions", "telegram_dm_99")) as any), /team group or by the operator/);
+  await assert.rejects(tool.execute("x", { reason: "r", requested_by: "Operator", chat: OTHER }, undefined, undefined, ctx(join(home, "sessions", `telegram_dm_${OP}`)) as any), /no work set up/);
+  await assert.rejects(tool.execute("x", { reason: "r", requested_by: "Member", job: "J-1; rm -rf /" }, undefined, undefined, ctx(groupDir) as any), /job must be a job id/);
+  await assert.rejects(runStopCommand([join(home, "missing.sh")], {}), /does not exist/);
+  const slow = join(home, "slow.sh");
+  writeFileSync(slow, "#!/bin/sh\nsleep 5\n"); chmodSync(slow, 0o755);
+  await assert.rejects(runStopCommand([slow], {}, 200), /did not answer within .* whether the work stopped is unknown/);
+  rmSync(home, { recursive: true, force: true });
+});
+
 test("work config is validated with errors that name the cause", () => {
-  for (const [raw, why] of [[{ work: { command: "x" } }, /argv/], [{ telegram: { groups: [{ chat: -1, members: {}, work: { project: "Bad Name" } }] } }, /project/]] as const) {
+  for (const [raw, why] of [[{ work: { command: "x" } }, /argv/], [{ work: { command: ["/bin/true"], stopCommand: "x" } }, /work\.stopCommand must be an argv/], [{ work: { command: ["/bin/true"], stopCommand: [] } }, /work\.stopCommand/], [{ telegram: { groups: [{ chat: -1, members: {}, work: { project: "Bad Name" } }] } }, /project/]] as const) {
     const home = mkdtempSync(join(tmpdir(), "carl-gw-"));
     writeFileSync(join(home, "carl.json"), JSON.stringify({ api: { enabled: false }, ...raw }));
     assert.throws(() => loadConfig(home), (e: Error) => e instanceof ConfigError && why.test(e.message));

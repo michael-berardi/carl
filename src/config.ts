@@ -130,7 +130,7 @@ export interface CarlConfig {
   /** The asks module (src/asks.ts): put questions to people in a chat and hand their answers on. Off by default. */
   asks: boolean;
   /** The work module (src/work.ts): the operator's argv that queues a work request (JSON on stdin). Off when unset. */
-  work?: { command: string[]; /** The operator states the queue script runs its jobs in a sandbox; Carl cannot check. Without it posting stays off while a work group exists. */ sandboxed?: boolean };
+  work?: { command: string[]; /** Optional second fixed command: halts a group's queued or running work (the agent's work_stop tool). Without it the agent has no way to stop work. */ stopCommand?: string[]; /** The operator states the queue script runs its jobs in a sandbox; Carl cannot check. Without it posting stays off while a work group exists. */ sandboxed?: boolean };
   feedback?: { intervalMinutes: number; sources: { name: string; url: string; tokenEnv: string; project: string; chat?: string; instructions?: string }[] };
   /** The post primitive (src/post): where drafts live, the accounts they may post to, and the missed-slot window.
    *  Accounts exist only here: a draft names a key, never a login or profile. */
@@ -438,13 +438,16 @@ function ultravoxOf(v: unknown, home: string): CarlConfig["ultravox"] {
   };
 }
 
-function workOf(v: unknown, home: string): { command: string[]; sandboxed?: boolean } | undefined {
+function workOf(v: unknown, home: string): { command: string[]; stopCommand?: string[]; sandboxed?: boolean } | undefined {
   if (v === undefined || v === null || v === false) return undefined;
-  const cmd = (v as any)?.command;
-  if (!Array.isArray(cmd) || !cmd.length || cmd.some((s) => typeof s !== "string" || !s)) throw new ConfigError("work.command must be an argv list of strings");
-  const first = abs(cmd[0], home);
-  if (!isAbsolute(first)) throw new ConfigError("work.command[0] must be an absolute path");
-  return { command: [first, ...cmd.slice(1)], ...((v as any).sandboxed === true ? { sandboxed: true } : {}) };
+  const argv = (key: "command" | "stopCommand"): string[] => {
+    const cmd = (v as any)?.[key];
+    if (!Array.isArray(cmd) || !cmd.length || cmd.some((s) => typeof s !== "string" || !s)) throw new ConfigError(`work.${key} must be an argv list of strings`);
+    const first = abs(cmd[0], home);
+    if (!isAbsolute(first)) throw new ConfigError(`work.${key}[0] must be an absolute path`);
+    return [first, ...cmd.slice(1)];
+  };
+  return { command: argv("command"), ...((v as any).stopCommand !== undefined ? { stopCommand: argv("stopCommand") } : {}), ...((v as any).sandboxed === true ? { sandboxed: true } : {}) };
 }
 
 function postOf(v: unknown, home: string): PostConfig {

@@ -2,6 +2,15 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.15.0
+
+- **A group can stop the work it queued.** Add `"stopCommand": ["/abs/stop-script", ...]` to `work` and the agent gets
+  a `work_stop` tool. When someone in a work group asks to stop, halt or cancel the work, Carl runs your command with
+  `{chat, project, job?, all, reason, requestedBy}` as JSON on stdin and tells the group its answer: exit 0 means
+  halted, any other exit means not halted and the printed text is the reason. Before, the agent had only `work_queue`,
+  so a request to stop a running job could end up as a second job queued behind the first. The chat and project come
+  from the conversation and config, never from the model. Without `stopCommand` nothing changes.
+
 ## 0.14.0
 
 - **Queued work now carries the files people attached.** The JSON your work command receives has a new `files` list:
