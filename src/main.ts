@@ -34,6 +34,8 @@ const HELP = `carl ${VERSION}: the minimal bot gateway
                                     send a message (Hermes-compatible output with --json)
   carl ask-post <id>                post an ask's questions to its chat (asks module; CARL_HOME/asks/<id>.json)
   carl reflect                      run the individuation pass once and print it
+  carl reflect --pending            list adopted procedures and proposals waiting for you
+  carl reflect --revert <id>        undo a procedure the pass adopted
   carl schedules                    list schedules
   carl post <command>               draft posts: dry-run, now, schedule, approve, record-live, status (carl post help)
   carl prompt [--full]              the system prompt and tools a new conversation gets, with sizes
@@ -76,7 +78,7 @@ async function main(argv: string[]): Promise<number> {
     case "ask-post":
       return askPost(rest);
     case "reflect":
-      return reflect();
+      return reflect(rest);
     case "schedules":
       return schedules();
     case "post":
@@ -445,9 +447,15 @@ async function askPost(args: string[]): Promise<number> {
   }
 }
 
-async function reflect(): Promise<number> {
+async function reflect(args: string[] = []): Promise<number> {
   const cfg = loadConfig();
   const gw = new Gateway({ ...cfg, telegram: { ...cfg.telegram, enabled: false }, api: { ...cfg.api, enabled: false } });
+  if (args[0] === "--revert" || args[0] === "--pending") {
+    if (args[0] === "--revert" && !args[1]) { console.error("carl reflect --revert <id>"); return 64; }
+    const out = await gw.reflectCommand(args[0] === "--revert" ? `revert ${args[1]}` : "pending");
+    console.log(out);
+    return args[0] === "--revert" && !out.startsWith("Reverted") ? 1 : 0;
+  }
   await gw.brain.init();
   const report = await gw.individuate();
   console.log(report || "Nothing to flag. Lessons:\n\n" + gw.psyche.read("integrated.md"));

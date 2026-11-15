@@ -32,7 +32,7 @@ Write like a sharp colleague on chat: answer first, short sentences, no preamble
 Use Markdown sparingly (it is rendered in Telegram). Prefer lists only for real lists.
 `;
 
-export type ShadowKind = "tool_error" | "run_failed" | "aborted" | "correction" | "admission";
+export type ShadowKind = "tool_error" | "run_failed" | "aborted" | "correction" | "admission" | "unverified_claim";
 
 export interface ShadowEntry {
   at: string;
@@ -95,7 +95,62 @@ export class Psyche {
     if (persona) out.push(persona);
     const lessons = this.learning === "carl" ? this.read("integrated.md") : "";
     if (lessons) out.push(`# Lessons from your own shadow\n\nDistilled from your past failures and corrections. Act on them.\n\n${lessons}`);
+    const procedures = this.learning === "carl" ? this.procedures().filter((p) => p.status === "applied") : [];
+    if (procedures.length) out.push(`# Standing procedures\n\nAdopted by your individuation pass from your own proposals. Follow them every time.\n\n${procedures.map((p) => `- ${p.text}`).join("\n")}`);
     return out;
+  }
+
+  /** Procedures the individuation pass adopted, merged by id (a revert is a later row). */
+  procedures(): Procedure[] {
+    const byId = new Map<string, Procedure>();
+    for (const p of readJsonl<Procedure>(this.path("procedures.jsonl"))) byId.set(p.id, { ...byId.get(p.id), ...p });
+    return [...byId.values()];
+  }
+
+  /** Proposals waiting for the operator, merged by id. */
+  queuedProposals(): QueuedProposal[] {
+    const byId = new Map<string, QueuedProposal>();
+    for (const p of readJsonl<QueuedProposal>(this.path("proposals.jsonl"))) byId.set(p.id, { ...byId.get(p.id), ...p });
+    return [...byId.values()];
+  }
+
+  /** Undo an adopted procedure: it leaves the prompt at once and is never re-adopted automatically. */
+  revertProcedure(id: string): Procedure | undefined {
+    const cur = this.procedures().find((p) => p.id === id);
+    if (!cur || cur.status !== "applied") return undefined;
+    const row = { ...cur, status: "reverted" as const, revertedAt: new Date().toISOString() };
+    appendFileSync(this.path("procedures.jsonl"), JSON.stringify(row) + "\n", { mode: 0o600 });
+    return row;
+  }
+
+  /**
+   * Act on the pass's proposals. Safe ones (the bot's own phrasing, or a check before a claim) become standing procedures;
+   * anything else is queued for the operator. Nothing is adopted twice, and a reverted procedure is never re-adopted.
+   */
+  adoptProposals(proposals: string): AdoptionResult {
+    const result: AdoptionResult = { applied: [], queued: [], already: [] };
+    const procedures = this.procedures();
+    const queued = this.queuedProposals();
+    for (const item of parseProposals(proposals)) {
+      const same = (text: string) => similar(text, item.text);
+      const prior = procedures.find((p) => same(p.text));
+      if (prior?.status === "applied") { result.already.push({ text: item.text, id: prior.id }); continue; }
+      const verdict = prior ? { auto: false, reason: `you reverted the same procedure (${prior.id}) earlier` } : classifyProposal(item);
+      if (verdict.auto && result.applied.length < MAX_ADOPT_PER_PASS && procedures.filter((p) => p.status === "applied").length + result.applied.length < MAX_PROCEDURES) {
+        const p: Procedure = { id: newId("p"), at: new Date().toISOString(), text: item.text, kind: item.kind as "phrasing" | "verify", status: "applied" };
+        appendFileSync(this.path("procedures.jsonl"), JSON.stringify(p) + "\n", { mode: 0o600 });
+        procedures.push(p);
+        result.applied.push(p);
+        continue;
+      }
+      const pending = queued.find((q) => q.status === "pending" && same(q.text));
+      if (pending) { result.queued.push(pending); continue; }
+      const q: QueuedProposal = { id: newId("q"), at: new Date().toISOString(), text: item.text, reason: verdict.auto ? "the nightly limit on automatic changes was reached" : verdict.reason, status: "pending" };
+      appendFileSync(this.path("proposals.jsonl"), JSON.stringify(q) + "\n", { mode: 0o600 });
+      queued.push(q);
+      result.queued.push(q);
+    }
+    return result;
   }
 
   recordShadow(entry: Omit<ShadowEntry, "at">): ShadowEntry {
@@ -166,6 +221,90 @@ export class Psyche {
   }
 }
 
+export interface Procedure {
+  id: string;
+  at: string;
+  text: string;
+  kind: "phrasing" | "verify";
+  status: "applied" | "reverted";
+  revertedAt?: string;
+}
+
+export interface QueuedProposal {
+  id: string;
+  at: string;
+  text: string;
+  reason: string;
+  status: "pending" | "done" | "declined";
+}
+
+export interface AdoptionResult {
+  applied: Procedure[];
+  queued: QueuedProposal[];
+  already: { text: string; id: string }[];
+}
+
+const MAX_ADOPT_PER_PASS = 3;
+const MAX_PROCEDURES = 20;
+
+function newId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** One proposal per bullet. The pass tags each [phrasing], [verify] or [other]; an untagged one counts as other. */
+export function parseProposals(text: string): { kind: "phrasing" | "verify" | "other"; text: string }[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^[-•*]\s+\S/.test(l))
+    .map((l) => l.replace(/^[-•*]\s+/, "").replace(/[\u0000-\u001f\u007f‪-‮⁦-⁩]/g, ""))
+    .map((l) => {
+      const m = l.match(/^\[(phrasing|verify|other)\]\s*/i);
+      return { kind: (m ? m[1].toLowerCase() : "other") as "phrasing" | "verify" | "other", text: l.slice(m ? m[0].length : 0).trim().slice(0, 300) };
+    })
+    .filter((p) => p.text && !/^none\.?$/i.test(p.text))
+    .slice(0, 5);
+}
+
+// Words that mean a proposal reaches past the bot's own wording: permissions, money, other people's data or authority,
+// messages to others, or changes to what runs. The model's tag is a claim; this list is what Carl checks itself.
+const BEYOND_OWN_WORDING: [RegExp, string][] = [
+  [/\b(permission|authori[sz]|allow|grant|access|approv|credential|password|secret|token|sign[- ]?off|admin|role|owner|on behalf|delegat|who can)/i, "it changes permissions or someone's authority"],
+  [/\b(spend|money|pay|payment|price|pricing|budget|invoice|charge|bill|refund|purchase|cost)/i, "it touches money"],
+  [/\b(client|customer|personal data|private data|portal|onboard|privacy|pii)/i, "it touches client data or client-facing policy"],
+  [/\b(post|publish|notify|announce|broadcast|email|thread|group|channel)\b/i, "it changes what is sent to other people"],
+  [/\b(config|setting|schedule|cron|install|deploy|delete|remove (the|a) tool|disable|enable|run wrapper|each run|every run)/i, "it changes configuration or what runs"],
+];
+
+/** The adoption rule: only the bot's own phrasing, or a check before it claims something, is applied without the operator. */
+export function classifyProposal(p: { kind: string; text: string }): { auto: boolean; reason: string } {
+  if (p.kind !== "phrasing" && p.kind !== "verify") return { auto: false, reason: "it is a procedure or configuration change, not phrasing or a check before a claim" };
+  for (const [re, reason] of BEYOND_OWN_WORDING) if (re.test(p.text)) return { auto: false, reason };
+  return { auto: true, reason: p.kind === "phrasing" ? "it only changes your own phrasing" : "it only adds a check before a claim" };
+}
+
+function words(s: string): Set<string> {
+  return new Set(s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2));
+}
+
+/** Same proposal reworded: most of the words match. */
+export function similar(a: string, b: string): boolean {
+  const x = words(a), y = words(b);
+  if (!x.size || !y.size) return a.trim().toLowerCase() === b.trim().toLowerCase();
+  let both = 0;
+  for (const w of x) if (y.has(w)) both++;
+  return both / (x.size + y.size - both) >= 0.6;
+}
+
+/** The pass's report on what it did with its proposals: what it applied (and how to undo it) and what waits for the operator. */
+export function adoptionReport(r: AdoptionResult): string {
+  const out: string[] = [];
+  if (r.applied.length) out.push(`**Applied automatically** (standing procedures, in the prompt from the next turn)\n${r.applied.map((p) => `- ${p.text}\n  Revert: \`/reflect revert ${p.id}\` or \`carl reflect --revert ${p.id}\``).join("\n")}`);
+  if (r.queued.length) out.push(`**Needs your decision** (not applied)\n${r.queued.map((q) => `- ${q.id}: ${q.text} (why: ${q.reason})`).join("\n")}`);
+  if (r.already.length) out.push(`**Already in place**\n${r.already.map((a) => `- ${a.id}: ${a.text}`).join("\n")}`);
+  return out.join("\n\n");
+}
+
 export function readJsonl<T>(file: string): T[] {
   if (!existsSync(file)) return [];
   const out: T[] = [];
@@ -181,7 +320,7 @@ export function readJsonl<T>(file: string): T[] {
 }
 
 /** The individuation pass: Self against actual behavior. Returns the prompt for a fresh, tool-light session. */
-export function individuationPrompt(self: string, lessons: string, shadow: ShadowEntry[], decisions: Decision[], behaviour: string): string {
+export function individuationPrompt(self: string, lessons: string, shadow: ShadowEntry[], decisions: Decision[], behaviour: string, procedures: string[] = []): string {
   const shadowText = shadow.length
     ? shadow.map((e) => `- ${e.at.slice(0, 16)} [${e.kind}] ${e.summary}${e.evidence ? ` | ${e.evidence.replace(/\s+/g, " ").slice(0, 300)}` : ""}`).join("\n")
     : "(no new shadow entries)";
@@ -197,13 +336,16 @@ ${self}
 ## Current lessons (integrated.md)
 ${lessons || "(none yet)"}
 
+## Standing procedures already adopted
+${procedures.length ? procedures.map((p) => `- ${p}`).join("\n") : "(none)"}
+
 ## Shadow since the last pass
 ${shadowText}
 
 ## Operator decisions on record
 ${decisionText}
 
-## Sample of your recent replies
+## Your replies since the last pass
 ${behaviour || "(none)"}
 
 Reply with exactly these three Markdown sections and nothing else:
@@ -212,10 +354,14 @@ Reply with exactly these three Markdown sections and nothing else:
 The new integrated.md: at most 12 bullets, each "When <situation>, I <failure pattern>; instead I <behaviour>." Keep lessons that still apply, merge duplicates, drop ones the evidence no longer supports. Only patterns with evidence above.
 
 ### Contradictions
-Where behaviour contradicted a stated value, with the evidence line. "None found" if none.
+Where behaviour contradicted a stated value, with the evidence line from the shadow or replies above. Only incidents in that evidence: a current lesson is not evidence, so never restate one as a new contradiction. "None found" if none.
 
 ### Proposals
-Concrete procedure or configuration changes that would prevent repeats (max 5), or "None".`;
+Concrete changes that would prevent repeats (max 5), one bullet each, starting with a tag, or "None":
+- [phrasing] a change to your own wording only (tone, length, what to leave out)
+- [verify] a check you make before you claim something (a status, a result, a fact)
+- [other] anything else: a new step in runs, a configuration change, a permission, money, client data, or someone else's authority
+Phrasing and verify proposals are adopted as standing procedures without asking; other ones go to the operator. Do not repeat a standing procedure.`;
 }
 
 /** Split the individuation reply into its sections. */

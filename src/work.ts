@@ -46,6 +46,10 @@ export class WorkLedger {
   lastQueued(chat: number): number | undefined {
     try { return JSON.parse(readFileSync(this.file(chat), "utf8")).lastQueuedId; } catch { return undefined; }
   }
+  /** Jobs Carl queued for this group, oldest first: its own record of what work_queue returned. */
+  jobs(chat: number): { job: string; ids: number[]; at: string }[] {
+    try { return JSON.parse(readFileSync(this.file(chat), "utf8")).jobs ?? []; } catch { return []; }
+  }
   markQueued(chat: number, ids: number[], job: string): void {
     const f = this.file(chat);
     mkdirSync(join(this.home, "groups", String(chat)), { recursive: true, mode: 0o700 });
@@ -103,7 +107,7 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
     if (scope.none) throw new Error(`work can be ${verb} only from a team group or by the operator`);
     const chat = scope.only ?? asked;
     if (chat === undefined) throw new Error("name the group chat id");
-    if (scope.only !== undefined && asked !== undefined && asked !== scope.only) throw new Error(`from a group you can ${verb === "queued" ? "queue" : "stop"} work only for that group`);
+    if (scope.only !== undefined && asked !== undefined && asked !== scope.only) throw new Error(`from a group you can ${verb === "queued" ? "queue" : verb === "stopped" ? "stop" : "look up"} work only for that group`);
     const group = groups.find((g) => g.chat === chat);
     if (!group?.work) throw new Error(`group ${chat} has no work set up (telegram.groups[].work)`);
     return { chat, project: group.work.project };
@@ -133,6 +137,23 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
   return [
     ...stopTool,
     defineTool({
+      name: "work_status",
+      label: "Work record",
+      description:
+        "Look up the jobs Carl queued for this group: job id, when, and the message ids they came from. Use it before you tell anyone work is queued, held or stopped, and cite the job id and when you checked. It is Carl's record of queueing only: whether a job is running, held or finished is known only from work_stop's answer or the worker's own report, so say \"not confirmed\" otherwise.",
+      parameters: Type.Object({
+        chat: Type.Optional(Type.Number({ description: "only from the operator's direct chat: the group to look up" })),
+        limit: Type.Optional(Type.Number({ description: "most recent jobs to show (default 10)" })),
+      }),
+      async execute(_id, p, _signal, _update, ctx) {
+        const { chat } = groupFor(ctx, p.chat, "looked up");
+        const jobs = ledger.jobs(chat).slice(-Math.max(1, Math.min(50, p.limit ?? 10)));
+        const checked = new Date().toISOString();
+        if (!jobs.length) return ok(`Checked ${checked}: no job is on record as queued for this group.`);
+        return ok(`Checked ${checked}. Queued for this group (Carl's record; running, held or finished is not confirmed here):\n${jobs.map((j) => `- ${j.job} queued ${j.at} from messages ${j.ids.join(", ") || "(none)"}`).join("\n")}`);
+      },
+    }),
+    defineTool({
       name: "work_queue",
       label: "Queue work",
       description:
@@ -156,4 +177,24 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
       },
     }),
   ];
+}
+
+// A status word about work: queued, held, stopped and the like.
+const STATUS_CLAIM = /\b(queued?|on hold|held|halt(?:ed)?|stopped|paused|cancell?ed|in progress|is running|still running)\b/i;
+const JOB_ID = /\bJ-\d+\b/;
+
+/**
+ * Send-time check for groups with work: a reply that states work status must rest on a record checked in this turn (a work
+ * tool ran) or cite a job id. Returns the instruction for one corrected reply, or undefined when the reply may go out.
+ */
+export function workStatusCheck(cfg: CarlConfig): ((key: string, reply: string, tools: string[]) => string | undefined) | undefined {
+  if (!cfg.work) return undefined;
+  const chats = new Set(cfg.telegram.groups.filter((g) => g.work).map((g) => g.chat));
+  if (!chats.size) return undefined;
+  return (key, reply, tools) => {
+    const m = key.match(/^telegram:group:(-?\d+)/);
+    if (!m || !chats.has(Number(m[1]))) return undefined;
+    if (!STATUS_CLAIM.test(reply) || JOB_ID.test(reply) || tools.some((t) => t.startsWith("work_"))) return undefined;
+    return "[Carl check, not from the group] Your reply states the status of work (queued, held, stopped or similar) without a job id and without checking a record in this turn. If it is about a job: call work_status (or work_stop when asked to stop), then reply again citing the job id and when you checked, and call any status you could not confirm \"not confirmed\". If it is not about a job's status, send the same reply again unchanged.";
+  };
 }
