@@ -5,7 +5,7 @@
 // With `work.stopCommand` the agent also gets work_stop, which halts the group's queued or running work through the operator's
 // second fixed command; without it a request to stop is answered honestly (there is no tool), never by queueing more work.
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { execFile } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { Psyche } from "./psyche.ts";
 import type { Scheduler } from "./scheduler.ts";
 import type { PostService } from "./post/service.ts";

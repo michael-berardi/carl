@@ -47,20 +47,13 @@
     "test:e2e": "CARL_MESSAGE_LOG_DIR=\"$(mktemp -d)/messages\" node --experimental-strip-types --no-warnings test/e2e.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.0.4"
+    "@earendil-works/pi-coding-agent": "1.5.0"
   },
   "devDependencies": {
     "@types/node": "22.15.21",
     "typescript": "5.9.3"
   },
   "overrides": {
-    "@earendil-works/pi-ai": "1.0.4",
-    "@earendil-works/pi-agent-core": "1.0.4",
-    "@earendil-works/pi-mcp": "1.0.4",
-    "@earendil-works/pi-codemode": "1.0.4",
-    "@earendil-works/pi-tui": "1.0.4",
-    "@earendil-works/chord": "1.0.4",
-    "@earendil-works/pi-telemetry": "1.0.4",
     "undici": "8.12.2"
   }
 }
