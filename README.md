@@ -246,6 +246,8 @@ MCP servers go in `~/.carl/mcp.json` (the same format as Claude Desktop). Give t
 
 ## Commands
 
+`carl --help` or `carl help` lists commands. Use `carl <command> --help` (or `-h`), including after a nested verb, to see usage without running it.
+
 ```
 carl gateway            run Telegram, Slack, Discord, the API, the web app and schedules
 carl setup              guided first run: channel, secrets, model, check

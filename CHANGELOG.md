@@ -2,6 +2,11 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.16.1 (2026-11-15)
+
+- **`--help` on a command prints its usage and does nothing else.** `carl update --help` used to install the latest release and restart the running gateway. Every command and nested verb (`update --rollback`, `reflect --revert`, `post schedule` and the rest) now answers `--help` or `-h` before any setup, download, file write or signal, and exits 0. A `--help` inside a message (`carl send ... "use --help"`) is still sent as text.
+- An unknown command suggests the closest names.
+
 ## 0.16.0
 
 - **The individuation pass acts on its own proposals.** Each proposal is tagged by the pass and checked by Carl. One that

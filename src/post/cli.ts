@@ -20,6 +20,8 @@ export const POST_HELP = `carl post <command>
 
 <draft> is a name in the drafts folder (post.draftsDir) or a path. Every command except help talks to the running gateway.`;
 
+export const POST_OPTIONS = { offline: { type: "boolean" }, at: { type: "string" }, late: { type: "string" }, "skip-dry-run": { type: "boolean" } } as const;
+
 export interface PostCliIo {
   out: (s: string) => void;
   err: (s: string) => void;
@@ -48,7 +50,7 @@ export async function postCommand(args: string[], io: PostCliIo = realIo, api: P
     return 64;
   }
   try {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { offline: { type: "boolean" }, at: { type: "string" }, late: { type: "string" }, "skip-dry-run": { type: "boolean" } } });
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: POST_OPTIONS });
     const req: PostApiRequest = { cmd: sub, draft: absoluteDraft(positionals[0]), url: sub === "record-live" ? positionals[1] : undefined, at: values.at, late: values.late, skipDryRun: values["skip-dry-run"], offline: values.offline };
     const reply = await api(req);
     (reply.ok ? io.out : io.err)(reply.ok ? reply.text : `carl post: ${reply.text}`);
