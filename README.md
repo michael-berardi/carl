@@ -1,102 +1,74 @@
 # Carl
 
-Carl is the bot you message to run your AI agents. Ask what they are doing, tell them what to do next, and approve anything risky with a tap, from your phone or desk.
+Carl connects your AI agents to Telegram, Slack, Discord, a web app and an
+OpenAI-compatible API. It is for operators who want to supervise agents from a
+chat, approve risky actions and schedule work. One process keeps a separate agent
+conversation for each chat or thread.
 
-It is built for people who run many agents at once and need a supervisor that answers in seconds instead of burning the budget. On the same model and the same job-status question, Carl answered in 20.8 s on 67k prompt tokens where the Hermes gateway it replaced took 40.8 s on 373k (measurements below).
+Choose your own model provider and credentials. There is no built-in model or
+fallback preference. Carl runs TypeScript directly on Node 22.19+ without a build
+step, with one direct runtime dependency: the Pi SDK.
 
-Technically, Carl is a small, fast bot gateway for getting work done with AI agents. One process runs one agent per conversation and connects it to Telegram, Slack, Discord, a web app, an OpenAI-compatible API and a scheduler. It runs Claude through your own Claude Code login, GPT through your Codex login, or any of about 40 other model providers.
-
-It is built the way [Pi](https://pi.dev) is built: a small core that does its job well, with everything else added as modules. Carl's own code is about 7,300 lines of TypeScript plus a 500-line web app. It runs from source on Node 22 with no build step and has one runtime dependency, the Pi SDK, which supplies the agent loop, sessions, compaction, MCP and the model providers. You never need to install or run Pi itself.
-
-The SDK carries every provider's client library, so a production install is about 160 MB on disk; only the providers you use are loaded, and a running gateway uses about 55 MB of memory.
-
-## Download
-
-- **macOS and Linux:** [install.sh](https://github.com/michael-berardi/carl/releases/latest/download/install.sh) (checks the SHA-256 of the 0.3 MB bundle before it installs anything). One command: `curl -fsSL https://github.com/michael-berardi/carl/releases/latest/download/install.sh | sh`
-- **Windows (PowerShell, runs Carl in WSL):** [install.ps1](https://github.com/michael-berardi/carl/releases/latest/download/install.ps1). One command: `irm https://github.com/michael-berardi/carl/releases/latest/download/install.ps1 | iex`
-- All releases and checksums (`SHA256SUMS`): [latest release](https://github.com/michael-berardi/carl/releases/latest).
-
-## Principles
-
-Carl is private, free and neutral. Every release keeps these three.
-
-- **Private.** Everything stays on your machine. Carl has no account and no analytics, and it sends us nothing. [Privacy](#privacy) lists every connection it makes.
-- **Free.** Carl is MIT-licensed and costs nothing, with no paid tier and nothing held back. Use it, change it, share it. The model providers you choose bill you directly.
-- **Neutral.** Carl is a neutral tool, with no preferred model, harness or ideology. You give it its values.
-
-## Why it is small
-
-Most bot frameworks send tens of thousands of tokens of instructions and tool schemas with every message. Carl keeps the fixed part of each request small and keeps it the same from turn to turn, so the provider's prompt cache hits.
-
-- **Fixed overhead:** about 2k tokens out of the box. A heavy production setup (15 KB of operator rules, a memory pack, a long persona and 11 skills) measures about 12k, against 30k for the Hermes deployment it replaced.
-- **MCP through codemode:** MCP servers sit behind one `codemode` tool. The model writes a short script that calls servers in parallel and filters their results, so a 20 KB status dump never enters the context.
-- **Capped tool output:** large tool results are cut to their head and tail. The full output is saved to a file the model can read in pieces.
-- **Compaction at your budget:** Carl compacts at a context budget you set (96k tokens by default), whatever the model's window is. With UltraCompress, keep it at 40k or more: the newest turns (up to about 25k tokens) stay verbatim. With [UltraCompress](https://github.com/michael-berardi/ultracompress) installed, compaction is a deterministic brief built in milliseconds with no model call, and a recall tool can still reach anything it dropped.
-
-Measured on 2026-10-15 against the Hermes gateway it replaced: the same four questions, the same model (Claude Sonnet 5.5), through each bot's API, with the same answers.
-
-| Question | Hermes | Carl |
-|---|---|---|
-| Status from a job system (tool calls) | 40.8 s, 373k prompt tokens | 20.8 s, 67k |
-| Rules lookup | 5.8 s, 58.8k | 3.6 s, 18.4k |
-| Memory recall | 6.2 s, 58.8k | 3.1 s, 18.4k |
-| Short reasoning | 4.4 s, 58.8k | 3.9 s, 18.4k |
-
-Prompt tokens include cached tokens. Carl's cached share was about 97%.
-
-## Privacy
-
-Carl is private by default. It runs on your machine and keeps everything there: conversations, logs, schedules, files, logins and the psyche all live in `~/.carl`. There is no account, no analytics, no crash reporting and no usage data. We see nothing.
-
-Carl connects only to:
-
-- **The model providers you sign in to,** with the messages you send them.
-- **The chat platforms you turn on** (Telegram, Slack, Discord).
-- **Its own GitHub releases, once a day,** to tell you when an update is out. That request asks for the latest version number and sends nothing about you or your machine. Turn it off with `"update": {"check": false}` or `CARL_OFFLINE=1`.
-
-It also switches off what the libraries underneath would send:
-
-- **Pi SDK:** runs offline (`PI_OFFLINE=1`). It makes no version checks, install reports or model-catalog fetches, and adds no attribution headers to your provider requests.
-- **Claude Code:** runs with its documented opt-outs set (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, surveys and auto-update off).
-
-Your provider still sees what you send it, under its own terms. Choose a provider whose data policy you trust.
+On macOS, agent tools run under a kernel sandbox. Linux and Windows do not have
+that kernel boundary; see [Safety](#safety) before giving an agent access to files
+or tools. Carl is MIT-licensed and has no analytics or paid tier. Model providers
+may charge for usage.
 
 ## Install
 
-macOS and Linux:
+macOS or Linux:
 
 ```sh
 curl -fsSL https://github.com/michael-berardi/carl/releases/latest/download/install.sh | sh
 carl setup
+carl gateway
 ```
 
-Windows (PowerShell; Carl runs inside WSL, which the script checks for):
+The installer checks the bundle's SHA-256, uses an existing Node 22.19+ or downloads
+an official runtime into `~/.carl/app/runtime`, and puts `carl` in `~/.local/bin`.
+Add that directory to your PATH if needed. Setup asks for a channel, credentials
+and your chosen model. It stores secrets in an owner-readable `.env` file and
+checks the configuration. Telegram setup requires sending your bot a message.
+
+Windows PowerShell (requires WSL):
 
 ```powershell
 irm https://github.com/michael-berardi/carl/releases/latest/download/install.ps1 | iex
 ```
 
-The download is a 0.5 MB bundle plus its dependencies (about 160 MB installed). The installer checks the bundle's SHA-256, uses the Node 22.19+ you already have or fetches the official Node into `~/.carl/app/runtime` (nothing global), and puts `carl` in `~/.local/bin`. It installs in the same layout `carl update` maintains, so updates and `carl update --rollback` work from the first day. The files (`carl.tar.gz`, `install.sh`, `install.ps1`, `SHA256SUMS`) are on each [release](https://github.com/michael-berardi/carl/releases/latest).
-
-From source instead (any system with Node 22.19+ and git):
+From source with Node 22.19+ and git:
 
 ```sh
 git clone https://github.com/michael-berardi/carl && cd carl
-npm ci --omit=dev && npm link      # puts `carl` on your PATH
+npm ci --omit=dev
+./bin/carl setup
+./bin/carl gateway
 ```
 
-`carl setup` walks you through the first run:
+Open `http://127.0.0.1:8642/` for the web app. Supply the API key created by setup.
+You can also message your configured bot. Use `/status` to check its state and
+`/stop` to stop a turn. Release bundles, installers and checksums are available on
+[the releases page](https://github.com/michael-berardi/carl/releases/latest).
 
-1. **Channel.** For Telegram, paste the token from @BotFather. Carl checks it, then asks you to send your bot a message, so it knows who you are. It answers nobody else.
-2. **Secrets.** Tokens and a generated API key go into `~/.carl/.env`, readable only by you.
-3. **Model.** Carl has no built-in model. Pick a provider you are already signed in to, or sign in from setup. Claude runs through your Claude Code login (`claude auth login`).
-4. **Check.** `carl doctor` runs and tells you what, if anything, still needs attention.
+## Principles
 
-Then run `carl gateway`. Re-run `carl setup` at any time; it fills in only what is missing.
+Carl is private, free and neutral.
 
-Open `http://127.0.0.1:8642/` for the web app. In Chrome or Safari, *Install* (or *Add to Dock*) turns it into a desktop app window.
+- **Private.** Local state, no analytics. Configured providers and tools still receive requests; see Privacy below.
+- **Free.** MIT-licensed, with no paid tier. Providers bill you directly.
+- **Neutral.** No preferred model, harness or ideology. You give it its values.
 
-Prefer to edit files? `carl init` without a terminal writes a starter `~/.carl/carl.json`. Put `TELEGRAM_BOT_TOKEN` and `CARL_API_KEY` in `~/.carl/.env` (`chmod 600`), add your Telegram user id to `telegram.allowFrom` and `telegram.homeChat`, and set `"model": "provider/model"`. `carl login` lists providers and signs in to one.
+## Privacy
+
+Conversations, logs, schedules, files and credentials are stored locally under
+`~/.carl` by default (`CARL_HOME` changes this). Messages still go to the model
+providers and chat platforms you configure. Tools, MCP servers, extensions,
+webhooks and optional integrations can make their own network requests.
+
+Carl checks its GitHub release version once a day. Disable that check with
+`"update": {"check": false}` or `CARL_OFFLINE=1`; this does not block other network
+traffic. The Pi SDK defaults to offline mode, and Carl sets Claude Code's
+telemetry and nonessential-traffic opt-outs. Provider data policies still apply.
 
 ## Updates
 
@@ -133,9 +105,9 @@ Each update is tested before Carl switches to it: if its dependencies do not ins
 - **API:**
   - An OpenAI-compatible `/v1/chat/completions` that streams and keeps conversation state.
   - The `/carl/*` routes the web app uses.
-  - Bearer-key auth on every route. The listener binds to loopback by default.
+  - Bearer-key auth on API routes; webhooks also accept configured HMAC signatures. The static web-app shell is public. The listener binds to loopback by default.
 - **Schedules:**
-  - Cron syntax, `every 30m`, `@daily` and `once <time>`.
+  - Five-field cron in local time, `every 30m`, `@daily` and `once <time>`. Wildcard day fields (including `*/n`) intersect; two restricted day fields match either day. Intervals that overflow integer milliseconds are rejected.
   - Each run starts fresh, so schedules never build up context.
   - Shell-command schedules (created by the operator) deliver their output without a model call.
   - They run in the shell sandbox. To run one of your own scripts outside it (one that needs a login the sandbox hides, such as `cf`'s), set `"unsandboxed": true` on that job in `~/.carl/schedules.json`. The agent cannot set it.
@@ -165,7 +137,7 @@ Carl is not affiliated with Anthropic. Use of Claude through your subscription i
 
 The work moves before any output was written. A failure after output, or after a tool ran, finishes the turn on the model that started it, so the partial answer or the tool call is never duplicated. The warning in the log and the `fallback` event name the provider's own words. A failed model stays benched: until the reset time the provider gave, 2 minutes after a 5xx outage, 10 minutes for a route with no endpoints, or 30 minutes when a quota refusal gave no hint. A bad login or an unknown error fails with its own message instead of quietly moving your work to another model.
 
-**Recommended: plan first, pay-per-use last.** A subscription plan answers until its quota runs out and then refuses until it resets, so a chain made only of plans goes quiet once they are all used up. End the chain with a pay-per-use model, sign in to it with `carl login <provider> --api-key`, and mark it in `meteredFallbackModels`:
+**Optional: plan first, pay-per-use last.** A subscription plan answers until its quota runs out and then refuses until it resets, so a chain made only of plans goes quiet once they are all used up. End the chain with a pay-per-use model, sign in to it with `carl login <provider> --api-key`, and mark it in `meteredFallbackModels`:
 
 ```json
 {
@@ -181,7 +153,7 @@ Carl uses exactly the `fallbackModels` you list, in order; without the key there
 
 ## The psyche
 
-Carl is named after Carl Jung, and its self-model borrows his layers. Each layer is a plain file in `~/.carl/psyche/`.
+The psyche is a set of plain files in `~/.carl/psyche/`.
 
 | Layer | File | What it does |
 |---|---|---|
@@ -314,7 +286,7 @@ When `model` is unset, `carl doctor` skips its primary login check and asks you 
 ```sh
 npm ci
 npm run verify          # typecheck + unit tests
-npm run test:e2e        # real model, fake Telegram: 20 end-to-end steps
+npm run test:e2e        # optional: real model credentials, fake Telegram
 ```
 
 `test/e2e.ts` drives the whole gateway against a fake Telegram Bot API and a temporary home. It uses your real Codex or Claude login, so set `CARL_E2E_MODEL` to choose the model.

@@ -22,6 +22,7 @@ export function parseSchedule(source: string): Schedule {
     const unit = every[2][0].toLowerCase();
     const ms = n * (unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000);
     if (n <= 0) throw new Error(`schedule "${source}": interval must be positive`);
+    if (!Number.isSafeInteger(ms)) throw new Error(`schedule "${source}": interval is too large`);
     return { kind: "every", ms, source };
   }
   const expr = ALIASES[text.toLowerCase()] ?? text;
@@ -37,8 +38,8 @@ export function parseSchedule(source: string): Schedule {
       dom: field(dom, 1, 31, source, "day of month"),
       month: field(mon, 1, 12, source, "month"),
       dow: new Set([...field(dow, 0, 7, source, "day of week")].map((d) => (d === 7 ? 0 : d))),
-      domStar: dom === "*",
-      dowStar: dow === "*",
+      domStar: dom.startsWith("*"),
+      dowStar: dow.startsWith("*"),
     },
   };
 }
@@ -78,8 +79,8 @@ export function nextRun(schedule: Schedule, after: number, anchor?: number): num
     }
     const domOk = f.dom.has(d.getDate());
     const dowOk = f.dow.has(d.getDay());
-    // Classic cron: when both day fields are restricted, either one matching is enough.
-    const dayOk = f.domStar && f.dowStar ? true : f.domStar ? dowOk : f.dowStar ? domOk : domOk || dowOk;
+    // Classic cron: wildcard day fields (including steps) intersect; two restricted fields use OR.
+    const dayOk = f.domStar || f.dowStar ? domOk && dowOk : domOk || dowOk;
     if (!dayOk) {
       const next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
       t = Math.max(next.getTime(), t + 60_000);

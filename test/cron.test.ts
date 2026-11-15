@@ -42,3 +42,17 @@ test("month-end and leap day", () => {
   assert.equal(nextRun(parseSchedule("0 0 31 * *"), new Date("2026-04-15T00:00:00").getTime()), new Date("2026-05-31T00:00:00").getTime());
   assert.equal(nextRun(parseSchedule("0 0 29 2 *"), new Date("2026-03-01T00:00:00").getTime()), new Date("2028-02-29T00:00:00").getTime());
 });
+
+test("wildcard day steps use intersection rather than restricted-day OR", () => {
+  const after = at("2026-10-15T12:00:00"); // Thursday
+  assert.equal(nextRun(parseSchedule("0 8 */1 * 0"), after), at("2026-10-18T08:00:00"));
+  assert.equal(nextRun(parseSchedule("0 8 1 * */1"), after), at("2026-11-01T08:00:00"));
+  assert.equal(nextRun(parseSchedule("0 8 */2 * 0"), after), at("2026-10-25T08:00:00"));
+});
+
+test("intervals reject overflow instead of persisting a null next-run time", () => {
+  for (const value of ["9".repeat(400), "9007199254740991"]) {
+    assert.throws(() => parseSchedule(`every ${value}d`), /interval.*too large/);
+  }
+  assert.throws(() => parseSchedule("every 0m"), /interval must be positive/);
+});
