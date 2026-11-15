@@ -9,7 +9,7 @@
 // The agent can only record answers and finish an ask: finishing writes the answers file and runs the ask's
 // own onComplete argv (no shell), which the agent cannot change. Errors name their cause.
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";

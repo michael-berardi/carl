@@ -2,7 +2,7 @@
 // 0600), whether or not it was addressed to Carl or sent by a listed member. Reading is a tool (group_history), scoped
 // so a group conversation sees only its own chat. Nothing is forwarded or sent anywhere to read history.
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { TgMessage } from "./channels/telegram-api.ts";
