@@ -11,14 +11,14 @@ import { TelegramError } from "./channels/telegram-api.ts";
 import { type CarlConfig, ensureHome, secret } from "./config.ts";
 import { Log } from "./log.ts";
 import { Asks, moduleAskTools } from "./asks.ts";
-import { individuationPrompt, parseIndividuation, Psyche, readJsonl } from "./psyche.ts";
+import { adoptionReport, individuationPrompt, parseIndividuation, Psyche, readJsonl } from "./psyche.ts";
 import { type Job, Scheduler } from "./scheduler.ts";
 import { cleanEnv, sandboxArgv } from "./sandbox.ts";
 import { ApiServer, json } from "./server.ts";
 import { carlTools, type FileOutput, type Outbox } from "./tools.ts";
 import { GroupArchive, groupHistoryTool } from "./group-archive.ts";
 import { Feedback } from "./feedback.ts";
-import { WorkLedger, workTools } from "./work.ts";
+import { WorkLedger, workStatusCheck, workTools } from "./work.ts";
 import { COMMIT, VERSION } from "./version.ts";
 import { PostService } from "./post/service.ts";
 import { CardDesk } from "./post/cards.ts";
@@ -125,6 +125,7 @@ export class Gateway {
       return [groupHistoryTool(new GroupArchive(cfg.home), cfg.telegram.allowFrom, (chat) => ledger.lastQueued(chat)), ...workTools(cfg, ledger)];
     };
     this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox, Object.keys(cfg.post.accounts).length ? this.post : undefined, this.brain.shellSandbox), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
+    this.brain.replyCheck = workStatusCheck(cfg);
   }
 
   use(plugin: GatewayPlugin): this {
@@ -384,6 +385,8 @@ export class Gateway {
     const replies: string[] = [];
     for (const s of listSessionFiles(this.cfg.home).filter((f) => f.mtime > sinceMs && !f.key.startsWith("schedule:") && f.key !== "inspect").slice(0, 12)) {
       for (const entry of readJsonl<any>(s.file).slice(-40)) {
+        // A touched session still holds older replies: only ones from this window are evidence, or old incidents repeat nightly.
+        if (entryTime(entry) <= sinceMs) continue;
         if (entry.type === "message" && entry.message?.role === "assistant") {
           const t = assistantText(entry.message);
           if (t) replies.push(`- [${s.key}] ${t.replace(/\s+/g, " ").slice(0, 400)}`);
@@ -392,7 +395,7 @@ export class Gateway {
     }
     if (!shadow.length && !replies.length) return "";
     const reply = await this.brain.oneShot(
-      individuationPrompt(this.psyche.read("self.md"), this.psyche.read("integrated.md"), shadow, decisions, replies.slice(-30).join("\n")),
+      individuationPrompt(this.psyche.read("self.md"), this.psyche.read("integrated.md"), shadow, decisions, replies.slice(-30).join("\n"), this.psyche.procedures().filter((p) => p.status === "applied").map((p) => p.text)),
       { system: "You are Carl reflecting on your own conduct. Be exact and unsparing; cite evidence; never invent incidents." },
     );
     const parts = parseIndividuation(reply);
@@ -400,16 +403,35 @@ export class Gateway {
     const written = this.psyche.writeIntegrated(parts.lessons);
     if (!parts.lessons) this.log.warn("individuation reply had no Lessons section; lessons left unchanged", { replyStart: reply.slice(0, 200) });
     this.log.info(written ? "individuation complete" : "individuation complete: no new lessons", { shadow: shadow.length, replies: replies.length, lessons: written });
-    const notable = [parts.contradictions, parts.proposals].some((s) => s && !/^none( found)?\.?$/i.test(s.trim()));
-    if (!notable) return "";
-    return `Self vs. behaviour since ${since?.slice(0, 10) ?? "yesterday"} (${shadow.length} shadow entries).\n\n**Contradictions**\n${parts.contradictions}\n\n**Proposals**\n${parts.proposals}`;
+    const adopted = this.psyche.adoptProposals(parts.proposals);
+    if (adopted.applied.length || adopted.queued.length) this.log.info("individuation proposals", { applied: adopted.applied.map((p) => p.id), queued: adopted.queued.map((q) => q.id), already: adopted.already.length });
+    const contradictions = parts.contradictions && !/^none( found)?\.?$/i.test(parts.contradictions.trim()) ? parts.contradictions : "";
+    const actions = adoptionReport({ ...adopted, already: [] });
+    if (!contradictions && !actions) return "";
+    return [`Self vs. behaviour since ${since?.slice(0, 10) ?? "yesterday"} (${shadow.length} shadow entries, ${replies.length} replies).`, contradictions && `**Contradictions**\n${contradictions}`, actions].filter(Boolean).join("\n\n");
+  }
+
+  /** `/reflect revert <id>`, `/reflect pending`, or no argument: run the pass. */
+  async reflectCommand(args: string): Promise<string> {
+    const [verb, id] = args.trim().split(/\s+/);
+    if (verb === "revert") {
+      if (!id) return "Give the procedure id: /reflect revert <id>";
+      const r = this.psyche.revertProcedure(id);
+      return r ? `Reverted ${r.id}; it leaves the prompt for new turns and will not be adopted again automatically: ${r.text}` : `No applied procedure ${id}.`;
+    }
+    if (verb === "pending") {
+      const q = this.psyche.queuedProposals().filter((p) => p.status === "pending");
+      const applied = this.psyche.procedures().filter((p) => p.status === "applied");
+      return [`Applied procedures:\n${applied.map((p) => `- ${p.id}: ${p.text}`).join("\n") || "(none)"}`, `Waiting for you:\n${q.map((p) => `- ${p.id}: ${p.text} (why: ${p.reason})`).join("\n") || "(none)"}`].join("\n\n");
+    }
+    return (await this.individuate()) || `Nothing to flag. Current lessons:\n\n${this.psyche.read("integrated.md").slice(0, 2_500) || "(none yet)"}`;
   }
 
   private registerCommands(tg: TelegramChannel): void {
     tg.commands.set("schedules", { help: "List schedules", run: async () => "```\n" + this.scheduler.describe() + "\n```" });
     tg.commands.set("reflect", {
-      help: "Run the individuation pass now",
-      run: async () => (await this.individuate()) || `Nothing to flag. Current lessons:\n\n${this.psyche.read("integrated.md").slice(0, 2_500) || "(none yet)"}`,
+      help: "Run the individuation pass now; /reflect pending lists procedures; /reflect revert <id> undoes one",
+      run: async (args) => this.reflectCommand(args ?? ""),
     });
     tg.commands.set("shadow", {
       help: "Recent shadow entries",
@@ -419,6 +441,14 @@ export class Gateway {
       },
     });
   }
+}
+
+/** When a session entry was written (ms); 0 when it carries no time. */
+export function entryTime(entry: any): number {
+  const m = entry?.message?.timestamp;
+  if (typeof m === "number") return m;
+  const t = Date.parse(entry?.timestamp ?? "");
+  return Number.isFinite(t) ? t : 0;
 }
 
 function isCarl(pid: number): boolean {

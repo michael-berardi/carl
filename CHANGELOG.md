@@ -2,6 +2,23 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.16.0
+
+- **The individuation pass acts on its own proposals.** Each proposal is tagged by the pass and checked by Carl. One that
+  only changes Carl's own phrasing or adds a check before a claim becomes a standing procedure (`psyche/procedures.jsonl`,
+  in the prompt from the next turn); the nightly report lists each with its revert command (`/reflect revert <id>` or
+  `carl reflect --revert <id>`), and a reverted one is never re-adopted automatically. A proposal that touches
+  permissions, money, client data, messages to other people, configuration or someone else's authority is never applied:
+  it is queued for the operator (`psyche/proposals.jsonl`, `/reflect pending`). Repeats are not applied or queued twice.
+  Before, proposals were only reported and nothing acted on them.
+- **The pass no longer re-reports old incidents.** It read the last 40 entries of every session touched since the last
+  run, so replies from days earlier were evidence again each night, and it could restate current lessons as new
+  contradictions. It now reads only replies written since the last run and is told a lesson is not evidence.
+- **Work status claims need a record.** Work groups get `work_status` (the jobs Carl queued: id, time, message ids). A
+  reply in a work group that says work is queued, held or stopped without a job id, and without a work tool run in that
+  turn, is sent back to the agent once to check and reply again; one that still fails is recorded in the shadow
+  (`unverified_claim`).
+
 ## 0.15.2
 
 - Security: the agent SDK moves from 1.0.4 to 1.5.0, which clears the `minimatch` advisory GHSA-g3hv-75wg-m249. `npm audit` reports no vulnerabilities.

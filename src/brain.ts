@@ -152,6 +152,11 @@ export class Brain extends EventEmitter {
     }
     return undefined;
   }
+  /**
+   * Send-time check on a finished reply (key, reply text, tools the turn ran). A returned instruction runs the turn once more
+   * with it, and that reply is the one delivered; a reply that still fails is recorded in the shadow.
+   */
+  replyCheck?: (key: string, reply: string, tools: string[]) => string | undefined;
   /** Asks the operator to approve a dangerous shell command for a conversation. Default: unattended (refuse). */
   approver: (key: string) => Approver = () => async () => "unattended";
 
@@ -640,6 +645,7 @@ export class Brain extends EventEmitter {
     sink.onRunStart?.(convo.runId);
     let live = "";
     let toolCalls = 0;
+    const usedTools: string[] = [];
     /** Tool calls in the attempt that is running now, so a failed attempt with side effects is never repeated. */
     let attemptTools = 0;
     const errors: string[] = [];
@@ -665,6 +671,7 @@ export class Brain extends EventEmitter {
         sink.onText?.(live);
       }
       if (e.type === "tool_execution_start") {
+        usedTools.push(e.toolName);
         toolCalls++;
         attemptTools++;
         sink.onTool?.(e.toolName, summarizeArgs(e.args));
@@ -712,6 +719,19 @@ export class Brain extends EventEmitter {
       const reason = (failed.errorMessage ?? "").slice(0, 200);
       this.noteFallback(failedRef, next, reason, until, "primary model unavailable; retrying the turn on the next model in the fallback chain");
       attempt++;
+    }
+    const check = (reply: string) => (this.replyCheck && !convo.stopRequested && !thrown && lastAssistant && !["error", "aborted"].includes(lastAssistant.stopReason) ? this.replyCheck(convo.key, reply, usedTools) : undefined);
+    const correction = check(lastAssistant ? assistantText(lastAssistant) : "");
+    if (correction) {
+      this.log.info("reply check: one corrected reply requested", { key: convo.key });
+      try {
+        await convo.session.prompt(correction, { source: "rpc", expandPromptTemplates: false } as any);
+      } catch (e) {
+        thrown = e as Error;
+      }
+      if (lastAssistant && check(assistantText(lastAssistant))) {
+        this.psyche.recordShadow({ kind: "unverified_claim", conversation: convo.key, summary: "reply stated work status without a job id or a checked record", evidence: assistantText(lastAssistant).slice(0, 500) });
+      }
     }
     unsubscribe();
     const operatorStop = !!convo.stopRequested;

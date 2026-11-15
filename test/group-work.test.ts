@@ -67,7 +67,7 @@ test("work_queue runs the operator's fixed command with the group and project fr
   chmodSync(cmd, 0o755);
   writeFileSync(join(home, "carl.json"), JSON.stringify({ work: { command: [cmd] }, telegram: { allowFrom: [OP], groups: [{ chat: GROUP, members: { [String(MEMBER)]: "Member" }, work: { project: "example-project" } }, { chat: OTHER, members: {} }] }, api: { enabled: false } }));
   const cfg = loadConfig(home);
-  const [tool] = workTools(cfg);
+  const tool = workTools(cfg).find((t) => t.name === "work_queue")!;
   const groupDir = join(home, "sessions", `telegram_group_${GROUP}`);
   mkdirSync(join(home, "media"));
   writeFileSync(join(home, "media", `${GROUP}-6562-0a1b2c3d.jpg`), "img");
@@ -99,13 +99,13 @@ test("work_stop runs the operator's stop command for the conversation's own grou
   chmodSync(queue, 0o755); chmodSync(stop, 0o755);
   const base = { telegram: { allowFrom: [OP], groups: [{ chat: GROUP, members: { [String(MEMBER)]: "Member" }, work: { project: "example-project" } }, { chat: OTHER, members: {} }] }, api: { enabled: false } };
   writeFileSync(join(home, "carl.json"), JSON.stringify({ ...base, work: { command: [queue] } }));
-  assert.deepEqual(workTools(loadConfig(home)).map((t) => t.name), ["work_queue"], "no stop command, no stop tool");
+  assert.deepEqual(workTools(loadConfig(home)).map((t) => t.name), ["work_status", "work_queue"], "no stop command, no stop tool");
   writeFileSync(join(home, "carl.json"), JSON.stringify({ ...base, work: { command: [queue], stopCommand: [stop, "now"] } }));
   const tools = workTools(loadConfig(home));
-  assert.deepEqual(tools.map((t) => t.name), ["work_stop", "work_queue"]);
+  assert.deepEqual(tools.map((t) => t.name), ["work_stop", "work_status", "work_queue"]);
   const tool = tools[0];
   assert.match(tool.description, /Never use work_queue for this/);
-  assert.match(tools[1].description, /never queued as a job/);
+  assert.match(tools[2].description, /never queued as a job/);
   const groupDir = join(home, "sessions", `telegram_group_${GROUP}`);
   const r = text(await tool.execute("x", { reason: "I'll handle this", requested_by: "Member", job: "J-7", chat: GROUP }, undefined, undefined, ctx(groupDir) as any));
   assert.match(r, /^J-7: halted/);
