@@ -2,6 +2,14 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.15.1
+
+- Correct cron day matching when a day field starts with a wildcard step. For example,
+  `0 8 */1 * 0` now runs on Sundays, not every day. Two restricted day fields still use OR.
+  Existing schedules using wildcard day steps may run less often after this fix.
+- Reject interval values that overflow integer milliseconds instead of saving an unusable next-run time.
+- Shorten installation instructions and clarify network access, API authentication and platform sandbox limits.
+
 ## 0.15.0
 
 - **A group can stop the work it queued.** Add `"stopCommand": ["/abs/stop-script", ...]` to `work` and the agent gets
