@@ -2,6 +2,11 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.15.2
+
+- Security: the agent SDK moves from 1.0.4 to 1.5.0, which clears the `minimatch` advisory GHSA-g3hv-75wg-m249. `npm audit` reports no vulnerabilities.
+- `typebox` is now a declared dependency (Carl's tools import it directly; the SDK no longer re-exports it).
+
 ## 0.15.1
 
 - Correct cron day matching when a day field starts with a wildcard step. For example,
