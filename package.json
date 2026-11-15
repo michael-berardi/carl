@@ -1,6 +1,6 @@
 {
   "name": "carl-gateway",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Carl: a small, fast bot gateway for AI agents. Telegram, Slack, Discord, a web app, an OpenAI-compatible API and schedules, with a kernel sandbox and a self-reflecting psyche.",
   "keywords": [
     "agent",
@@ -47,7 +47,8 @@
     "test:e2e": "CARL_MESSAGE_LOG_DIR=\"$(mktemp -d)/messages\" node --experimental-strip-types --no-warnings test/e2e.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.5.0"
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "typebox": "1.3.27"
   },
   "devDependencies": {
     "@types/node": "22.15.21",
