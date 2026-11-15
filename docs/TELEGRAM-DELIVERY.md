@@ -1,6 +1,6 @@
 # Telegram delivery and audit safety
 
-Carl 0.4.2 never automatically repeats an ambiguous Telegram mutation. A lost network response, malformed response or
+Carl never automatically repeats an ambiguous Telegram mutation. A lost network response, malformed response or
 HTTP 5xx may mean Telegram accepted the message; it is not evidence of refusal. This applies to sends, uploads,
 copies, forwards, edits and deletions. Read-only calls retain bounded retries. Explicit Bot API 429 refusals retain
 bounded retries and honor `retry_after`; a delay above 60 seconds is returned to the caller rather than retried early.
