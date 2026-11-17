@@ -67,9 +67,13 @@ export function runWorkCommand(argv: string[], req: WorkRequest | Record<string,
   if (!cmd || !existsSync(cmd)) return Promise.reject(new Error(`work.command ${cmd ?? "(empty)"} does not exist`));
   return new Promise((resolve, reject) => {
     const child = execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 1 << 20 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(`queueing failed (${cmd}): ${(stderr || stdout || err.message).trim().slice(0, 800)}`));
+      if (err) {
+        const cause = [err.message, err.message.endsWith(stderr) ? "" : stderr, stdout].filter(Boolean).join("\n");
+        reject(new Error(`queueing failed (${cmd}): ${(stderr || stdout || err.message).trim().slice(0, 800)}`, { cause }));
+      }
       else resolve(stdout.trim().slice(0, 2_000));
     });
+    child.stdin?.on("error", () => {}); // execFile reports the process failure even if stdin closes early
     child.stdin?.end(JSON.stringify(req));
   });
 }
@@ -95,7 +99,10 @@ export function runStopCommand(argv: string[], req: Record<string, unknown>, tim
 
 const ok = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
 
-export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): ToolDefinition[] {
+export const WORK_REQUEST_NOTED = "I’ve noted your request.";
+type QueueFailureNotice = (request: WorkRequest, cause: string) => Promise<void>;
+
+export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home), notifyQueueFailure?: QueueFailureNotice): ToolDefinition[] {
   if (!cfg.work) return [];
   const command = cfg.work.command;
   const groups = cfg.telegram.groups.filter((g) => g.work);
@@ -110,7 +117,7 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
     if (scope.only !== undefined && asked !== undefined && asked !== scope.only) throw new Error(`from a group you can ${verb === "queued" ? "queue" : verb === "stopped" ? "stop" : "look up"} work only for that group`);
     const group = groups.find((g) => g.chat === chat);
     if (!group?.work) throw new Error(`group ${chat} has no work set up (telegram.groups[].work)`);
-    return { chat, project: group.work.project };
+    return { chat, project: group.work.project, inGroup: scope.only !== undefined };
   };
   const stopTool = !stop ? [] : [
     defineTool({
@@ -157,7 +164,7 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
       name: "work_queue",
       label: "Queue work",
       description:
-        "Turn requests from this group into one queued work job that a worker carries out and reports back to this group. Use only when someone asks you to queue or start the work. A request to stop, cancel or halt work is never queued as a job. Files attached to the messages named in `message_ids` are passed along automatically, so include the id of every message that carried a file. Put the requests in `request` faithfully (who said what, with message ids); do not invent requirements. Returns the job id; then tell the group in two or three short lines what will be done.",
+        "Turn requests from this group into one queued work job that a worker carries out and reports back to this group. Use only when someone asks you to queue or start the work. A request to stop, cancel or halt work is never queued as a job. Files attached to the messages named in `message_ids` are passed along automatically, so include the id of every message that carried a file. Put the requests in `request` faithfully (who said what, with message ids); do not invent requirements. On success, cite the job id and briefly describe the work. If not queued, acknowledge the request neutrally: never disclose internal failure details, claim work started, or promise that someone will follow up.",
       parameters: Type.Object({
         title: Type.String({ description: "short job title, e.g. 'Example: feedback'" }),
         request: Type.String({ description: "the requests to act on, faithful to what was said, grouped by site or topic" }),
@@ -166,11 +173,22 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
         chat: Type.Optional(Type.Number({ description: "only from the operator's direct chat: the group to work for" })),
       }),
       async execute(_id, p, _signal, _update, ctx) {
-        const { chat, project } = groupFor(ctx, p.chat, "queued");
+        const { chat, project, inGroup } = groupFor(ctx, p.chat, "queued");
         if (!p.title.trim() || !p.request.trim()) throw new Error("title and request are required");
         const ids = p.message_ids.filter((n) => Number.isSafeInteger(n));
         const req: WorkRequest = { chat, project, title: p.title.trim(), request: p.request.trim(), messageIds: ids, requestedBy: p.requested_by.trim() || "unknown", files: filesForMessages(cfg.home, chat, ids) };
-        const out = await runWorkCommand(command, req);
+        let out: string;
+        try {
+          out = await runWorkCommand(command, req);
+        } catch (e) {
+          if (!inGroup) throw e;
+          const error = e as Error;
+          const sent = notifyQueueFailure && await notifyQueueFailure(req, String(error.cause ?? error.message)).then(() => true, () => false);
+          return {
+            ...ok(`The request was not queued. ${sent ? "The operator has been sent the cause." : "Delivery of the cause to the operator was not confirmed."} Do not retry or claim work was queued or started. In the group, reply with only: ${WORK_REQUEST_NOTED} Do not mention queues, failures, errors, systems, or who will follow up.`),
+            details: { workQueueFailed: true },
+          };
+        }
         const job = out.match(/\bJ-\d+\b/)?.[0] ?? "";
         if (ids.length) ledger.markQueued(chat, ids, job || out.slice(0, 80));
         return ok(job ? `Queued ${job}. ${out}` : out);
@@ -183,17 +201,20 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home)): T
 const STATUS_CLAIM = /\b(queued?|on hold|held|halt(?:ed)?|stopped|paused|cancell?ed|in progress|is running|still running)\b/i;
 const JOB_ID = /\bJ-\d+\b/;
 
-/**
- * Send-time check for groups with work: a reply that states work status must rest on a record checked in this turn (a work
- * tool ran) or cite a job id. Returns the instruction for one corrected reply, or undefined when the reply may go out.
- */
+const INTERNAL_FAILURE = /\b(errors?|failed|failures?|did not (?:yet )?start|didn['’]t start|systems?)\b/i;
+const NAMED_FOLLOW_UP = /(?:^|[^\p{L}\p{M}])\p{Lu}[\p{Ll}\p{M}]+\s+will\s+follow[\s-]+up\b/u;
+
+export function isWorkGroup(cfg: CarlConfig, key: string): boolean {
+  const m = key.match(/^telegram:group:(-\d+)(?::\d+)?$/);
+  return !!(cfg.work && m && cfg.telegram.groups.some((g) => g.chat === Number(m[1]) && g.work));
+}
+
+/** Keep internal failures and named promises out of work groups, and require evidence for work status claims. */
 export function workStatusCheck(cfg: CarlConfig): ((key: string, reply: string, tools: string[]) => string | undefined) | undefined {
-  if (!cfg.work) return undefined;
-  const chats = new Set(cfg.telegram.groups.filter((g) => g.work).map((g) => g.chat));
-  if (!chats.size) return undefined;
+  if (!cfg.work || !cfg.telegram.groups.some((g) => g.work)) return undefined;
   return (key, reply, tools) => {
-    const m = key.match(/^telegram:group:(-?\d+)/);
-    if (!m || !chats.has(Number(m[1]))) return undefined;
+    if (!isWorkGroup(cfg, key)) return undefined;
+    if (INTERNAL_FAILURE.test(reply) || NAMED_FOLLOW_UP.test(reply)) return `[Carl check, not from the group] Rewrite the reply without internal errors or promises on another person's behalf. Do not take any new action. For an unconfirmed request, say only: ${WORK_REQUEST_NOTED}`;
     if (!STATUS_CLAIM.test(reply) || JOB_ID.test(reply) || tools.some((t) => t.startsWith("work_"))) return undefined;
     return "[Carl check, not from the group] Your reply states the status of work (queued, held, stopped or similar) without a job id and without checking a record in this turn. If it is about a job: call work_status (or work_stop when asked to stop), then reply again citing the job id and when you checked, and call any status you could not confirm \"not confirmed\". If it is not about a job's status, send the same reply again unchanged.";
   };

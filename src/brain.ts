@@ -35,6 +35,7 @@ import { claudeCodeProviderConfig, closeSpares, PROVIDER as CLAUDE_PROVIDER, swe
 import { createRouter } from "./router.ts";
 import { type Approver, guardedFileOps, guardedReadOps, shellGuard } from "./guard.ts";
 import { looksLikeCorrection, type Psyche } from "./psyche.ts";
+import { isWorkGroup, WORK_REQUEST_NOTED } from "./work.ts";
 
 export interface Inbound {
   text: string;
@@ -645,7 +646,9 @@ export class Brain extends EventEmitter {
     sink.onRunStart?.(convo.runId);
     let live = "";
     let toolCalls = 0;
-    const usedTools: string[] = [];
+    const completedTools: string[] = [];
+    const workGroup = isWorkGroup(this.cfg, convo.key);
+    let workQueueFailed = false;
     /** Tool calls in the attempt that is running now, so a failed attempt with side effects is never repeated. */
     let attemptTools = 0;
     const errors: string[] = [];
@@ -668,13 +671,16 @@ export class Brain extends EventEmitter {
       }
       if (e.type === "message_update" && e.assistantMessageEvent.type === "text_delta") {
         live += e.assistantMessageEvent.delta;
-        sink.onText?.(live);
+        if (!workGroup) sink.onText?.(live); // unchecked drafts must not reach work groups
       }
       if (e.type === "tool_execution_start") {
-        usedTools.push(e.toolName);
         toolCalls++;
         attemptTools++;
-        sink.onTool?.(e.toolName, summarizeArgs(e.args));
+        if (!workGroup) sink.onTool?.(e.toolName, summarizeArgs(e.args));
+      }
+      if (e.type === "tool_execution_end" && !e.isError) {
+        if (workGroup && e.toolName === "work_queue" && e.result?.details?.workQueueFailed === true) workQueueFailed = true;
+        else completedTools.push(e.toolName);
       }
       if (e.type === "tool_execution_end" && e.isError) {
         const msg = toolResultText(e.result).slice(0, 600);
@@ -720,8 +726,10 @@ export class Brain extends EventEmitter {
       this.noteFallback(failedRef, next, reason, until, "primary model unavailable; retrying the turn on the next model in the fallback chain");
       attempt++;
     }
-    const check = (reply: string) => (this.replyCheck && !convo.stopRequested && !thrown && lastAssistant && !["error", "aborted"].includes(lastAssistant.stopReason) ? this.replyCheck(convo.key, reply, usedTools) : undefined);
-    const correction = check(lastAssistant ? assistantText(lastAssistant) : "");
+    const check = (reply: string) => this.replyCheck?.(convo.key, reply, completedTools);
+    const correction = !workQueueFailed && !convo.stopRequested && !thrown && lastAssistant && !["error", "aborted"].includes(lastAssistant.stopReason)
+      ? check(assistantText(lastAssistant)) : undefined;
+    let withhold = false;
     if (correction) {
       this.log.info("reply check: one corrected reply requested", { key: convo.key });
       try {
@@ -729,8 +737,9 @@ export class Brain extends EventEmitter {
       } catch (e) {
         thrown = e as Error;
       }
-      if (lastAssistant && check(assistantText(lastAssistant))) {
-        this.psyche.recordShadow({ kind: "unverified_claim", conversation: convo.key, summary: "reply stated work status without a job id or a checked record", evidence: assistantText(lastAssistant).slice(0, 500) });
+      withhold = !lastAssistant || !!thrown || !!check(assistantText(lastAssistant));
+      if (withhold && lastAssistant && !thrown) {
+        this.psyche.recordShadow({ kind: "unverified_claim", conversation: convo.key, summary: "reply still failed the work reply check", evidence: assistantText(lastAssistant).slice(0, 500) });
       }
     }
     unsubscribe();
@@ -746,13 +755,15 @@ export class Brain extends EventEmitter {
         : !lastAssistant
           ? "the model produced no reply"
           : undefined;
-    let replyText = lastAssistant ? assistantText(lastAssistant) : "";
-    if (lastAssistant?.stopReason === "length") replyText += "\n\n(cut off: the reply hit the output limit)";
+    const rawReply = lastAssistant ? assistantText(lastAssistant) : "";
+    const neutral = workQueueFailed || withhold || (workGroup && !!check(rawReply));
+    let replyText = neutral ? WORK_REQUEST_NOTED : rawReply;
+    if (!neutral && lastAssistant?.stopReason === "length") replyText += "\n\n(cut off: the reply hit the output limit)";
     const result: RunResult = {
       text: replyText,
-      ok: !error && !aborted,
-      error,
-      aborted,
+      ok: workQueueFailed || (!error && !aborted),
+      error: workQueueFailed ? undefined : error,
+      aborted: workQueueFailed ? false : aborted,
       toolCalls,
       usage,
       // The physical model that answered (a router selection names the model it routed to).

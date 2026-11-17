@@ -1,13 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
+import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Gateway } from "../src/gateway.ts";
 import { TelegramChannel } from "../src/channels/telegram.ts";
 import { loadConfig, ConfigError } from "../src/config.ts";
 import { GroupArchive, groupHistoryTool, readableScope } from "../src/group-archive.ts";
 import { Log } from "../src/log.ts";
-import { WorkLedger, filesForMessages, runStopCommand, workTools } from "../src/work.ts";
+import { WORK_REQUEST_NOTED, WorkLedger, filesForMessages, runStopCommand, workTools } from "../src/work.ts";
 import { FakeTelegram } from "./fake-telegram.ts";
 
 const OP = 4242, GROUP = -10001, OTHER = -10002, MEMBER = 10003, STRANGER = 77;
@@ -87,6 +90,58 @@ test("work_queue runs the operator's fixed command with the group and project fr
   await assert.rejects(tool.execute("x", { title: "t", request: "r", message_ids: [], requested_by: "x" }, undefined, undefined, ctx(join(home, "sessions", "telegram_dm_99")) as any), /team group or by the operator/);
   await assert.rejects(tool.execute("x", { title: "t", request: "r", message_ids: [], requested_by: "Operator", chat: OTHER }, undefined, undefined, ctx(join(home, "sessions", `telegram_dm_${OP}`)) as any), /no work set up/);
   rmSync(home, { recursive: true, force: true });
+});
+
+test("a queue failure notifies only the operator and forces a neutral group reply", async (t) => {
+  const tg = new FakeTelegram();
+  await tg.start();
+  const home = mkdtempSync(join(tmpdir(), "carl-gw-failed-work-"));
+  const agentDir = join(home, "agent"), cmd = join(home, "queue.sh");
+  const stderr = `private diagnostic ${"x".repeat(2100)} end of diagnostic`;
+  const stdout = "private command stdout";
+  const faux = registerFauxProvider({ models: [{ id: "faux-work", contextWindow: 200_000, maxTokens: 8_000 }] });
+  mkdirSync(agentDir);
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { "plan-a": { api: faux.api, baseUrl: "http://127.0.0.1:9", apiKey: "test", models: [{ id: "model-x", name: "model-x", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200_000, maxTokens: 8_000 }] } } }));
+  writeFileSync(cmd, `#!/bin/sh
+cat >/dev/null
+echo '${stderr}' >&2
+echo '${stdout}'
+exit 4
+`, { mode: 0o700 });
+  writeFileSync(join(home, ".env"), "WORK_TEST_TELEGRAM_TOKEN=123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz\n");
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "plan-a/model-x", agentDir, tools: [], claude: { enabled: false }, ultracompress: "off", update: { check: false }, work: { command: [cmd] }, telegram: { tokenEnv: "WORK_TEST_TELEGRAM_TOKEN", apiBase: tg.base, allowFrom: [OP], homeChat: OP, stream: true, groups: [{ chat: GROUP, members: { [MEMBER]: "Member" }, work: { project: "example" } }] }, api: { enabled: false } }));
+  const gw = new Gateway(loadConfig(home));
+  t.after(async () => { await gw.stop("test"); await tg.stop(); rmSync(home, { recursive: true, force: true }); });
+  await gw.start();
+  const title = "Refresh the example pages";
+  const id = tg.groupMessage(GROUP, MEMBER, "@carl_test_bot please queue the page refresh");
+  const args = { title, request: "Refresh pages", message_ids: [id], requested_by: "Member" };
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("work_queue", args)),
+    fauxAssistantMessage(fauxText("The queue failed. Avery will follow up.")),
+  ]);
+  await tg.waitFor(() => tg.texts(GROUP).length > 0, 10_000, "group acknowledgment");
+  assert.deepEqual(tg.texts(GROUP), [WORK_REQUEST_NOTED]);
+  assert.deepEqual(tg.calls.filter((c) => c.body.chat_id === GROUP && /sendMessage|editMessageText/.test(c.method)).map((c) => c.body.text), [WORK_REQUEST_NOTED], "unchecked drafts never go out, even with streaming configured");
+  const homeNotice = tg.texts(OP).join("");
+  assert.ok(homeNotice.includes(`group ${GROUP}: ${title}\nMessage ids: ${id}`));
+  assert.ok(homeNotice.includes(stderr) && homeNotice.includes(stdout), "the operator sees the full command output without truncation");
+  assert.deepEqual(new WorkLedger(home).jobs(GROUP), []);
+  const session = join(home, "sessions", `telegram_group_${GROUP}`);
+  const history = readdirSync(session).filter((f) => f.endsWith(".jsonl")).map((f) => readFileSync(join(session, f), "utf8")).join("");
+  assert.match(history, /The request was not queued.*operator has been sent the cause/);
+  assert.doesNotMatch(history, /private diagnostic|private command stdout/);
+  faux.setResponses([
+    fauxAssistantMessage(fauxText("Avery will follow up.")),
+    fauxAssistantMessage(fauxText("Thanks for the suggestion.")),
+  ]);
+  tg.groupMessage(GROUP, MEMBER, "@carl_test_bot here is another suggestion");
+  await tg.waitFor(() => tg.texts(GROUP).length === 2, 10_000, "corrected group reply");
+  assert.deepEqual(tg.texts(GROUP), [WORK_REQUEST_NOTED, "Thanks for the suggestion."]);
+  assert.ok(!tg.calls.some((c) => c.body.chat_id === GROUP && c.body.text?.includes("Avery")));
+
+  const direct = workTools(gw.cfg).find((tool) => tool.name === "work_queue")!;
+  await assert.rejects(direct.execute("x", { ...args, chat: GROUP }, undefined, undefined, ctx(join(home, "sessions", `telegram_dm_${OP}`)) as any), /private diagnostic/);
 });
 
 test("work_stop runs the operator's stop command for the conversation's own group and never queues anything", async () => {

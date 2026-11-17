@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.16.2 (2026-11-17)
+
+- **Queue failures stay out of Telegram work groups.** Carl acknowledges the request without saying it was queued, and sends the full cause, group, title and message ids to the operator’s Telegram home chat. Replies that disclose internal failures or promise a named person will follow up are checked before sending; if a rewrite still fails the check, Carl sends a neutral acknowledgment instead.
+
 ## 0.16.1 (2026-11-15)
 
 - **`--help` on a command prints its usage and does nothing else.** `carl update --help` used to install the latest release and restart the running gateway. Every command and nested verb (`update --rollback`, `reflect --revert`, `post schedule` and the rest) now answers `--help` or `-h` before any setup, download, file write or signal, and exits 0. A `--help` inside a message (`carl send ... "use --help"`) is still sent as text.
