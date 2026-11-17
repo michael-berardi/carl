@@ -201,8 +201,13 @@ export function workTools(cfg: CarlConfig, ledger = new WorkLedger(cfg.home), no
 const STATUS_CLAIM = /\b(queued?|on hold|held|halt(?:ed)?|stopped|paused|cancell?ed|in progress|is running|still running)\b/i;
 const JOB_ID = /\bJ-\d+\b/;
 
-const INTERNAL_FAILURE = /\b(errors?|failed|failures?|did not (?:yet )?start|didn['’]t start|systems?)\b/i;
-const NAMED_FOLLOW_UP = /(?:^|[^\p{L}\p{M}])\p{Lu}[\p{Ll}\p{M}]+\s+will\s+follow[\s-]+up\b/u;
+// Internal failures of the work pipeline itself, not ordinary words: "the application failed" or "the immigration system" in a
+// legal group is content, so the check needs a work noun (queue, job, worker, work) near a failure word, or a system/internal error.
+const WORK_NOUN = String.raw`(?:queue|queued|queueing|queuing|job|J-\d+|worker|tool|work|request)`;
+const FAILURE = String.raw`(?:fail(?:ed|ure|s)?|errors?|did not (?:yet )?start|didn['’]t start|could not (?:be )?(?:queued|started)|was not (?:queued|started)|broke|crashed)`;
+const INTERNAL_FAILURE = new RegExp(String.raw`\b${WORK_NOUN}\b[^.!?\n]{0,60}\b${FAILURE}\b|\b${FAILURE}\b[^.!?\n]{0,60}\b${WORK_NOUN}\b|\b(?:system|internal|technical|server)\s+(?:error|failure|issue|problem)s?\b|\bsystem\s+(?:is\s+)?down\b`, "i");
+// A promise on a named person's behalf; pronouns ("We will follow up") are the speaker's own and pass.
+const NAMED_FOLLOW_UP = /(?:^|[^\p{L}\p{M}])(?!(?:We|They|He|She|It|You|Someone|Somebody)\b)\p{Lu}[\p{Ll}\p{M}]+\s+will\s+follow[\s-]+up\b/u;
 
 export function isWorkGroup(cfg: CarlConfig, key: string): boolean {
   const m = key.match(/^telegram:group:(-\d+)(?::\d+)?$/);
