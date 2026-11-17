@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { Gateway } from "../src/gateway.ts";
 import { classifyProposal, parseProposals, Psyche } from "../src/psyche.ts";
-import { workStatusCheck } from "../src/work.ts";
+import { WORK_REQUEST_NOTED, workStatusCheck } from "../src/work.ts";
 
 function psycheHome() {
   const h = mkdtempSync(join(tmpdir(), "carl-adopt-"));
@@ -107,6 +107,14 @@ test("send-time check: a work status claim in a work group needs a job id or a w
   assert.equal(check("telegram:group:-100", "Here is the summary you asked for.", []), undefined, "no status claim");
   assert.equal(check("telegram:group:-200", "It is in the queue.", []), undefined, "a group without work is not checked");
   assert.equal(check("telegram:dm:1", "It is in the queue.", []), undefined);
+  const bad = "The work did not start because the queue failed. Avery will follow up.";
+  for (const reply of [bad, "There was an error.", "It was a system issue.", "Avery will follow up.", "J-12 failed."]) {
+    assert.match(check("telegram:group:-100:3", reply, ["work_queue"]) ?? "", /Rewrite the reply/);
+  }
+  assert.equal(check("telegram:group:-200", bad, []), undefined);
+  assert.equal(check("telegram:dm:1", bad, []), undefined);
+  assert.equal(check("telegram:group:-100", WORK_REQUEST_NOTED, []), undefined);
+  assert.equal(check("telegram:group:-100", "I will follow up with a summary.", []), undefined);
 });
 
 test("reply path: a failed send-time check runs the turn once more and delivers the corrected reply", async (t) => {
@@ -135,6 +143,7 @@ test("reply path: a failed send-time check runs the turn once more and delivers 
   assert.equal(r.text, "Queued J-5, checked just now.");
   assert.deepEqual(seen, ["It is in the queue.", "Queued J-5, checked just now."]);
   faux.setResponses([fauxAssistantMessage(fauxText("Still in the queue.")), fauxAssistantMessage(fauxText("It is queued."))]);
-  await brain.ask("telegram:group:-100", { text: "and now?", source: "telegram" });
+  const withheld = await brain.ask("telegram:group:-100", { text: "and now?", source: "telegram" });
+  assert.equal(withheld.text, WORK_REQUEST_NOTED);
   assert.equal(psyche.shadowSince().filter((e) => e.kind === "unverified_claim").length, 1, "a reply that still fails is recorded, not hidden");
 });

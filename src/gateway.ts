@@ -18,7 +18,7 @@ import { ApiServer, json } from "./server.ts";
 import { carlTools, type FileOutput, type Outbox } from "./tools.ts";
 import { GroupArchive, groupHistoryTool } from "./group-archive.ts";
 import { Feedback } from "./feedback.ts";
-import { WorkLedger, workStatusCheck, workTools } from "./work.ts";
+import { WorkLedger, workStatusCheck, workTools, type WorkRequest } from "./work.ts";
 import { COMMIT, VERSION } from "./version.ts";
 import { PostService } from "./post/service.ts";
 import { CardDesk } from "./post/cards.ts";
@@ -122,7 +122,7 @@ export class Gateway {
     const groupTools = (): ToolDefinition[] => {
       if (!cfg.telegram.enabled || !cfg.telegram.groups.length) return [];
       const ledger = new WorkLedger(cfg.home);
-      return [groupHistoryTool(new GroupArchive(cfg.home), cfg.telegram.allowFrom, (chat) => ledger.lastQueued(chat)), ...workTools(cfg, ledger)];
+      return [groupHistoryTool(new GroupArchive(cfg.home), cfg.telegram.allowFrom, (chat) => ledger.lastQueued(chat)), ...workTools(cfg, ledger, (request, cause) => this.tellWorkQueueFailure(request, cause))];
     };
     this.brain = new Brain(cfg, this.psyche, this.log, () => [...carlTools(this.psyche, this.scheduler, outbox, Object.keys(cfg.post.accounts).length ? this.post : undefined, this.brain.shellSandbox), ...moduleAskTools(cfg, asks), ...groupTools()], { shared: true });
     this.brain.replyCheck = workStatusCheck(cfg);
@@ -354,6 +354,21 @@ export class Gateway {
   private async sendTelegramFile(chatId: number, text: string, file: FileOutput, threadId?: number): Promise<string> {
     const sent = await this.telegram!.sendFile(chatId, file, text, threadId);
     return `Delivered (${sent.length} message${sent.length === 1 ? "" : "s"}).`;
+  }
+
+  private async tellWorkQueueFailure(request: WorkRequest, cause: string): Promise<void> {
+    const { chat, title, messageIds } = request;
+    const notice = `Could not queue work from group ${chat}: ${title}\nMessage ids: ${messageIds.join(", ") || "(none)"}\n${cause}`;
+    try {
+      const home = this.cfg.telegram.homeChat;
+      if (!this.telegram || !home || home <= 0) throw new Error("telegram.homeChat is not configured as a direct chat");
+      // Like other operator notices, send directly, without reporting uncertain delivery as success.
+      // Plain text preserves command diagnostics; keep every chunk below Telegram's UTF-16 limit.
+      for (const chunk of notice.match(/[\s\S]{1,1900}/gu) ?? []) await this.telegram.api.sendMessage(home, chunk);
+    } catch (e) {
+      this.log.error("could not deliver work queue failure to the operator", { chat, error: (e as Error).message, notice });
+      throw e;
+    }
   }
 
   /** Send to Telegram now, with no retry queue: a failure throws, so the caller knows the operator was not told. */
