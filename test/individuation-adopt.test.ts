@@ -108,8 +108,11 @@ test("send-time check: a work status claim in a work group needs a job id or a w
   assert.equal(check("telegram:group:-200", "It is in the queue.", []), undefined, "a group without work is not checked");
   assert.equal(check("telegram:dm:1", "It is in the queue.", []), undefined);
   const bad = "The work did not start because the queue failed. Avery will follow up.";
-  for (const reply of [bad, "There was an error.", "It was a system issue.", "Avery will follow up.", "J-12 failed."]) {
+  for (const reply of [bad, "There was an error with the job.", "It was a system issue.", "Avery will follow up.", "J-12 failed.", "The queue had an error."]) {
     assert.match(check("telegram:group:-100:3", reply, ["work_queue"]) ?? "", /Rewrite the reply/);
+  }
+  for (const reply of ["If the first application failed, a new one can be filed.", "There is an error in the birth certificate's date.", "Argentina's legal system recognizes dual nationality.", "We will follow up with the documents."]) {
+    assert.equal(check("telegram:group:-100", reply, []), undefined, `legal content is not an internal failure: ${reply}`);
   }
   assert.equal(check("telegram:group:-200", bad, []), undefined);
   assert.equal(check("telegram:dm:1", bad, []), undefined);
