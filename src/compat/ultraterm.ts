@@ -11,6 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { TranscriptEvent } from "../brain.ts";
 import type { Gateway, GatewayPlugin } from "../gateway.ts";
 import { json } from "../server.ts";
+import { ModelRegistryError, checkModelsResolve, persistModel } from "../model-guard.ts";
 import { COMMIT, VERSION } from "../version.ts";
 
 const INTAKE_CONTRACT = "hermes.canonical-intake.v1";
@@ -404,8 +405,16 @@ export class UltraTermCompat implements GatewayPlugin {
     } catch (e) {
       return json(res, 422, { error: { code: "model_selection_rejected", message: (e as Error).message } });
     }
+    // Every configured fallback must resolve too, in the registry Carl reads; refuse before the claim is recorded.
+    const resolves = (r: string) => { this.gw.brain.model(r); return true; };
+    try {
+      checkModelsResolve([ref, ...this.gw.cfg.fallbackModels], this.gw.cfg.modelsPath, resolves);
+    } catch (e) {
+      if (e instanceof ModelRegistryError) return json(res, 422, { error: { code: e.code, message: e.message, missing: e.missing, registry: e.registry } });
+      throw e;
+    }
     this.intake.prepare("INSERT INTO model_selection (request_id, session_id, payload, state) VALUES (?, ?, ?, 'claimed')").run(requestId, sessionId, payload);
-    persistModel(this.gw.cfg.home, ref);
+    persistModel(this.gw.cfg.home, ref, this.gw.cfg.fallbackModels, this.gw.cfg.modelsPath, resolves);
     // The router reads the primary per request; with no router, sessions pick it up at their next start.
     this.gw.cfg.model = ref;
     if (!this.gw.cfg.fallbackModels.length) {
@@ -484,14 +493,6 @@ function ensureSchema(db: DatabaseSync): void {
       cache_write_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0,
       actual_cost_usd REAL NOT NULL DEFAULT 0, cost_status TEXT, cost_source TEXT, first_seen REAL, last_seen REAL,
       PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task));`);
-}
-
-function persistModel(home: string, ref: string): void {
-  const file = join(home, "carl.json");
-  const raw = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
-  raw.model = ref;
-  writeFileSync(`${file}.tmp`, JSON.stringify(raw, null, 2) + "\n", { mode: 0o600 });
-  renameSync(`${file}.tmp`, file);
 }
 
 function mcpServers(home: string): string[] {
