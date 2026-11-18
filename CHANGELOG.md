@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.16.5 (2026-11-18)
+
+- **carl.json can name the model registry separately from the logins.** A new `modelsPath` setting reads the model catalog from the operator's main Pi registry (`~/.pi/agent/models.json`), while `auth.json` still comes from `agentDir`. A copied `models.json` in a fallback folder can no longer drift from the models the operator routes to: a stale copy used to make a routed model "not in Pi's registry". Without `modelsPath` nothing changes: the catalog is read from `agentDir/models.json` as before.
+
 ## 0.16.4 (2026-11-18)
 
 - **An unresolvable primary model no longer stops the gateway while a fallback answers.** When `model` in carl.json is not in the model registry (for example a model removed from the operator's Pi registry after a reboot), Carl logs a named error, starts on the first fallback in `fallbackModels` that resolves, and sends the operator one alert to the home chat. It exits (code 78) only when no configured model resolves, and the error names the primary model.

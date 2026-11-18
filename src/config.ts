@@ -91,6 +91,9 @@ export interface CarlConfig {
   keepRecentTokens: number;
   /** Pi agent dir: auth.json and models.json come from here, so Carl shares Pi's logins. */
   agentDir: string;
+  /** The model catalog (models.json). Defaults to agentDir's copy; point it at the main Pi registry so a copied
+   *  fallback folder cannot drift from the models the operator routes to. Logins still come from agentDir. */
+  modelsPath: string;
   /** Agent working directory (tools run here). */
   workspace: string;
   /** Extra instruction files appended to the system prompt, in order (e.g. a team AGENTS.md). */
@@ -227,6 +230,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     // Model logins (auth.json) and custom models (models.json). Carl's own folder by default; point it at another
     // Pi-SDK app's folder (e.g. ~/.pi/agent) to share its logins. "piAgentDir" is the older name.
     agentDir: abs(raw.agentDir ?? raw.piAgentDir ?? join(home, "agent"), home),
+    modelsPath: abs(raw.modelsPath ?? join(abs(raw.agentDir ?? raw.piAgentDir ?? join(home, "agent"), home), "models.json"), home),
     workspace: abs(raw.workspace ?? "workspace", home),
     contextFiles: strList(raw.contextFiles, "contextFiles").map((p) => abs(p, home)),
     skills: strList(raw.skills, "skills").map((p) => abs(p, home)),

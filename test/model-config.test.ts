@@ -89,6 +89,26 @@ if (process.argv[2] === "--scenario") {
     assert.match(result.error, /router-a\/gone-model.*is not in Pi's registry/);
   });
 
+  test("modelsPath reads the model catalog from the main Pi registry while logins stay in agentDir (no copied models.json to drift)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "carl-models-path-"));
+    try {
+      const home = join(root, "home"), agentDir = join(root, "fallback-agent"), registry = join(root, "pi-agent");
+      mkdirSync(home); mkdirSync(agentDir); mkdirSync(registry);
+      // The fallback folder's copy is stale: it lacks the model the operator routes to.
+      writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
+      writeFileSync(join(registry, "models.json"), JSON.stringify(MODELS));
+      writeFileSync(join(home, "carl.json"), JSON.stringify({ model: "router-a/vendor/model-x:variant", fallbackModels: [],
+        agentDir, modelsPath: join(registry, "models.json"), claude: { enabled: false }, ultracompress: "off",
+        telegram: { enabled: false }, api: { enabled: false } }));
+      const cfg = loadConfig(home); ensureHome(cfg);
+      const brain = new Brain(cfg, new Psyche(home), { info() {}, warn() {}, error() {}, debug() {} } as any, () => []);
+      try {
+        await brain.init();
+        assert.equal(brain.model("router-a/vendor/model-x:variant").id, "vendor/model-x:variant");
+      } finally { await brain.shutdown(); }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   test("a configured fallback whose provider is off is skipped by name; the rest of the chain stays", async () => {
     const models = { providers: { ...MODELS.providers, "plan-b": { api: "openai-completions", baseUrl: "http://127.0.0.1:9",
       apiKey: "test", models: [modelDef("model-y", "Model Y")] } } };
