@@ -353,7 +353,7 @@ export class Brain extends EventEmitter {
     }
     this.runtime = await ModelRuntime.create({
       authPath: join(this.cfg.agentDir, "auth.json"),
-      modelsPath: join(this.cfg.agentDir, "models.json"),
+      modelsPath: this.cfg.modelsPath,
     });
     if (this.cfg.claude.enabled) {
       const swept = sweepCallFolders(join(this.cfg.home, "state", "claude-tmp"));

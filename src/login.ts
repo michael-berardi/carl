@@ -10,7 +10,7 @@ import type { CarlConfig } from "./config.ts";
 
 async function runtime(cfg: CarlConfig): Promise<ModelRuntime> {
   mkdirSync(cfg.agentDir, { recursive: true, mode: 0o700 });
-  return ModelRuntime.create({ authPath: join(cfg.agentDir, "auth.json"), modelsPath: join(cfg.agentDir, "models.json") });
+  return ModelRuntime.create({ authPath: join(cfg.agentDir, "auth.json"), modelsPath: cfg.modelsPath });
 }
 
 /** Providers that already have a login, for setup's model step. */
