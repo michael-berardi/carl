@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.16.4 (2026-11-18)
+
+- **An unresolvable primary model no longer stops the gateway while a fallback answers.** When `model` in carl.json is not in the model registry (for example a model removed from the operator's Pi registry after a reboot), Carl logs a named error, starts on the first fallback in `fallbackModels` that resolves, and sends the operator one alert to the home chat. It exits (code 78) only when no configured model resolves, and the error names the primary model.
+
 ## 0.16.3 (2026-11-17)
 
 - **`carl update` gives a shared release its Node runtime link.** When a second bot on the same app folder adopted a release the first had installed without a `node` link, `carl send` from a clean environment failed with "node: not found" (exit 127) while the gateway itself kept running. The shared release now gets the link it was missing.

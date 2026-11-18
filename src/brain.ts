@@ -126,9 +126,15 @@ export class Brain extends EventEmitter {
   private meteredNotice = new Map<string, number>();
   /** True once the carl/auto router is registered. */
   private routerReady = false;
+  /** Set when carl.json's primary does not resolve and a configured fallback starts instead (the gateway alerts the owner once). */
+  primaryUnavailable?: { primary: string; start: string; error: string };
+  /** The first link of the chain: the configured primary, or the fallback it was replaced with at startup. */
+  private effectivePrimary(): string {
+    return this.primaryUnavailable ? this.primaryUnavailable.start : this.cfg.model;
+  }
   /** The model sessions select: the router when fallbacks are configured and resolvable, else the primary. */
   sessionModelRef(): string {
-    return this.routerReady ? "carl/auto" : this.cfg.model;
+    return this.routerReady ? "carl/auto" : this.effectivePrimary();
   }
   /** Whether a model can be called at all: its provider has a login. Claude Code's login lives in the CLI. */
   private usableModel(ref: string): boolean {
@@ -139,13 +145,13 @@ export class Brain extends EventEmitter {
   /** Which chain link a failed message came from. A provider that reports another id in its message (a proxy, a
    *  test double) is matched on the model id alone; undefined when no link matches. */
   private failedRef(m: any): string | undefined {
-    const chain = [this.cfg.model, ...this.fallbackRefs];
+    const chain = [this.effectivePrimary(), ...this.fallbackRefs];
     const exact = chain.find((r) => { const x = this.model(r); return x.provider === m?.provider && x.id === m?.model; });
     return exact ?? chain.find((r) => this.model(r).id === m?.model);
   }
   /** The next chain link after `failed` that is not benched and has a login; undefined when none is left. */
   private nextFallback(failed: string): string | undefined {
-    for (const ref of [this.cfg.model, ...this.fallbackRefs]) {
+    for (const ref of [this.effectivePrimary(), ...this.fallbackRefs]) {
       if (ref === failed) continue;
       if ((this.routerState.get(ref) ?? 0) > Date.now()) continue;
       if (!this.usableModel(ref)) continue;
@@ -362,7 +368,14 @@ export class Brain extends EventEmitter {
       }) as any);
     }
     if (!this.cfg.model) throw new ConfigError(MODEL_REQUIRED); // Carl ships no model choice: the operator names one
-    this.model(this.cfg.model); // fail fast, naming the model, when it is unknown
+    // An unknown primary is named and skipped when a configured fallback resolves: a stale or missing registry entry
+    // must not keep the gateway down (exit 78) while the fallbacks could answer. Only when nothing resolves does it stop.
+    let primaryError: string | undefined;
+    try {
+      this.model(this.cfg.model);
+    } catch (e) {
+      primaryError = (e as Error).message;
+    }
     this.fallbackRefs = this.cfg.fallbackModels.filter((f) => {
       try {
         this.model(f);
@@ -372,9 +385,15 @@ export class Brain extends EventEmitter {
         return false;
       }
     });
+    if (primaryError) {
+      const start = this.fallbackRefs[0];
+      if (!start) throw new Error(primaryError);
+      this.log.error(`primary model "${this.cfg.model}" is not in Pi's registry (${primaryError}); starting on the fallback "${start}" until it is fixed in carl.json`, { primary: this.cfg.model, start, error: primaryError });
+      this.primaryUnavailable = { primary: this.cfg.model, start, error: primaryError };
+    }
     if (this.fallbackRefs.length) {
       const router = createRouter({
-        primary: () => this.cfg.model, // read per request: a model switch (portal, UltraTerm picker) takes effect at once
+        primary: () => primaryError ? this.fallbackRefs[0] : this.cfg.model, // read per request: a model switch (portal, UltraTerm picker) takes effect at once
         fallbacks: () => this.fallbackRefs,
         resolve: (ref) => this.model(ref),
         usable: (ref) => this.usableModel(ref),
@@ -386,7 +405,7 @@ export class Brain extends EventEmitter {
       });
       this.routerState = router.exhaustedUntil;
       this.routerReady = true;
-      const primary = this.model(this.cfg.model);
+      const primary = this.model(primaryError ? this.fallbackRefs[0]! : this.cfg.model);
       this.runtime.registerVirtualModel({
         provider: "carl",
         id: "auto",
@@ -779,7 +798,7 @@ export class Brain extends EventEmitter {
 
   private modelRef(convo: Conversation): string {
     const m = convo.session.model;
-    return m ? `${m.provider}/${m.id}` : this.cfg.model;
+    return m ? `${m.provider}/${m.id}` : this.effectivePrimary();
   }
 
   private observe(convo: Conversation): void {
@@ -976,9 +995,9 @@ export class Brain extends EventEmitter {
    * the chain has no fallback and fails with the provider's own words.
    */
   async oneShot(prompt: string, opts: { model?: string; system?: string; tools?: string[] } = {}): Promise<string> {
-    let ref = opts.model ?? this.cfg.sideModel ?? this.cfg.model;
+    let ref = opts.model ?? this.cfg.sideModel ?? this.effectivePrimary();
     this.model(ref); // fail fast, naming the model, when it is unknown
-    const chain = [this.cfg.model, ...this.fallbackRefs];
+    const chain = [this.effectivePrimary(), ...this.fallbackRefs];
     // A link already benched (or without a login) is skipped up front, as the router does for a turn.
     if (this.routerReady && chain.includes(ref) && ((this.routerState.get(ref) ?? 0) > Date.now() || !this.usableModel(ref))) {
       ref = this.nextFallback(ref) ?? ref;
