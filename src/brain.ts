@@ -36,6 +36,7 @@ import { createRouter } from "./router.ts";
 import { type Approver, guardedFileOps, guardedReadOps, shellGuard } from "./guard.ts";
 import { looksLikeCorrection, type Psyche } from "./psyche.ts";
 import { isWorkGroup, WORK_REQUEST_NOTED } from "./work.ts";
+import { stripReasoningTags } from "./reply-text.ts";
 
 export interface Inbound {
   text: string;
@@ -690,7 +691,7 @@ export class Brain extends EventEmitter {
       }
       if (e.type === "message_update" && e.assistantMessageEvent.type === "text_delta") {
         live += e.assistantMessageEvent.delta;
-        if (!workGroup) sink.onText?.(live); // unchecked drafts must not reach work groups
+        if (!workGroup) sink.onText?.(stripReasoningTags(live)); // unchecked drafts must not reach work groups
       }
       if (e.type === "tool_execution_start") {
         toolCalls++;
@@ -1112,10 +1113,10 @@ export function listSessionFiles(home: string): { key: string; dir: string; file
 }
 
 export function assistantText(m: any): string {
-  return (m.content ?? [])
+  return stripReasoningTags((m.content ?? [])
     .filter((c: any) => c.type === "text")
     .map((c: any) => c.text)
-    .join("")
+    .join(""))
     .trim();
 }
 

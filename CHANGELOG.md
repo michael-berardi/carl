@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.16.7 (2026-11-18)
+
+- **Stray reasoning tags are removed from replies before delivery.** A model that leaked a fragment such as `</think:6124c78e>` after its answer had it sent as part of the reply (the probe reply was "PONG</think:6124c78e>"). Carl now strips reasoning-tag fragments (`</think>`, `<think>...</think>` blocks and their `:ID` forms) from the final reply on every surface (Telegram, API, CLI, schedules, alerts, portal) and from the live preview. Text inside fenced code blocks and inline code is kept, so a reply that quotes the tag still reads correctly.
+
 ## 0.16.6 (2026-11-18)
 
 - **The UltraTerm model picker refuses a model Carl cannot resolve.** Before carl.json is written, the picker checks the model exists in the registry Carl uses; an unknown model is refused with a named error and the file is left unchanged. Previously a bad model was written and stopped every reply.
