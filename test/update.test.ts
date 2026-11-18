@@ -171,10 +171,12 @@ test("a second link on the same app folder shares a release the first already in
     const next = join(app, `release-9.9.9-${sha.slice(0, 12)}`);
     mkdirSync(old); mkdirSync(next);
     writeFileSync(join(next, "COMMIT"), sha);
+    symlinkSync(process.execPath, join(old, "node")); // this install's runtime link; the first install made none
     symlinkSync(next, join(app, "current"));
     symlinkSync(old, join(app, "second"));
     const done = await install({ tag: "v9.9.9", version: "9.9.9", notes: "", url: "" }, detectInstall(old, join(app, "second", "bin", "carl")), "o/r");
     assert.equal(done.path, next);
+    assert.equal(readlinkSync(join(next, "node")), process.execPath, "a shared release gains the runtime link it was missing");
     assert.equal(readlinkSync(join(app, "second")), next);
     assert.equal(readlinkSync(join(app, "second.previous")), old);
   } finally {

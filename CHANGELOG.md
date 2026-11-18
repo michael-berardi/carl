@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.16.3 (2026-11-17)
+
+- **`carl update` gives a shared release its Node runtime link.** When a second bot on the same app folder adopted a release the first had installed without a `node` link, `carl send` from a clean environment failed with "node: not found" (exit 127) while the gateway itself kept running. The shared release now gets the link it was missing.
+
 ## 0.16.2 (2026-11-17)
 
 - **Queue failures stay out of Telegram work groups.** Carl acknowledges the request without saying it was queued, and sends the full cause, group, title and message ids to the operator’s Telegram home chat. Replies that disclose internal failures or promise a named person will follow up are checked before sending; if a rewrite still fails the check, Carl sends a neutral acknowledgment instead.
