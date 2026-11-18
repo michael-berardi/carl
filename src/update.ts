@@ -125,6 +125,14 @@ export async function install(rel: Release, inst: Install, slug = repoSlug(inst.
   if (inst.root === target) throw new UpdateError(`${rel.tag} is already installed at ${target}`);
   // Another link (a second bot on the same app folder) already moved to this release: share it.
   if (commitOf(target) === sha && linkedTargets(inst.appDir).has(realpathSync(target))) {
+    // The shared release must carry this install's runtime link too: when the first link's install made none, every
+    // `carl send` from a clean environment (a host's alert sender) exited 127 with "node: not found", while a gateway
+    // started with node on PATH kept running and hid it.
+    const node = join(inst.root, "node");
+    const shared = join(target, "node");
+    if (lstatSync(node, { throwIfNoEntry: false })?.isSymbolicLink() && !lstatSync(shared, { throwIfNoEntry: false })) {
+      symlinkSync(readlinkSync(node), shared);
+    }
     swapLink(`${inst.link}.previous`, inst.root);
     swapLink(inst.link, target);
     prune(inst.appDir);
