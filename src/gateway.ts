@@ -206,6 +206,12 @@ export class Gateway {
     if (this.telegram) await this.telegram.start();
     if (this.slack) await this.slack.start();
     if (this.discord) await this.discord.start();
+    if (this.brain.primaryUnavailable) {
+      const u = this.brain.primaryUnavailable;
+      // One alert per start, to the home chat; a failed send is logged by name and never stops the gateway.
+      this.sendDirect("home", `Carl started on ${u.start}: carl.json names ${u.primary}, which is not in the model registry (${u.error}). Fix "model" in carl.json.`)
+        .catch((e) => this.log.error("owner alert not sent", { error: (e as Error).message }));
+    }
     if (this.cfg.learning === "carl") this.scheduler.ensureBuiltin("individuation", "Individuation", "40 5 * * *");
     else this.scheduler.pauseBuiltin("individuation", "learning"); // UltraTerm Dream and Nightmare own the learning loop
     if (this.cfg.feedback) this.scheduler.ensureBuiltin("feedback", "Feedback intake", `every ${this.cfg.feedback.intervalMinutes}m`, "none");

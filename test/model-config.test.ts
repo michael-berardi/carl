@@ -44,7 +44,7 @@ async function runScenario(root: string, { config, models }: { config: object; m
   const brain = new Brain(cfg, new Psyche(home), log as any, () => []);
   try {
     await brain.init();
-    return { ok: true, sessionModel: brain.sessionModelRef(), selected: brain.model(cfg.model), logs: JSON.stringify(output),
+    return { ok: true, sessionModel: brain.sessionModelRef(), selected: brain.model(brain.primaryUnavailable?.start ?? cfg.model), logs: JSON.stringify(output),
       configAfter: readFileSync(join(home, "carl.json"), "utf8"), config: text };
   } catch (e) {
     return { ok: false, error: (e as Error).message, logs: JSON.stringify(output) };
@@ -70,6 +70,23 @@ if (process.argv[2] === "--scenario") {
     assert.equal(result.sessionModel, "router-a/vendor/model-x:variant", "no fallbacks: sessions stay on the model");
     assert.ok(!result.logs.includes(sentinel));
     assert.equal(result.configAfter, result.config, "the configuration is never written back");
+  });
+
+  test("an unresolvable primary does not stop startup when a configured fallback resolves; the error is named and the fallback serves", async () => {
+    const models = { providers: { "plan-b": { api: "openai-completions", baseUrl: "http://127.0.0.1:9",
+      apiKey: "test", models: [modelDef("model-y", "Model Y")] } } };
+    const result = await scenario({ model: "router-a/gone-model", fallbackModels: ["plan-b/model-y"] }, models);
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.sessionModel, "carl/auto", "the resolvable fallback carries the sessions");
+    assert.equal(result.selected.id, "model-y", "the session starts on the first resolvable model");
+    assert.match(result.logs, /primary model \\"router-a\/gone-model\\" is not in Pi's registry/);
+    assert.match(result.logs, /starting on the fallback \\"plan-b\/model-y\\"/);
+  });
+
+  test("no resolvable model at all still refuses to start, naming the primary", async () => {
+    const result = await scenario({ model: "router-a/gone-model", fallbackModels: ["plan-b/also-gone"] }, MODELS);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /router-a\/gone-model.*is not in Pi's registry/);
   });
 
   test("a configured fallback whose provider is off is skipped by name; the rest of the chain stays", async () => {
