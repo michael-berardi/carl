@@ -405,7 +405,7 @@ export class UltraTermCompat implements GatewayPlugin {
       return json(res, 422, { error: { code: "model_selection_rejected", message: (e as Error).message } });
     }
     this.intake.prepare("INSERT INTO model_selection (request_id, session_id, payload, state) VALUES (?, ?, ?, 'claimed')").run(requestId, sessionId, payload);
-    persistModel(this.gw.cfg.home, ref);
+    persistModel(this.gw.cfg.home, ref, (r) => this.gw.brain.model(r));
     // The router reads the primary per request; with no router, sessions pick it up at their next start.
     this.gw.cfg.model = ref;
     if (!this.gw.cfg.fallbackModels.length) {
@@ -486,7 +486,14 @@ function ensureSchema(db: DatabaseSync): void {
       PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task));`);
 }
 
-function persistModel(home: string, ref: string): void {
+// Refuses a ref the registry Carl uses cannot resolve, before anything is written: a bad primary in carl.json stops
+// every reply (it is what happened on 2026-11-18 with a model that was missing from the agentDir models.json copy).
+export function persistModel(home: string, ref: string, resolve: (ref: string) => unknown): void {
+  try {
+    resolve(ref);
+  } catch (e) {
+    throw new Error(`refusing to write "${ref}" to carl.json: it does not resolve in the model registry (${(e as Error).message})`);
+  }
   const file = join(home, "carl.json");
   const raw = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
   raw.model = ref;

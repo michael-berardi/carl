@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.16.6 (2026-11-18)
+
+- **The UltraTerm model picker refuses a model Carl cannot resolve.** Before carl.json is written, the picker checks the model exists in the registry Carl uses; an unknown model is refused with a named error and the file is left unchanged. Previously a bad model was written and stopped every reply.
+
 ## 0.16.5 (2026-11-18)
 
 - **carl.json can name the model registry separately from the logins.** A new `modelsPath` setting reads the model catalog from the operator's main Pi registry (`~/.pi/agent/models.json`), while `auth.json` still comes from `agentDir`. A copied `models.json` in a fallback folder can no longer drift from the models the operator routes to: a stale copy used to make a routed model "not in Pi's registry". Without `modelsPath` nothing changes: the catalog is read from `agentDir/models.json` as before.
