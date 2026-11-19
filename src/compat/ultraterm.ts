@@ -41,7 +41,7 @@ export class UltraTermCompat implements GatewayPlugin {
   private db!: DatabaseSync;
   private gw!: Gateway;
   private readonly sessions = new Map<string, SessionRow>(); // Pi session id -> compat row
-  private readonly startTime = Math.round((Date.now() - process.uptime() * 1000) / 10); // centiseconds since epoch
+  private readonly startTime = processStartCentiseconds();
   private intake!: DatabaseSync;
 
   private readonly opts: UltraTermCompatOptions;
@@ -549,6 +549,26 @@ function run(bin: string, args: string[], timeoutMs: number): Promise<{ code: nu
       clearTimeout(timer);
       resolve({ code: code ?? -1, stdout, stderr, error: signal ? `timed out after ${timeoutMs / 1000}s` : undefined });
     });
+  });
+}
+
+/**
+ * The kernel's start time of this process, in centiseconds since the epoch. UltraTerm checks gateway_state.json's
+ * start_time against `ps` (within 2 s) before it trusts UltraBot's coordinator calls. `carl update` restarts by
+ * execve in place: the pid and the kernel start time stay, but Node's uptime starts again, so an uptime-based value
+ * drifted by the whole pre-update lifetime and UltraTerm refused every coordinator write as headless.
+ */
+export function processStartCentiseconds(pid = process.pid, read: (pid: number) => string = readPsStart): number {
+  try {
+    const at = Date.parse(`${read(pid).trim().replace(/\s+/g, " ")} UTC`);
+    if (Number.isFinite(at) && at <= Date.now() + 5_000) return Math.round(at / 10);
+  } catch {}
+  return Math.round((Date.now() - process.uptime() * 1000) / 10); // no ps: the best this process knows
+}
+
+function readPsStart(pid: number): string {
+  return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
   });
 }
 
