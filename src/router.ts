@@ -4,7 +4,8 @@
 // else (a bad login, a malformed request, an unknown error) fails with its own named cause instead of quietly
 // moving the work to another model. A model that failed stays benched for its reset hint, or a short cooldown when
 // it gave none. A provider's content-filter refusal (an HTTP 400 naming a content-inspection code) judges the input,
-// not the model: the next model answers that turn and the model is not benched.
+// not the model: the next model answers that turn and the model is not benched. A local model server that is down or
+// refused by its manager (see isLocalUnavailable) is an outage of that model: benched for 2 minutes, the next model answers.
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 
 const QUOTA = /\b(402|429)\b|rate.?limit|usage limit|session limit|weekly limit|limit reached|quota|insufficient_quota|insufficient credits|billing|credit balance|resets? (at|in)\b/i;
@@ -20,6 +21,35 @@ const PLAN_REFUSED = /model is not supported when using \w+ with a [\w ]+account
 // shape only, never by provider name.
 const CONTENT_FILTER_CODE = /\b(?:data_inspection_failed|content_filter|content_policy_violation|content_moderation|moderation_blocked|safety_filter|safety_violation|responsible_ai_policy_violation)\b/i;
 
+// A local model server (llama-server started on demand by a local-model manager) that cannot answer before any output:
+// either the manager refused to start it (`steak-pi local: REFUSED (on-hold|quiet-day|insufficient-memory|other-server|...)`)
+// or nothing listens on a loopback address (ECONNREFUSED 127.0.0.1 / ::1 / localhost). A refusal to connect to a remote
+// host is not matched: only a server on this machine counts as a local outage.
+const LOCAL_REFUSED = /\bsteak-pi local: REFUSED \([\w-]+\)/i;
+// The address right after ECONNREFUSED (Node prints `connect ECONNREFUSED <addr>:<port>`), as a whole address: `::1` at
+// the end of a remote IPv6 address or a loopback-looking word later on the line does not count.
+const LOOPBACK_REFUSED = /\bECONNREFUSED\s+(?:127\.\d+\.\d+\.\d+|::1|\[::1\]|localhost)(?=:\d|[\s)\]]|$)/i;
+const LOCAL_DOWN = /\blocal server at \S+ is not answering\b/i;
+const BARE_CONNECTION_ERROR = /^\s*(?:connection error|fetch failed|network error|unable to connect)\.?\s*$/i;
+const LOOPBACK_URL = /^https?:\/\/(?:127\.\d+\.\d+\.\d+|localhost|\[::1\])(?::\d+)?(?:\/|$)/i;
+
+/** True when the failure says the local model server cannot answer: a local-manager refusal or a refused loopback connection. */
+export function isLocalUnavailable(message: string | undefined, baseUrl?: string): boolean {
+  if (typeof message !== "string") return false;
+  if (LOCAL_REFUSED.test(message) || LOOPBACK_REFUSED.test(message) || LOCAL_DOWN.test(message)) return true;
+  return !!baseUrl && LOOPBACK_URL.test(baseUrl) && BARE_CONNECTION_ERROR.test(message);
+}
+
+/**
+ * A bare connection error from a model whose baseUrl is loopback gets its cause named; any other message is unchanged.
+ * Every loopback provider counts (a local-model manager's server, or a gateway or proxy you run on this machine): a bare
+ * connection error from one is a server that is down on this machine, and the next model answers.
+ */
+export function nameLocalCause(message: string, baseUrl?: string): string {
+  return baseUrl && LOOPBACK_URL.test(baseUrl) && BARE_CONNECTION_ERROR.test(message) && !LOCAL_DOWN.test(message)
+    ? `${message.trim()} (local server at ${baseUrl} is not answering)` : message;
+}
+
 /** True when the message is an HTTP 400 that names a content-inspection, moderation or safety-filter code or type. */
 export function isContentFilter(message: string | undefined): boolean {
   return typeof message === "string" && /\b400\b/.test(message) && CONTENT_FILTER_CODE.test(message);
@@ -28,14 +58,14 @@ export function isContentFilter(message: string | undefined): boolean {
 export function isExhaustion(message: Pick<AssistantMessage, "stopReason" | "errorMessage"> | undefined): boolean {
   if (!message || message.stopReason !== "error") return false;
   const text = message.errorMessage ?? "";
-  return QUOTA.test(text) || OUTAGE.test(text) || NO_ENDPOINTS.test(text) || PLAN_REFUSED.test(text) || isContentFilter(text);
+  return QUOTA.test(text) || OUTAGE.test(text) || NO_ENDPOINTS.test(text) || PLAN_REFUSED.test(text) || isContentFilter(text) || isLocalUnavailable(text);
 }
 
 /** True when the failure is a provider outage or a route with no endpoints, not a quota refusal. */
 export function isOutage(message: Pick<AssistantMessage, "stopReason" | "errorMessage"> | undefined): boolean {
   if (!message || message.stopReason !== "error") return false;
   const text = message.errorMessage ?? "";
-  return !QUOTA.test(text) && (OUTAGE.test(text) || NO_ENDPOINTS.test(text));
+  return !QUOTA.test(text) && (OUTAGE.test(text) || NO_ENDPOINTS.test(text) || isLocalUnavailable(text));
 }
 
 /**
@@ -58,7 +88,7 @@ export function cooldownMs(errorMessage: string, now = Date.now(), fallbackMs = 
   }
   if (PLAN_REFUSED.test(errorMessage)) return 6 * 3_600_000;  // a plan does not change by itself: re-test in a few hours
   if (NO_ENDPOINTS.test(errorMessage)) return 10 * 60_000;
-  if (OUTAGE.test(errorMessage)) return 2 * 60_000;
+  if (OUTAGE.test(errorMessage) || isLocalUnavailable(errorMessage)) return 2 * 60_000;
   return fallbackMs;
 }
 
@@ -84,16 +114,17 @@ export function createRouter(opts: { primary: string | (() => string); fallbacks
     exhaustedUntil,
     route(request: any) {
       const chain = [primaryOf(), ...fallbacksOf().filter((f) => f !== primaryOf())];
-      if (request.reason === "retry" && request.failed && isExhaustion(request.failed.message)) {
+      if (request.reason === "retry" && request.failed && isExhaustion({ stopReason: "error", errorMessage: nameLocalCause(request.failed.message.errorMessage ?? "", request.failed.model.baseUrl) })) {
         const failed = ref(request.failed.model);
+        const named = nameLocalCause(request.failed.message.errorMessage ?? "", request.failed.model.baseUrl);
         // Move the work only when the failure produced nothing: a partial answer or a started tool call belongs to
         // the model that wrote it. A failed retry arrives here with the failed message stripped from `messages`.
         const silent = !(request.failed.message.content?.length);
-        const ms = cooldownMs(request.failed.message.errorMessage ?? "");
+        const ms = cooldownMs(named);
         exhaustedUntil.set(failed, Date.now() + ms);
         const next = silent ? chain.find((r) => r !== failed && available(r)) : undefined;
         if (next) {
-          opts.events.onFallback(failed, next, (request.failed.message.errorMessage ?? "").slice(0, 200), Date.now() + ms, opts.metered?.(next) ?? false);
+          opts.events.onFallback(failed, next, named.slice(0, 200), Date.now() + ms, opts.metered?.(next) ?? false);
           return { model: opts.resolve(next), thinkingLevel: request.thinkingLevel };
         }
         // The failure came after output: finish this turn on the model that started it (its caches and tool calls

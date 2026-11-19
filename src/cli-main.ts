@@ -19,6 +19,7 @@ import { COMMIT, VERSION } from "./version.ts";
 import { loadPlugins } from "./plugins.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
 import { login, logout } from "./login.ts";
+import { checkLocalModel, LOCAL_PROVIDER } from "./local-check.ts";
 import { spawnSync } from "node:child_process";
 import { GATEWAY_OPTIONS, ASK_OPTIONS, SEND_OPTIONS, USAGE, distance } from "./cli-help.ts";
 
@@ -287,6 +288,12 @@ async function doctor(): Promise<number> {
       if (!available.length) throw new Error(`no credentials for ${provider} in ${c.agentDir}/auth.json (sign in with \`carl login ${provider}\`)`);
       return `${provider} signed in`;
     }, i > 0);
+    if (provider === LOCAL_PROVIDER) {
+      // A local model is up only when its manager lets it start: say whether it would now. Never fails the check (a hold is routine).
+      const id = ref.slice(provider.length + 1);
+      const r = checkLocalModel(id);
+      console.log(`${r.ok ? "ok  " : "warn"}  local ${ref}: ${r.detail}`);
+    }
   }
   // A chain of plans alone stops answering when every plan is used up: say so, and how to add a paid last link.
   if (c.model && !c.meteredFallbackModels.length)

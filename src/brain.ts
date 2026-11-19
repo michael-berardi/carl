@@ -30,7 +30,7 @@ import { sessionPrograms } from "./post/key.ts";
 import { readOnlyCache, writeReadOnlyCache } from "./post/safety.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretDirs, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
-import { cooldownMs, isExhaustion } from "./router.ts";
+import { cooldownMs, isExhaustion, nameLocalCause } from "./router.ts";
 import { claudeCodeProviderConfig, closeSpares, PROVIDER as CLAUDE_PROVIDER, sweepCallFolders } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
 import { type Approver, guardedFileOps, guardedReadOps, shellGuard } from "./guard.ts";
@@ -109,6 +109,16 @@ interface Conversation {
 
 const IDLE_DISPOSE_MS = 30 * 60_000;
 
+/** The nearest folder above `file` that holds a package.json, when it is not the home folder or a filesystem root. */
+function packageRoot(file: string): string | undefined {
+  let dir = dirname(file);
+  for (let i = 0; i < 8 && dir !== dirname(dir); i++, dir = dirname(dir)) {
+    if (dir === homedir()) return undefined;
+    if (existsSync(join(dir, "package.json"))) return dir;
+  }
+  return undefined;
+}
+
 export class Brain extends EventEmitter {
   private runtime!: ModelRuntime;
   private readonly conversations = new Map<string, Conversation>();
@@ -149,6 +159,11 @@ export class Brain extends EventEmitter {
     const chain = [this.effectivePrimary(), ...this.fallbackRefs];
     const exact = chain.find((r) => { const x = this.model(r); return x.provider === m?.provider && x.id === m?.model; });
     return exact ?? chain.find((r) => this.model(r).id === m?.model);
+  }
+  /** The failure text of a message; a bare connection error from a loopback model names the local server as its cause. */
+  private namedFailure(m: any): string {
+    const ref = this.failedRef(m);
+    return nameLocalCause(m?.errorMessage ?? "", ref ? (this.model(ref) as { baseUrl?: string }).baseUrl : undefined);
   }
   /** The next chain link after `failed` that is not benched and has a login; undefined when none is left. */
   private nextFallback(failed: string): string | undefined {
@@ -198,7 +213,17 @@ export class Brain extends EventEmitter {
     if (this.claudeBin) add(dirname(dirname(realOf(this.claudeBin))));
     const uc = findUltraCompress();
     if (uc) add(realOf(uc));
-    for (const p of this.cfg.extensions) if (!p.includes(":")) add(p);
+    for (const p of this.cfg.extensions) {
+      if (p.includes(":")) continue;
+      add(p);
+      // A file extension imports its package's other modules (a .ts extension reaches ../../src/*.ts): the package that
+      // holds it is code Carl loads too, so the agent must not be able to rewrite it.
+      // Resolve links first: an extension listed through a symlink lives in the package its target sits in.
+      const roots = new Set([packageRoot(p), packageRoot(realOf(p))].filter((r): r is string => !!r));
+      add(realOf(p));
+      for (const root of roots) { add(root); add(realOf(root)); }
+      if (!roots.size && /\.[cm]?ts$/.test(p)) this.log.warn("a TypeScript extension has no package folder (package.json) within 8 levels; only the file itself is protected from the agent, not the modules it imports", { extension: p });
+    }
     for (const p of this.cfg.skills) add(p); // skills reach the prompt
     if (this.cfg.ultraterm) {
       // UltraTerm's helpers (the control binary and its sibling helpers) run outside the sandbox: their whole folder is protected.
@@ -730,7 +755,7 @@ export class Brain extends EventEmitter {
       }
       if (convo.stopRequested || !this.routerReady) break;
       const failed = lastAssistant?.stopReason === "error"
-        ? { stopReason: "error" as const, errorMessage: lastAssistant.errorMessage ?? "" }
+        ? { stopReason: "error" as const, errorMessage: this.namedFailure(lastAssistant) }
         : undefined;
       if (!failed || !isExhaustion(failed)) break;
       const failedRef = this.failedRef(lastAssistant);
@@ -1006,13 +1031,13 @@ export class Brain extends EventEmitter {
     for (let attempt = 0; ; attempt++) {
       const run = await this.oneShotOn(ref, prompt, opts);
       if (run.ok) return run.text;
-      const failed = { stopReason: "error" as const, errorMessage: run.error };
+      const failed = { stopReason: "error" as const, errorMessage: nameLocalCause(run.error, chain.includes(ref) ? (this.model(ref) as { baseUrl?: string }).baseUrl : undefined) };
       if (!this.routerReady || !chain.includes(ref) || !isExhaustion(failed)) throw new Error(run.error);
-      const until = Date.now() + cooldownMs(run.error);
+      const until = Date.now() + cooldownMs(failed.errorMessage);
       this.routerState.set(ref, until);
       const next = !run.wrote && attempt < this.fallbackRefs.length ? this.nextFallback(ref) : undefined;
       if (!next) throw new Error(run.error);
-      const reason = run.error.slice(0, 200);
+      const reason = failed.errorMessage.slice(0, 200);
       this.noteFallback(ref, next, reason, until, "primary model unavailable; retrying the one-off run on the next model in the fallback chain");
       ref = next;
     }
