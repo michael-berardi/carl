@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.17.2 (2026-11-19)
+
+- **UltraBot's coordinator writes work again after an update.** `carl update` restarts Carl in place (same process, same pid), but the start time Carl wrote for UltraTerm was taken from Node's uptime, which restarts from zero. UltraTerm compares that time with the kernel's and refused every coordinator write from UltraBot (job notes, waivers, incident resets, triage) as "headless" after any update. Carl now reads its real start time from `ps`, and a regression test covers an in-place restart.
+
 ## 0.17.1 (2026-11-19)
 
 - **A schedule cut short by a Carl restart no longer shows as failed.** The rerun clears the old "interrupted by restart" note when it starts, and UltraTerm only gets an error for a run that actually failed, so the rail no longer reads "1 schedule failed" after an update.
