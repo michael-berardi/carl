@@ -151,6 +151,23 @@ The metered model takes a turn only after the plans above it are refused. Carl l
 
 Carl uses exactly the `fallbackModels` you list, in order; without the key there are none. A fallback whose provider is unavailable (Claude Code when `claude.enabled` is false, a provider with no login) is skipped with a named warning rather than blocking startup. A model your provider's catalog does not list can be added in the agent folder's `models.json`.
 
+### Local models
+
+A model served by a local-model manager (Steak Pi's `steak-pi local`: a llama-server started on demand under a lease) works as `model` or as a fallback. Add it with `steak-pi local add` (a LoRA adapter added there works unchanged: Carl only sees the model id), then point Carl at the main Pi registry and load the manager's Pi extension, which takes a lease while a turn runs and lets go afterwards:
+
+```json
+{
+  "model": "local/my-model",
+  "fallbackModels": ["provider-a/plan-model"],
+  "modelsPath": "~/.pi/agent/models.json",
+  "extensions": ["<steak-pi package>/extensions/local/index.ts"]
+}
+```
+
+The extension is TypeScript and imports modules from its own package; Carl loads it as is, and protects the whole package folder (the nearest one with a `package.json`) from the agent along with the file. Without the extension nothing leases the server, so a stopped server answers "connection refused".
+
+When the local model cannot answer before any output, the turn moves to the next `fallbackModels` entry, the local model is benched for 2 minutes, and the log and `fallback` event name the cause. That covers a manager refusal (`steak-pi local: REFUSED (on-hold|quiet-day|insufficient-memory|other-server|...)`) and a refused connection to a loopback `baseUrl`. A refused connection to a remote host is not treated this way. `carl doctor` runs `steak-pi local check <id>` for each local model in the chain and prints whether it fits or is refused; a missing `steak-pi` (looked up on your PATH) is a warning, never a failure.
+
 ## The psyche
 
 The psyche is a set of plain files in `~/.carl/psyche/`.

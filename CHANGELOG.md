@@ -2,6 +2,14 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.17.0 (2026-11-19)
+
+- **Local models managed by Steak Pi work as the model or a fallback.** A `local/<id>` model (with or without a LoRA adapter) is served by the manager's on-demand server; load its Pi extension through `extensions` and set `modelsPath` to the main Pi registry (README, Routing, Local models). Carl already loaded TypeScript extensions; it now also protects the whole package folder of a file extension from the agent, since the extension imports modules outside its own folder.
+- **A dead or refused local server falls through to the next model.** A refused connection to a loopback address, or a `steak-pi local: REFUSED (...)` refusal (on hold, quiet day, not enough memory, another server), before any output is handled like an outage: the turn runs on the next `fallbackModels` entry, the local model is benched for 2 minutes, and the log names the cause. Remote connection errors and other unknown errors still fail with their own message.
+- **A symlinked extension protects its real package**, and a TypeScript extension with no package folder is logged. Only the address right after `ECONNREFUSED` counts as loopback (a remote IPv6 address ending in `::1` does not). Any loopback provider's bare connection error counts as that server being down.
+- **Verified end to end:** with a local model plus a harness LoRA adapter, `carl ask` completed a tool call on `local/<id>`; with a hold set, the reply named `REFUSED (on-hold)`; with a fallback configured, the turn answered on the fallback.
+- **`carl doctor` checks local models.** For each model on the `local` provider in the chain it prints what `steak-pi local check <id>` says (fits, or the refusal); a missing `steak-pi` is a warning that names the fix.
+
 ## 0.16.7 (2026-11-18)
 
 - **Stray reasoning tags are removed from replies before delivery.** A model that leaked a fragment such as `</think:6124c78e>` after its answer had it sent as part of the reply (the probe reply was "PONG</think:6124c78e>"). Carl now strips reasoning-tag fragments (`</think>`, `<think>...</think>` blocks and their `:ID` forms) from the final reply on every surface (Telegram, API, CLI, schedules, alerts, portal) and from the live preview. Text inside fenced code blocks and inline code is kept, so a reply that quotes the tag still reads correctly.
