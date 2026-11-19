@@ -115,3 +115,25 @@ test("an interrupted job that is interrupted again on its rerun is not rerun for
   const again = make(home, []);
   assert.ok(again.get(job.id).nextRunAt! > Date.now() + 60_000);
 });
+
+test("a restart note is not a failure: the rerun clears it, and only an error carries last_error to UltraTerm", async () => {
+  // Live 2026-11-19: a Carl update interrupted the queue check; its rerun kept "interrupted by restart (SIGTERM)" in
+  // lastError while running, and UltraTerm's rail counted any last_error as "1 schedule failed".
+  const home = mkdtempSync(join(tmpdir(), "carl-int-"));
+  const s = make(home, []);
+  const job = s.add({ name: "check", when: "@daily", command: "sleep 1", deliver: "home" });
+  const file = join(home, "schedules.json");
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  Object.assign(raw.jobs[0], { lastStatus: "interrupted", lastError: "interrupted by restart (SIGTERM)" });
+  writeFileSync(file, JSON.stringify(raw));
+  const again = make(home, []);
+  const run = again.runNow(job.id);
+  await wait(200);
+  assert.equal(again.get(job.id).lastStatus, "running");
+  assert.equal(again.get(job.id).lastError, undefined);
+  await run;
+  assert.equal(again.get(job.id).lastStatus, "ok");
+  await again.stop("SIGTERM", 500);
+  const src = readFileSync(new URL("../src/compat/ultraterm.ts", import.meta.url), "utf8");
+  assert.match(src, /last_error: j\.lastStatus === "error" \? \(j\.lastError \?\? null\) : null/);
+});

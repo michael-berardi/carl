@@ -355,6 +355,8 @@ export class Scheduler {
     let output = "";
     try {
       job.lastStatus = "running";
+      // A new run supersedes the last one's note: a stale "interrupted by restart" must not read as a failure while it runs.
+      if (!job.post) job.lastError = undefined;
       job.lastRunAt = Date.now();
       if (job.post) job.attempts = (job.attempts ?? 0) + 1;
       this.save();

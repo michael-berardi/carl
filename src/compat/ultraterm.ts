@@ -302,7 +302,7 @@ export class UltraTermCompat implements GatewayPlugin {
       id: j.id, name: j.name, prompt: j.prompt ?? null, script: j.command ?? j.builtin ?? null, schedule_display: j.when, schedule: { display: j.when },
       state: j.enabled ? (j.lastStatus === "running" ? "running" : "scheduled") : "paused", enabled: j.enabled,
       next_run_at: j.nextRunAt ? new Date(j.nextRunAt).toISOString() : null, last_run_at: j.lastRunAt ? new Date(j.lastRunAt).toISOString() : null,
-      last_status: j.lastStatus ?? null, last_error: j.lastError ?? null, last_delivery_error: null, failure_streak: j.lastStatus === "error" ? 1 : 0,
+      last_status: j.lastStatus ?? null, last_error: j.lastStatus === "error" ? (j.lastError ?? null) : null, last_delivery_error: null, failure_streak: j.lastStatus === "error" ? 1 : 0,
       deliver: j.deliver, no_agent: !j.prompt, paused_reason: j.enabled ? null : "paused", repeat: { completed: null },
     });
     api.route("GET", /^\/api\/jobs$/, (_q, res, url) => {
