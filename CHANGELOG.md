@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.17.1 (2026-11-19)
+
+- **A schedule cut short by a Carl restart no longer shows as failed.** The rerun clears the old "interrupted by restart" note when it starts, and UltraTerm only gets an error for a run that actually failed, so the rail no longer reads "1 schedule failed" after an update.
+
 ## 0.17.0 (2026-11-19)
 
 - **Local models managed by Steak Pi work as the model or a fallback.** A `local/<id>` model (with or without a LoRA adapter) is served by the manager's on-demand server; load its Pi extension through `extensions` and set `modelsPath` to the main Pi registry (README, Routing, Local models). Carl already loaded TypeScript extensions; it now also protects the whole package folder of a file extension from the agent, since the extension imports modules outside its own folder.
