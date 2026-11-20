@@ -137,3 +137,37 @@ test("a restart note is not a failure: the rerun clears it, and only an error ca
   const src = readFileSync(new URL("../src/compat/ultraterm.ts", import.meta.url), "utf8");
   assert.match(src, /last_error: j\.lastStatus === "error" \? \(j\.lastError \?\? null\) : null/);
 });
+
+test("a running job's next run is the following slot, never the slot it already started", async () => {
+  const home = mkdtempSync(join(tmpdir(), "carl-int-"));
+  const s = make(home, []);
+  const job = s.add({ name: "render", when: "every 1h", command: "sleep 30", deliver: "home" });
+  // The slot came due a minute ago and the tick picks it up now, as at 08:30 every day.
+  const slot = Date.now() - 60_000;
+  const file = join(home, "schedules.json");
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  Object.assign(raw.jobs[0], { nextRunAt: slot, lastRunAt: slot - 3_600_000, lastStatus: "ok" });
+  writeFileSync(file, JSON.stringify(raw));
+  const fresh = make(home, []);
+  const started = Date.now();
+  const run = fresh.runNow(job.id);
+  await wait(300);
+  const during = fresh.get(job.id);
+  assert.equal(during.lastStatus, "running");
+  assert.ok((during.nextRunAt ?? 0) > started, `next run ${during.nextRunAt} is after the run started (${started}), not the slot it took (${slot})`);
+  const saved = JSON.parse(readFileSync(file, "utf8")).jobs[0];
+  assert.ok(saved.nextRunAt > started, "the saved file, which UltraTerm reads, has the following slot too");
+  await fresh.stop("SIGTERM", 200);
+  await run;
+});
+
+test("a one-time job still disables itself after its run", async () => {
+  const home = mkdtempSync(join(tmpdir(), "carl-int-"));
+  const s = make(home, []);
+  const job = s.add({ name: "once", when: `once ${new Date(Date.now() + 3_600_000).toISOString()}`, command: "true", deliver: "none" });
+  await s.runNow(job.id);
+  const j = s.get(job.id);
+  assert.equal(j.lastStatus, "ok");
+  assert.equal(j.enabled, false);
+  assert.equal(j.nextRunAt, undefined);
+});
