@@ -333,10 +333,20 @@ export class Scheduler {
   private async tick(): Promise<void> {
     try { this.adoptExternal(); } catch (e) { this.log.error("cannot read schedules.json", { error: (e as Error).message }); }
     const now = Date.now();
+    let moved = false;
     for (const job of this.jobs) {
-      if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now || this.running.has(job.id)) continue;
+      if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) continue;
+      if (this.running.has(job.id)) {
+        if (job.post) continue; // a post keeps its slot: its retry rules read it
+        // A run that outlasts its interval passes its next slot. That slot is skipped (a job never runs twice at once), so
+        // the next run is the following slot, not a time in the past: UltraTerm reads a past slot as a dead scheduler.
+        // Only a live scheduler moves it, so a scheduler that really stopped still shows as overdue.
+        try { job.nextRunAt = this.next(job, now); moved = true; } catch { /* recomputed when the run ends */ }
+        continue;
+      }
       void this.execute(job);
     }
+    if (moved) { try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); } }
   }
 
   private async execute(job: Job, force = false): Promise<void> {
