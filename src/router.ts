@@ -112,6 +112,10 @@ export function createRouter(opts: { primary: string | (() => string); fallbacks
   const fallbacksOf = () => (typeof opts.fallbacks === "function" ? opts.fallbacks() : opts.fallbacks);
   return {
     exhaustedUntil,
+    /** The model a new user turn would start on now: the first available link of the chain. */
+    current(): string {
+      return [primaryOf(), ...fallbacksOf().filter((f) => f !== primaryOf())].find(available) ?? primaryOf();
+    },
     route(request: any) {
       const chain = [primaryOf(), ...fallbacksOf().filter((f) => f !== primaryOf())];
       if (request.reason === "retry" && request.failed && isExhaustion({ stopReason: "error", errorMessage: nameLocalCause(request.failed.message.errorMessage ?? "", request.failed.model.baseUrl) })) {
