@@ -26,6 +26,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { type CarlConfig, mcpFile, ConfigError, MODEL_REQUIRED } from "./config.ts";
 import type { Log } from "./log.ts";
 import { resultBudget } from "./budget.ts";
+import { modelGuidance, withGuidance } from "./model-guidance.ts";
 import { sessionPrograms } from "./post/key.ts";
 import { readOnlyCache, writeReadOnlyCache } from "./post/safety.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretDirs, secretFiles, writablePaths } from "./sandbox.ts";
@@ -137,6 +138,15 @@ export class Brain extends EventEmitter {
   private meteredNotice = new Map<string, number>();
   /** True once the carl/auto router is registered. */
   private routerReady = false;
+  /** The chain link the router would start a new turn on (set when the router is registered). */
+  private routerCurrent?: () => string;
+  /** The physical model behind a selection: the router's current pick for the virtual "carl/auto", else the model itself. */
+  private physicalModel(model: { provider?: string; id?: string } | undefined): { provider?: string; id?: string } | undefined {
+    if (model?.provider === "carl" && model.id === "auto" && this.routerCurrent) {
+      try { return this.model(this.routerCurrent()); } catch { return undefined; }
+    }
+    return model;
+  }
   /** Set when carl.json's primary does not resolve and a configured fallback starts instead (the gateway alerts the owner once). */
   primaryUnavailable?: { primary: string; start: string; error: string };
   /** The first link of the chain: the configured primary, or the fallback it was replaced with at startup. */
@@ -430,6 +440,7 @@ export class Brain extends EventEmitter {
         },
       });
       this.routerState = router.exhaustedUntil;
+      this.routerCurrent = () => router.current();
       this.routerReady = true;
       const primary = this.model(primaryError ? this.fallbackRefs[0]! : this.cfg.model);
       this.runtime.registerVirtualModel({
@@ -531,6 +542,7 @@ export class Brain extends EventEmitter {
         this.psyche.recordShadow({ kind: "tool_error", conversation: key, summary: `blocked: ${why}`, evidence: command.slice(0, 500) }),
         { ...this.guardRules(), operatorText: () => this.conversations.get(key)?.operatorText }),
       resultBudget(join(this.cfg.home, "spill"), this.cfg.toolResultMaxChars),
+      modelGuidance(this.cfg.modelGuidance, (m) => this.physicalModel(m)),
     ];
     if (this.cfg.mcp && existsSync(mcpFile(this.cfg)) && this.mcpLoader) {
       // MCP servers reach the model through codemode: one tool, scripts call servers in parallel and
@@ -1054,7 +1066,7 @@ export class Brain extends EventEmitter {
       noContextFiles: true,
       noPromptTemplates: true,
       noThemes: true,
-      systemPrompt: opts.system ?? "You are a careful, honest analyst. Follow the requested output format exactly.",
+      systemPrompt: withGuidance(opts.system ?? "You are a careful, honest analyst. Follow the requested output format exactly.", model, this.cfg.modelGuidance),
       appendSystemPrompt: [],
     });
     await loader.reload();

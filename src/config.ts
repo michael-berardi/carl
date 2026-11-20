@@ -98,6 +98,8 @@ export interface CarlConfig {
   workspace: string;
   /** Extra instruction files appended to the system prompt, in order (e.g. a team AGENTS.md). */
   contextFiles: string[];
+  /** Operator rules adding short system-prompt lines for models whose "provider/id" matches `match` (case-insensitive). */
+  modelGuidance: { match: string; text: string }[];
   /** Skill directories (Pi skill format: loaded on demand, only names and descriptions sit in the prompt). */
   skills: string[];
   /** Skill names listed in the prompt. Empty = every discovered skill. */
@@ -233,6 +235,7 @@ export function loadConfig(home = carlHome()): CarlConfig {
     modelsPath: abs(raw.modelsPath ?? join(abs(raw.agentDir ?? raw.piAgentDir ?? join(home, "agent"), home), "models.json"), home),
     workspace: abs(raw.workspace ?? "workspace", home),
     contextFiles: strList(raw.contextFiles, "contextFiles").map((p) => abs(p, home)),
+    modelGuidance: guidanceOf(raw.modelGuidance),
     skills: strList(raw.skills, "skills").map((p) => abs(p, home)),
     skillAllow: strList(raw.skillAllow, "skillAllow"),
     toolResultMaxChars: int(raw.toolResultMaxChars, 12_000, "toolResultMaxChars", 1_000),
@@ -384,6 +387,21 @@ function strList(v: unknown, name: string): string[] {
   if (v === undefined || v === null) return [];
   if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new ConfigError(`${name} must be a list of strings`);
   return v as string[];
+}
+
+function guidanceOf(v: unknown): { match: string; text: string }[] {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v)) throw new ConfigError("modelGuidance must be a list of { match, text } rules");
+  return v.map((rule, i) => {
+    const at = `modelGuidance[${i}]`;
+    if (!rule || typeof rule !== "object") throw new ConfigError(`${at} must be an object with match and text`);
+    const { match, text } = rule as { match?: unknown; text?: unknown };
+    if (typeof match !== "string" || !match.trim()) throw new ConfigError(`${at}.match must be a non-empty pattern`);
+    if (typeof text !== "string" || !text.trim()) throw new ConfigError(`${at}.text must be non-empty`);
+    if (text.trim().length > 600) throw new ConfigError(`${at}.text is longer than 600 characters`);
+    try { new RegExp(match, "i"); } catch (e) { throw new ConfigError(`${at}.match: bad regex ${JSON.stringify(match)}: ${(e as Error).message}`); }
+    return { match, text: text.trim() };
+  });
 }
 
 function pairs(v: unknown, name: string): [string, string][] {

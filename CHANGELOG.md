@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.0 (2026-11-20)
+
+- **Per-model guidance (`modelGuidance` in carl.json).** A list of `{ "match", "text" }` rules adds short system-prompt lines for models whose `provider/id` matches `match` (case-insensitive regular expression). It is added per turn for the model the turn starts on: with fallbacks configured that is the router's current pick (so a benched primary's fallback gets its own lines), and one-off runs use their own model. A switch to a fallback in the middle of a turn keeps that turn's prompt; the next turn gets the new model's lines. Carl ships no rule; a bad rule is a named config error. Tests: `test/model-guidance.test.ts`.
+
 ## 0.17.2 (2026-11-19)
 
 - **UltraBot's coordinator writes work again after an update.** `carl update` restarts Carl in place (same process, same pid), but the start time Carl wrote for UltraTerm was taken from Node's uptime, which restarts from zero. UltraTerm compares that time with the kernel's and refused every coordinator write from UltraBot (job notes, waivers, incident resets, triage) as "headless" after any update. Carl now reads its real start time from `ps`, and a regression test covers an in-place restart.
