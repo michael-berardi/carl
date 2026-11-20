@@ -171,3 +171,21 @@ test("a one-time job still disables itself after its run", async () => {
   assert.equal(j.enabled, false);
   assert.equal(j.nextRunAt, undefined);
 });
+
+test("a run that outlasts its interval moves its next run on instead of leaving a past slot", async () => {
+  const home = mkdtempSync(join(tmpdir(), "carl-int-"));
+  const s = make(home, []);
+  const job = s.add({ name: "slow", when: "every 1m", command: "sleep 30", deliver: "none" });
+  const run = s.runNow(job.id);
+  await wait(300);
+  // The run is still going when its next slot comes due (a minute passes): simulate that slot being in the past.
+  (s as any).find(job.id).nextRunAt = Date.now() - 20 * 60_000;
+  await (s as any).tick();
+  const after = s.get(job.id);
+  assert.equal(after.lastStatus, "running", "still the one run; the passed slot did not start a second one");
+  assert.ok((after.nextRunAt ?? 0) > Date.now(), "the next run is ahead again");
+  const saved = JSON.parse(readFileSync(join(home, "schedules.json"), "utf8")).jobs[0];
+  assert.ok(saved.nextRunAt > Date.now(), "and UltraTerm, reading the file, sees it ahead");
+  await s.stop("SIGTERM", 200);
+  await run;
+});

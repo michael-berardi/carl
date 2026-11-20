@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.2 (2026-11-20)
+
+- **A run longer than its own interval no longer shows as overdue.** A job that runs past its next slot (an every-20-minutes job running 40 minutes) skips that slot, as before, and its next run now moves to the following slot instead of staying in the past, where UltraTerm read it as a missed run. A scheduler that has really stopped still shows as overdue. Regression test in `test/restart-interrupt.test.ts`.
+
 ## 0.18.1 (2026-11-20)
 
 - **A long-running schedule no longer shows as overdue in UltraTerm.** While a job ran, its next run stayed on the slot it had just started, so a 55-minute render showed "1 schedule overdue" from 15 minutes in until it finished, though it was running. A run now moves the next run to the following slot the moment it starts. Interrupted runs still run once more at the next start. Regression test in `test/restart-interrupt.test.ts`.
