@@ -358,6 +358,10 @@ export class Scheduler {
       // A new run supersedes the last one's note: a stale "interrupted by restart" must not read as a failure while it runs.
       if (!job.post) job.lastError = undefined;
       job.lastRunAt = Date.now();
+      // The slot this run took is used up: the next run is the following slot, from the moment it starts. Left on the
+      // started slot, a long run (a 55-minute render) showed its own start time as a missed run ("1 schedule overdue")
+      // in UltraTerm for as long as it ran. A post job keeps its slot: its retry rules read it.
+      if (!job.post) { try { job.nextRunAt = this.next(job, job.lastRunAt); } catch { /* recomputed when the run ends */ } }
       if (job.post) job.attempts = (job.attempts ?? 0) + 1;
       this.save();
       this.log.info("schedule started", { id: job.id, name: job.name });
