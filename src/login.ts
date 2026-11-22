@@ -29,10 +29,17 @@ export async function probeProvider(
 ): Promise<void> {
   const rt = await makeRuntime(cfg);
   try {
-    await rt.getAuth(provider);
+    // Force the SDK through its refresh path even when the saved access token
+    // still looks valid: a rotated-away refresh token is the failure doctor
+    // must catch. A successful refresh can itself trip the SDK's post-refresh
+    // validity check against this deliberately large minimum; that still means
+    // the grant refreshed, so only other errors are failures.
+    await rt.getAuth(provider, { minOAuthValidityMs: 365 * 24 * 3_600_000 });
   } catch (error) {
-    const name = error instanceof Error && error.name ? error.name : "error";
-    throw new Error(`${provider} credential refresh failed (${name}); run \`carl login ${provider}\``);
+    if (!(error instanceof Error) || !/expires too soon/i.test(error.message)) {
+      const name = error instanceof Error && error.name ? error.name : "error";
+      throw new Error(`${provider} credential refresh failed (${name}); run \`carl login ${provider}\``);
+    }
   }
   if (!rt.getProviderAuthStatus(provider).configured) {
     throw new Error(`${provider} grant is expired or revoked; run \`carl login ${provider}\``);

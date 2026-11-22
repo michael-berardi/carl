@@ -2,6 +2,11 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.6 (2026-11-22)
+
+- `carl doctor` now forces a Codex credential refresh even while the saved access token still looks valid, so a rotated-away refresh token is reported instead of looking signed in.
+- The outbox expiry pass keeps its in-memory queue in sync with the saved file when another gateway removes the same held reply first.
+
 ## 0.18.5 (2026-11-22)
 
 - The remaining credential-shaped test fixture now uses a clearly non-credential placeholder. No runtime behavior changed from 0.18.4.

@@ -581,6 +581,9 @@ export class TelegramChannel {
           }
           const index = queue.indexOf(item);
           if (index >= 0) queue.splice(index, 1);
+          // Keep the active pass and the cached outbox in sync: later saves in
+          // this pass must still contain any items we send or retry below.
+          this.outbox = queue;
           continue;
         }
         await this.noticeHeld(item); continue; // an ambiguous receipt must be reconciled before replay, even after restart

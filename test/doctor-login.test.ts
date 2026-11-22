@@ -66,4 +66,15 @@ test("doctor credential probe fails a dead Codex grant instead of trusting listM
       getProviderAuthStatus: () => ({ configured: true }) as any,
     })),
   );
+  let forced: { minOAuthValidityMs?: number } | undefined;
+  await assert.doesNotReject(
+    () => probeProvider(cfg, "openai-codex", async () => ({
+      getAuth: async (_provider: any, options: any) => {
+        forced = options;
+        throw new Error("OAuth refresh returned a token that expires too soon for openai-codex");
+      },
+      getProviderAuthStatus: () => ({ configured: true }) as any,
+    })),
+  );
+  assert.ok((forced?.minOAuthValidityMs ?? 0) > 5 * 60_000, "doctor forces a real refresh");
 });
