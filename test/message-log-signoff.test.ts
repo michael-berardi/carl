@@ -64,7 +64,7 @@ for (const credential of [
 
 test("sign-off: ordinary words, short prefixes and times are not masked", (t) => {
   const { dir } = scratch(t);
-  const text = "ask-questions-about-scheduling; task-management-is-important; xoxe-short; foxoxb-ordinarywords; sunghp_EXAMPLE-NOT-A-TOKEN; 12:30:45";
+  const text = "ask-questions-about-scheduling; task-management-is-important; xoxe-short; foxoxb-ordinarywords; sunghp_SYNTHETIC-SYNTHETIC-SYNTHETIC; 12:30:45";
   new MessageLog(dir).record("sendMessage", { chat_id: 1, text }, { message_id: 2 });
   const row = JSON.parse(readFileSync(join(dir, "hermes.jsonl"), "utf8"));
   assert.equal(row.text, text);

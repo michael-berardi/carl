@@ -18,13 +18,13 @@ const row = (dir: string) => JSON.parse(readFileSync(join(dir, "hermes.jsonl"), 
 
 test("review: redaction covers URL bot tokens, vendor keys, headers and secret fields without hiding prose", (t) => {
   const { dir } = scratch(t);
-  const secrets = ["123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd", "ghp_EXAMPLE-NOT-A-TOKEN", "github_pat_SYNTHETIC-SYNTHETIC-SYNTHETIC", "xoxb-" + "0000000000-1111111111-SyntheticSynth", "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"];
+  const secrets = ["123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd", "ghp_SYNTHETIC-SYNTHETIC-SYNTHETIC", "github_pat_SYNTHETIC-SYNTHETIC-SYNTHETIC", "xoxb-" + "0000000000-1111111111-SyntheticSynth", "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"];
   const text = `https://api.telegram.org/bot${secrets[0]}/getMe ${secrets.slice(1).join(" ")} Authorization: Basic dTpw Proxy-Authorization: Bearer c3ludGhldGlj ACCESS_TOKEN="synthetic secret tail" {"password":"synthetic-json-secret", "token": "unterminated-secret`;
   new audit.MessageLog(dir).record("sendMessage", { chat_id: 1, text, document: { file_name: text }, reply_markup: { inline_keyboard: [[{ text }]] } }, undefined, { requestId: "test", status: "unknown", error: text });
   const persisted = readFileSync(join(dir, "hermes.jsonl"), "utf8");
   for (const secret of [...secrets, "dTpw", "c3ludGhldGlj", "synthetic secret tail", "synthetic-json-secret", "unterminated-secret"]) assert.equal(persisted.includes(secret), false, "credential must not be persisted");
   assert.equal(row(dir).masked, true);
-  const plain = `Basic configuration failed; Authorization failed; Authorization: Basic; sk-short and 12345:abc; ghp_short and xoxb-short; sunghp_EXAMPLE-NOT-A-TOKEN; {"status":"ok","token":null,"tokens_used":42}; don't panic: it's the user's "token" words; exit status 1 at 12:30:45`;
+  const plain = `Basic configuration failed; Authorization failed; Authorization: Basic; sk-short and 12345:abc; ghp_short and xoxb-short; sunghp_SYNTHETIC-SYNTHETIC-SYNTHETIC; {"status":"ok","token":null,"tokens_used":42}; don't panic: it's the user's "token" words; exit status 1 at 12:30:45`;
   new audit.MessageLog(dir).record("sendMessage", { chat_id: 1, text: plain }, { message_id: 2 });
   assert.equal(row(dir).text, plain);
   assert.equal(row(dir).exact, true);

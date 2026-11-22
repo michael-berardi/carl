@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.5 (2026-11-22)
+
+- The remaining credential-shaped test fixture now uses a clearly non-credential placeholder. No runtime behavior changed from 0.18.4.
+
 ## 0.18.4 (2026-11-22)
 
 - A synthetic credential-shaped string in the test suite no longer trips the release secret scan. No runtime behavior changed from 0.18.3.
