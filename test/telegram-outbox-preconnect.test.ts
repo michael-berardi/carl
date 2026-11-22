@@ -67,3 +67,31 @@ test("a held reply older than 24 h is dropped without resending and without anot
   assert.deepEqual(sent, [], "nothing resent, no repeat notice");
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).map((i: any) => i.id), ["fresh"]);
 });
+
+test("two flushers log held-reply expiry once per state change", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "carl-held-concurrent-"));
+  mkdirSync(join(home, "state"));
+  writeFileSync(join(home, "carl.json"), JSON.stringify({ telegram: { allowFrom: [1], homeChat: 1, stream: false } }));
+  const file = join(home, "state", "outbox.json");
+  const stale = (id: string) => ({ id, chatId: 1, chunks: ["old answer"], firstAt: Date.now() - HELD_REPLY_TTL_MS - 60_000, attempts: 1, status: "unknown", unknownNoticeAttempted: true });
+  writeFileSync(file, JSON.stringify([stale("stale-one"), { id: "fresh", chatId: 1, chunks: ["new answer"], firstAt: Date.now(), attempts: 1, status: "unknown", unknownNoticeAttempted: true }]));
+  const cfg = loadConfig(home);
+  const logs = [new Log(undefined), new Log(undefined)];
+  const warnings = [[], []] as string[][];
+  logs.forEach((log, i) => t.mock.method(log, "warn", (message: string) => { warnings[i].push(message); }));
+  const channels = logs.map((log) => new TelegramChannel(cfg, token, {} as any, log));
+  t.after(async () => { for (const ch of channels) await ch.stop(); rmSync(home, { recursive: true, force: true }); });
+  for (const ch of channels) {
+    t.mock.method(ch.api, "sendMessage", async () => { throw new Error("no resend expected"); });
+  }
+  await Promise.all(channels.map((ch) => ch.flushOutbox()));
+  const expiryWarnings = () => warnings.flat().filter((m) => m.includes("held reply with unknown delivery expired"));
+  assert.equal(expiryWarnings().length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).map((i: any) => i.id), ["fresh"]);
+
+  const items = JSON.parse(readFileSync(file, "utf8"));
+  items.push(stale("stale-two"));
+  writeFileSync(file, JSON.stringify(items));
+  for (const ch of channels) { (ch as any).outbox = undefined; await ch.flushOutbox(); }
+  assert.equal(expiryWarnings().length, 2, "a later state change warns once more");
+});

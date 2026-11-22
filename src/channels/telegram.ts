@@ -3,7 +3,7 @@
 // it) is opt-in: telegram.stream must be true. Approval cards and a long answer split by Telegram's size limit are
 // separate messages either way.
 import { approvalSummary } from "../approval-text.ts";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -453,24 +453,67 @@ export class TelegramChannel {
   private outbox?: OutboxItem[];
   private flushing?: Promise<void>;
 
+  private readOutbox(): OutboxItem[] {
+    let items: unknown;
+    try { items = JSON.parse(readFileSync(this.outboxFile(), "utf8")); } catch { return []; }
+    return Array.isArray(items) ? items as OutboxItem[] : [];
+  }
+
   private loadOutbox(): OutboxItem[] {
-    if (!this.outbox) {
-      try { this.outbox = JSON.parse(readFileSync(this.outboxFile(), "utf8")); } catch { this.outbox = []; }
-      if (!Array.isArray(this.outbox)) this.outbox = [];
-    }
+    if (!this.outbox) this.outbox = this.readOutbox();
     return this.outbox!;
   }
 
-  private saveOutbox(): boolean {
+  private saveOutbox(items: OutboxItem[] = this.loadOutbox()): boolean {
     const file = this.outboxFile();
     try {
-      writeFileSync(`${file}.tmp`, JSON.stringify(this.loadOutbox()), { mode: 0o600 });
+      writeFileSync(`${file}.tmp`, JSON.stringify(items), { mode: 0o600 });
       renameSync(`${file}.tmp`, file);
       return true;
     } catch (e) {
       this.log.error("cannot persist the outbox", { error: (e as Error).message });
       return false;
     }
+  }
+
+  /** Exclusive cross-process expiry, so two flushers cannot warn about the same state change. */
+  private withOutboxExpiryLock<T>(fn: () => T): T | undefined {
+    const file = `${this.outboxFile()}.expiry.lock`;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let fd: number;
+      try {
+        fd = openSync(file, "wx", 0o600);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+          try {
+            if (Date.now() - statSync(file).mtimeMs <= 60_000) return undefined;
+            unlinkSync(file); // stale lock from a crashed gateway
+          } catch { return undefined; }
+          continue;
+        }
+        this.log.error("cannot lock outbox expiry", { error: (e as Error).message });
+        return undefined;
+      }
+      try {
+        return fn();
+      } finally {
+        try { closeSync(fd); unlinkSync(file); } catch { /* another owner already cleaned the stale lock */ }
+      }
+    }
+    return undefined;
+  }
+
+  /** Remove one expired held reply only when this process actually wins the state change. */
+  private expireHeldItem(id: string): boolean {
+    return this.withOutboxExpiryLock(() => {
+      const items = this.readOutbox();
+      const index = items.findIndex((item) => item.id === id && item.status === "unknown" && Date.now() - item.firstAt > HELD_REPLY_TTL_MS);
+      if (index < 0) { this.outbox = items; return false; }
+      items.splice(index, 1);
+      if (!this.saveOutbox(items)) return false;
+      this.outbox = items;
+      return true;
+    }) ?? false;
   }
 
   /** Queue Markdown chunks for delivery; used for failed replies and failed scheduled deliveries. */
@@ -533,9 +576,11 @@ export class TelegramChannel {
         // A held reply is never resent on its own (it may already be in the chat). After 24 h it is stale either way:
         // drop it with a log line instead of keeping an operator chore in /status forever.
         if (Date.now() - item.firstAt > HELD_REPLY_TTL_MS) {
-          this.log.warn("held reply with unknown delivery expired after 24 h; not resent", { chatId: item.chatId, id: item.id, requestId: item.requestId, error: item.lastError });
-          queue.splice(queue.indexOf(item), 1);
-          this.saveOutbox();
+          if (this.expireHeldItem(item.id)) {
+            this.log.warn("held reply with unknown delivery expired after 24 h; not resent", { chatId: item.chatId, id: item.id, requestId: item.requestId, error: item.lastError });
+          }
+          const index = queue.indexOf(item);
+          if (index >= 0) queue.splice(index, 1);
           continue;
         }
         await this.noticeHeld(item); continue; // an ambiguous receipt must be reconciled before replay, even after restart

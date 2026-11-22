@@ -2,6 +2,11 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.3 (2026-11-22)
+
+- **`carl doctor` now checks that the Codex login can actually refresh.** A saved grant whose refresh token was rotated away no longer shows as signed in; doctor names the account and asks for a new login.
+- **Held Telegram replies no longer repeat the same expiry warning.** When two gateway processes share an outbox, the expired reply is removed and logged once per state change.
+
 ## 0.18.2 (2026-11-20)
 
 - **A run longer than its own interval no longer shows as overdue.** A job that runs past its next slot (an every-20-minutes job running 40 minutes) skips that slot, as before, and its next run now moves to the following slot instead of staying in the past, where UltraTerm read it as a missed run. A scheduler that has really stopped still shows as overdue. Regression test in `test/restart-interrupt.test.ts`.

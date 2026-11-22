@@ -18,7 +18,7 @@ import { moduleAskTools } from "./asks.ts";
 import { COMMIT, VERSION } from "./version.ts";
 import { loadPlugins } from "./plugins.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
-import { login, logout } from "./login.ts";
+import { login, logout, probeProvider } from "./login.ts";
 import { checkLocalModel, LOCAL_PROVIDER } from "./local-check.ts";
 import { spawnSync } from "node:child_process";
 import { GATEWAY_OPTIONS, ASK_OPTIONS, SEND_OPTIONS, USAGE, distance } from "./cli-help.ts";
@@ -283,6 +283,12 @@ async function doctor(): Promise<number> {
           lines.push(`${dir ?? "default"}${status.subscriptionType ? ` (${status.subscriptionType})` : ""}`);
         }
         return `Claude Code logged in: ${lines.join(", ")}`;
+      }
+      // Codex grants rotate: a saved login can parse yet its refresh token is dead.
+      // Refresh through the SDK here so doctor reports the broken account by name.
+      if (provider === "openai-codex") {
+        await probeProvider(c, provider);
+        return `${provider} signed in (credential refresh verified)`;
       }
       const available = brain.listModels().filter((m) => m.startsWith(provider + "/"));
       if (!available.length) throw new Error(`no credentials for ${provider} in ${c.agentDir}/auth.json (sign in with \`carl login ${provider}\`)`);

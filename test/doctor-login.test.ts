@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { probeProvider } from "../src/login.ts";
 
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 
@@ -41,4 +42,28 @@ test("doctor skips an unset primary login and names configured fallback provider
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("doctor credential probe fails a dead Codex grant instead of trusting listModels", async () => {
+  const cfg = { agentDir: "/synthetic/carl-agent", modelsPath: "/synthetic/models.json" } as any;
+  await assert.rejects(
+    () => probeProvider(cfg, "openai-codex", async () => ({
+      getAuth: async () => { throw new Error("invalid_grant"); },
+      getProviderAuthStatus: () => ({ configured: true }) as any,
+    })),
+    /openai-codex credential refresh failed.*carl login openai-codex/,
+  );
+  await assert.rejects(
+    () => probeProvider(cfg, "openai-codex", async () => ({
+      getAuth: async () => undefined,
+      getProviderAuthStatus: () => ({ configured: false }) as any,
+    })),
+    /openai-codex grant is expired or revoked.*carl login openai-codex/,
+  );
+  await assert.doesNotReject(
+    () => probeProvider(cfg, "openai-codex", async () => ({
+      getAuth: async () => ({}) as any,
+      getProviderAuthStatus: () => ({ configured: true }) as any,
+    })),
+  );
 });

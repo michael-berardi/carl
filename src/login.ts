@@ -13,6 +13,32 @@ async function runtime(cfg: CarlConfig): Promise<ModelRuntime> {
   return ModelRuntime.create({ authPath: join(cfg.agentDir, "auth.json"), modelsPath: cfg.modelsPath });
 }
 
+/** The smallest SDK surface a credential probe needs; injectable for hermetic tests. */
+export type CredentialProbeRuntime = Pick<ModelRuntime, "getAuth" | "getProviderAuthStatus">;
+
+/**
+ * Prove a credential can still refresh, not merely that auth.json parses.
+ * The SDK refreshes and persists rotated OAuth tokens inside getAuth(); a
+ * revoked/rotated-away refresh token rejects here. Errors never include the
+ * credential itself.
+ */
+export async function probeProvider(
+  cfg: CarlConfig,
+  provider: string,
+  makeRuntime: (config: CarlConfig) => Promise<CredentialProbeRuntime> = runtime,
+): Promise<void> {
+  const rt = await makeRuntime(cfg);
+  try {
+    await rt.getAuth(provider);
+  } catch (error) {
+    const name = error instanceof Error && error.name ? error.name : "error";
+    throw new Error(`${provider} credential refresh failed (${name}); run \`carl login ${provider}\``);
+  }
+  if (!rt.getProviderAuthStatus(provider).configured) {
+    throw new Error(`${provider} grant is expired or revoked; run \`carl login ${provider}\``);
+  }
+}
+
 /** Providers that already have a login, for setup's model step. */
 export async function configuredProviders(cfg: CarlConfig): Promise<string[]> {
   const rt = await runtime(cfg);
