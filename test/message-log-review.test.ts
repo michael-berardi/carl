@@ -18,7 +18,7 @@ const row = (dir: string) => JSON.parse(readFileSync(join(dir, "hermes.jsonl"), 
 
 test("review: redaction covers URL bot tokens, vendor keys, headers and secret fields without hiding prose", (t) => {
   const { dir } = scratch(t);
-  const secrets = ["123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd", "ghp_EXAMPLE-NOT-A-TOKEN", "github_pat_EXAMPLE-NOT-A-TOKEN", "xoxb-" + "0000000000-1111111111-SyntheticSynth", "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"];
+  const secrets = ["123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd", "ghp_EXAMPLE-NOT-A-TOKEN", "github_pat_SYNTHETIC-SYNTHETIC-SYNTHETIC", "xoxb-" + "0000000000-1111111111-SyntheticSynth", "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"];
   const text = `https://api.telegram.org/bot${secrets[0]}/getMe ${secrets.slice(1).join(" ")} Authorization: Basic dTpw Proxy-Authorization: Bearer c3ludGhldGlj ACCESS_TOKEN="synthetic secret tail" {"password":"synthetic-json-secret", "token": "unterminated-secret`;
   new audit.MessageLog(dir).record("sendMessage", { chat_id: 1, text, document: { file_name: text }, reply_markup: { inline_keyboard: [[{ text }]] } }, undefined, { requestId: "test", status: "unknown", error: text });
   const persisted = readFileSync(join(dir, "hermes.jsonl"), "utf8");

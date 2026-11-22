@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.4 (2026-11-22)
+
+- A synthetic credential-shaped string in the test suite no longer trips the release secret scan. No runtime behavior changed from 0.18.3.
+
 ## 0.18.3 (2026-11-22)
 
 - **`carl doctor` now checks that the Codex login can actually refresh.** A saved grant whose refresh token was rotated away no longer shows as signed in; doctor names the account and asks for a new login.
