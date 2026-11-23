@@ -31,6 +31,7 @@ import { sessionPrograms } from "./post/key.ts";
 import { readOnlyCache, writeReadOnlyCache } from "./post/safety.ts";
 import { adoptTrustedPath, executableChain, installProfile, NO_EXEC, operatorPath, operatorPathDirs, readSandboxed, CREDENTIAL_NAME, sandboxMcpServer, secretEnvNames, sandboxSpawnHook, secretDirs, secretFiles, writablePaths } from "./sandbox.ts";
 import { resolveClaude } from "./providers/claude-code.ts";
+import { isProviderAccessFailure } from "./provider-failure.ts";
 import { cooldownMs, isExhaustion, nameLocalCause } from "./router.ts";
 import { claudeCodeProviderConfig, closeSpares, PROVIDER as CLAUDE_PROVIDER, sweepCallFolders } from "./providers/claude-code.ts";
 import { createRouter } from "./router.ts";
@@ -827,7 +828,10 @@ export class Brain extends EventEmitter {
       model: lastAssistant?.provider ? `${lastAssistant.provider}/${lastAssistant.model}` : this.modelRef(convo),
       ms: Date.now() - started,
     };
-    if (error) this.psyche.recordShadow({ kind: "run_failed", conversation: convo.key, summary: `run failed: ${error.slice(0, 200)}`, evidence: text.slice(0, 500) });
+    // A provider login/quota/model refusal is infrastructure, not behaviour: it keeps its own shadow kind so the
+    // individuation pass cannot propose operator questions about it. Check the thrown error and the last model message.
+    const providerFailure = isProviderAccessFailure(thrown) || isProviderAccessFailure(lastAssistant?.errorMessage) || isProviderAccessFailure(error);
+    if (error) this.psyche.recordShadow({ kind: providerFailure ? "provider_failed" : "run_failed", conversation: convo.key, summary: `run failed: ${error.slice(0, 200)}`, evidence: text.slice(0, 500) });
     if (aborted && operatorStop) this.psyche.recordShadow({ kind: "aborted", conversation: convo.key, summary: "run stopped by the operator", evidence: text.slice(0, 300) });
     this.log.info("run settled", { key: convo.key, ok: result.ok, ms: result.ms, toolCalls, in: usage.input, out: usage.output, cached: usage.cacheRead, error });
     sink.onDone?.(result);

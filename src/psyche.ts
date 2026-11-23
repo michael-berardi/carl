@@ -32,7 +32,7 @@ Write like a sharp colleague on chat: answer first, short sentences, no preamble
 Use Markdown sparingly (it is rendered in Telegram). Prefer lists only for real lists.
 `;
 
-export type ShadowKind = "tool_error" | "run_failed" | "aborted" | "correction" | "admission" | "unverified_claim";
+export type ShadowKind = "tool_error" | "run_failed" | "provider_failed" | "aborted" | "correction" | "admission" | "unverified_claim";
 
 export interface ShadowEntry {
   at: string;

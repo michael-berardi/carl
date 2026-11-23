@@ -2,6 +2,11 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.8 (2026-11-23)
+
+- **Housekeeping failures no longer page your chat.** A failed built-in schedule (Individuation, feedback, scheduled posts) logs `schedule failed` with the cause and keeps `lastStatus`/`lastError` for `carl status`, `/schedules` and `carl doctor`, but delivers no failure message. Your own prompt and command schedules still report failures, and a built-in's successful output is unchanged. Live case: Individuation sent `Schedule "Individuation" failed: Claude Code is not logged in ...` into the home chat.
+- **Provider login problems no longer become operator questions.** A run failure diagnosed as provider access (401/402/429, expired login or token, usage limit, unsupported model) is recorded as `provider_failed` in the shadow instead of `run_failed` and excluded from the individuation pass. The entries stay in the ledger for `/shadow` and UltraTerm; behavioural failures still reach individuation. Regression tests in `test/schedule-delivery.test.ts`, `test/provider-failure.test.ts` and `test/individuation-adopt.test.ts`.
+
 ## 0.18.7 (2026-11-23)
 
 - **Gateway auto-update now actually fires.** The gateway's daily check was scheduled from the shared `checkedAt` timestamp, which CLI checks such as `carl update --check` and every gateway restart also refreshed; frequent checks postponed the tick indefinitely, so `update.auto` never installed anything. The gateway now keeps its own persisted next-check deadline that only it moves, and an auto-install decision no longer depends on a stale `notified` marker, so a failed attempt is retried. While runs are active the install is skipped with a named `runs active` log cause and retried in ten minutes; the existing restart-when-idle behaviour is unchanged. Regression tests in `test/auto-update.test.ts`.

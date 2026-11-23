@@ -96,6 +96,34 @@ test("the nightly report lists what was applied with how to revert it, and what 
   assert.equal(gw.psyche.procedures()[0].status, "reverted");
 });
 
+test("provider failures are absent from individuation input; behavioural failures still reach it", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "carl-individuation-provider-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "carl.json"), JSON.stringify({ model: "x/y", tools: [], telegram: { enabled: false }, api: { enabled: false } }));
+  const gw = new Gateway(loadConfig(root));
+  gw.psyche.recordShadow({ kind: "provider_failed", conversation: "schedule:j1", summary: "run failed: Your authentication token has expired", evidence: "carl login openai-codex" });
+  gw.psyche.recordShadow({ kind: "run_failed", conversation: "telegram:dm:1", summary: "run failed: claimed the job was queued without checking", evidence: "no job id" });
+  let prompt = "";
+  (gw.brain as any).oneShot = async (p: string) => { prompt = p; return "### Lessons\n- Check the record before claiming work is queued.\n\n### Contradictions\nNone.\n\n### Proposals\nNone."; };
+  await gw.individuate();
+  assert.doesNotMatch(prompt, /provider_failed|authentication token|carl login/);
+  assert.match(prompt, /run_failed.*claimed the job was queued/);
+  assert.match(gw.psyche.read("integrated.md"), /Check the record/);
+  assert.equal(gw.psyche.shadowSince().length, 2, "both entries stay in the ledger for /shadow and UltraTerm");
+});
+
+test("a night with only provider failures does not run a reflection or ask the operator", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "carl-individuation-provider-only-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "carl.json"), JSON.stringify({ model: "x/y", tools: [], telegram: { enabled: false }, api: { enabled: false } }));
+  const gw = new Gateway(loadConfig(root));
+  gw.psyche.recordShadow({ kind: "provider_failed", conversation: "schedule:j1", summary: "run failed: Claude Code is not logged in" });
+  let calls = 0;
+  (gw.brain as any).oneShot = async () => { calls++; return "### Lessons\nNone."; };
+  assert.equal(await gw.individuate(), "");
+  assert.equal(calls, 0);
+});
+
 test("send-time check: a work status claim in a work group needs a job id or a work tool run this turn", () => {
   const root = mkdtempSync(join(tmpdir(), "carl-adopt-check-"));
   writeFileSync(join(root, "carl.json"), JSON.stringify({ work: { command: ["/bin/true"] }, telegram: { allowFrom: [1], groups: [{ chat: -100, members: {}, work: { project: "p" } }, { chat: -200, members: {} }] }, api: { enabled: false } }));

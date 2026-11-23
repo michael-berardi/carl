@@ -400,7 +400,9 @@ export class Gateway {
   async individuate(): Promise<string> {
     if (this.cfg.learning === "ultraterm") return ULTRATERM_LEARNING;
     const since = this.psyche.lastIndividuation();
-    const shadow = this.psyche.shadowSince(since);
+    // Provider login/quota/model refusals are infrastructure already surfaced by doctor and the provider cards.
+    // Keep them in the ledger for /shadow and UltraTerm, but never offer them to individuation as behaviour.
+    const shadow = this.psyche.shadowSince(since).filter((e) => e.kind !== "provider_failed");
     const decisions = this.psyche.decisions(30);
     const sinceMs = since ? Date.parse(since) : Date.now() - 86_400_000;
     const replies: string[] = [];

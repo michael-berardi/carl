@@ -404,7 +404,9 @@ export class Scheduler {
         job.lastError = (e as Error).message.slice(0, 500);
         job.resumed = undefined;
         if (job.post && (e as { final?: boolean }).final) job.noRetry = true;
-        output = `Schedule "${job.name}" failed: ${job.lastError}`;
+        // Built-ins are housekeeping: a failure stays in the log, lastStatus and lastError for status, /schedules
+        // and doctor, but it is never pushed into the operator's chat. A built-in's successful output is unchanged.
+        output = job.builtin ? "" : `Schedule "${job.name}" failed: ${job.lastError}`;
         this.log.error("schedule failed", { id: job.id, error: job.lastError });
       }
     } finally {
@@ -415,7 +417,7 @@ export class Scheduler {
         job.nextRunAt = undefined;
       }
       if (job.when.startsWith("once") && job.nextRunAt === undefined && job.lastStatus !== "interrupted") job.enabled = false;
-      if (job.post && job.lastStatus === "error" && job.nextRunAt !== undefined) output += ` It will retry in ${Scheduler.POST_RETRY_MS / 60_000} min, resuming from the profile check; a part already live is not posted again.`;
+      if (job.post && !job.builtin && job.lastStatus === "error" && job.nextRunAt !== undefined) output += ` It will retry in ${Scheduler.POST_RETRY_MS / 60_000} min, resuming from the profile check; a part already live is not posted again.`;
       try { this.save(); } catch (e) { this.log.error("cannot save schedules", { error: (e as Error).message }); }
     }
     // A run that answered only with a silence marker ("[SILENT]", "NO_REPLY", "HEARTBEAT_OK", optionally with trailing
