@@ -2,9 +2,13 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.9 (2026-11-23)
+
+- **Failed scheduled posts still tell you.** 0.18.8 silenced every failed built-in schedule, which also hid a scheduled post that could not go out. Only housekeeping built-ins (Individuation, feedback) stay quiet now; a failed scheduled post reports its cause and its retry note again, as before 0.18.8.
+
 ## 0.18.8 (2026-11-23)
 
-- **Housekeeping failures no longer page your chat.** A failed built-in schedule (Individuation, feedback, scheduled posts) logs `schedule failed` with the cause and keeps `lastStatus`/`lastError` for `carl status`, `/schedules` and `carl doctor`, but delivers no failure message. Your own prompt and command schedules still report failures, and a built-in's successful output is unchanged. Live case: Individuation sent `Schedule "Individuation" failed: Claude Code is not logged in ...` into the home chat.
+- **Housekeeping failures no longer page your chat.** A failed built-in schedule (Individuation, feedback) logs `schedule failed` with the cause and keeps `lastStatus`/`lastError` for `carl status`, `/schedules` and `carl doctor`, but delivers no failure message. Your own prompt and command schedules still report failures, and a built-in's successful output is unchanged. Live case: Individuation sent `Schedule "Individuation" failed: Claude Code is not logged in ...` into the home chat.
 - **Provider login problems no longer become operator questions.** A run failure diagnosed as provider access (401/402/429, expired login or token, usage limit, unsupported model) is recorded as `provider_failed` in the shadow instead of `run_failed` and excluded from the individuation pass. The entries stay in the ledger for `/shadow` and UltraTerm; behavioural failures still reach individuation. Regression tests in `test/schedule-delivery.test.ts`, `test/provider-failure.test.ts` and `test/individuation-adopt.test.ts`.
 
 ## 0.18.7 (2026-11-23)

@@ -859,8 +859,7 @@ test("a draft edited after scheduling is refused when the slot fires, with no re
   const s = new Scheduler(r.home, log, { prompt: async () => "", builtin: { post: (j: any) => r.svc.runScheduled(j) }, deliver: async (_j: any, t: string) => { delivered.push(t); } } as any);
   await s.runNow(job.id);
   assert.equal(posted(r.x), 0);
-  assert.deepEqual(delivered, [], "a failed built-in job never pages chat; the cause stays in lastError");
-  assert.match(s.get(job.id).lastError ?? "", /edited after it was approved/);
+  assert.match(delivered[0], /edited after it was approved/, "a failed scheduled post still tells the operator");
   assert.equal(s.get(job.id).noRetry, true);
   assert.equal(s.get(job.id).enabled, false);
 });
