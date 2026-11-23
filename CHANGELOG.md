@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.7 (2026-11-23)
+
+- **Gateway auto-update now actually fires.** The gateway's daily check was scheduled from the shared `checkedAt` timestamp, which CLI checks such as `carl update --check` and every gateway restart also refreshed; frequent checks postponed the tick indefinitely, so `update.auto` never installed anything. The gateway now keeps its own persisted next-check deadline that only it moves, and an auto-install decision no longer depends on a stale `notified` marker, so a failed attempt is retried. While runs are active the install is skipped with a named `runs active` log cause and retried in ten minutes; the existing restart-when-idle behaviour is unchanged. Regression tests in `test/auto-update.test.ts`.
+
 ## 0.18.6 (2026-11-22)
 
 - `carl doctor` now forces a Codex credential refresh even while the saved access token still looks valid, so a rotated-away refresh token is reported instead of looking signed in.

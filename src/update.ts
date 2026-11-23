@@ -204,7 +204,14 @@ export function rollback(inst: Install): string {
 
 // ---- state -------------------------------------------------------------------------------------------------
 
-interface State { checkedAt?: number; latest?: string; notified?: string; installed?: { from: string; to: string; at: number }; error?: string }
+interface State {
+  checkedAt?: number;      // any check, CLI or gateway (informational)
+  nextGatewayCheckAt?: number; // gateway-owned: only UpdatePlugin moves this deadline
+  latest?: string;
+  notified?: string;
+  installed?: { from: string; to: string; at: number };
+  error?: string;
+}
 const stateFile = (home: string) => join(home, "state", "update.json");
 export function readState(home: string): State {
   try { return JSON.parse(readFileSync(stateFile(home), "utf8")); } catch { return {}; }
@@ -279,15 +286,29 @@ export async function updateCommand(args: string[]): Promise<number> {
 
 // ---- gateway plugin ----------------------------------------------------------------------------------------
 
+/** Injectable clock so the daily gateway check can be driven deterministically in tests. */
+export interface UpdateClock {
+  now(): number;
+  after(fn: () => void, ms: number): NodeJS.Timeout;
+}
+const SYSTEM_CLOCK: UpdateClock = { now: () => Date.now(), after: (fn, ms) => setTimeout(fn, ms) };
+
+/** A busy gateway rechecks soon instead of installing under active runs, or waiting a whole day. */
+const BUSY_RETRY_MS = 10 * 60_000;
+
 /**
  * In the gateway: a daily check that tells the home chat once per new version, the /update command, optional
- * automatic install (`update.auto`), and an "updated" note after the restart.
+ * automatic install (`update.auto`), and an "updated" note after the restart. The check keeps its own deadline in
+ * state: `carl update --check`, /update and restarts only touch the informational `checkedAt`, never the deadline.
  */
 export class UpdatePlugin implements GatewayPlugin {
   readonly name = "update";
   private timer?: NodeJS.Timeout;
   private gw?: Gateway;
   private installing = false;
+  private readonly clock: UpdateClock;
+
+  constructor(clock: UpdateClock = SYSTEM_CLOCK) { this.clock = clock; }
 
   start(gw: Gateway): void {
     this.gw = gw;
@@ -298,13 +319,23 @@ export class UpdatePlugin implements GatewayPlugin {
       writeState(home, { installed: undefined });
       setTimeout(() => this.tell(`Carl updated: ${s.installed!.from} → ${VERSION}.`), 5_000).unref();
     }
-    if (!checksEnabled(gw.cfg)) return;
-    const due = Math.max(60_000, (s.checkedAt ?? 0) + DAY_MS - Date.now());
-    this.timer = setTimeout(() => void this.tick(), due);
-    this.timer.unref();
+    if (!checksEnabled(gw.cfg)) {
+      if (gw.cfg.update.auto) gw.log.info("auto-update skipped", { reason: "checks disabled" });
+      return;
+    }
+    const due = Math.max(60_000, (s.nextGatewayCheckAt ?? 0) - this.clock.now());
+    this.schedule(due);
   }
 
   stop(): void { if (this.timer) clearTimeout(this.timer); }
+
+  /** Persist the gateway's own next-check deadline before arming the timer, so a restart resumes it. */
+  private schedule(ms: number): void {
+    const gw = this.gw!;
+    writeState(gw.cfg.home, { nextGatewayCheckAt: this.clock.now() + ms });
+    this.timer = this.clock.after(() => void this.tick(), ms);
+    this.timer.unref();
+  }
 
   private tell(text: string): void {
     const gw = this.gw!;
@@ -314,21 +345,37 @@ export class UpdatePlugin implements GatewayPlugin {
 
   private async tick(): Promise<void> {
     const gw = this.gw!;
+    let delay = DAY_MS;
     try {
       const rel = await latestRelease();
-      const s = readState(gw.cfg.home);
-      writeState(gw.cfg.home, { checkedAt: Date.now(), latest: rel.version, error: undefined });
-      if (isNewer(rel.version, VERSION) && s.notified !== rel.version) {
-        writeState(gw.cfg.home, { notified: rel.version });
-        if (gw.cfg.update.auto) await this.apply(rel);
-        else this.tell(`Carl ${rel.version} is available (this is ${VERSION}).\n\n${summary(rel.notes)}\n\nSend /update to install it. Carl restarts on it once nothing is running.`);
+      writeState(gw.cfg.home, { checkedAt: this.clock.now(), latest: rel.version, error: undefined });
+      if (!isNewer(rel.version, VERSION)) {
+        if (gw.cfg.update.auto) gw.log.info("auto-update skipped", { reason: "already current", version: rel.version });
+      } else if (!gw.cfg.update.auto) {
+        const s = readState(gw.cfg.home);
+        if (s.notified !== rel.version) {
+          writeState(gw.cfg.home, { notified: rel.version });
+          this.tell(`Carl ${rel.version} is available (this is ${VERSION}).\n\n${summary(rel.notes)}\n\nSend /update to install it. Carl restarts on it once nothing is running.`);
+        }
+      } else {
+        // Auto-install must not depend on `checkedAt` or `notified`: either can come from a CLI check or a failed
+        // earlier attempt. `installed` is written only after a real install, and the child signals the gateway to
+        // restart on the new code once nothing is running.
+        const s = readState(gw.cfg.home);
+        if (gw.brain.busyCount() > 0 || gw.scheduler.runningCount() > 0) {
+          gw.log.info("auto-update skipped", { reason: "runs active", version: rel.version });
+          delay = BUSY_RETRY_MS;
+        } else if (s.installed?.to === rel.version) {
+          gw.log.info("auto-update skipped", { reason: "installed, waiting for restart", version: rel.version });
+        } else {
+          await this.apply(rel);
+        }
       }
     } catch (e) {
       gw.log.warn("update check failed", { error: (e as Error).message });
-      writeState(gw.cfg.home, { checkedAt: Date.now(), error: (e as Error).message });
+      writeState(gw.cfg.home, { checkedAt: this.clock.now(), error: (e as Error).message });
     }
-    this.timer = setTimeout(() => void this.tick(), DAY_MS);
-    this.timer.unref();
+    this.schedule(delay);
   }
 
   /**

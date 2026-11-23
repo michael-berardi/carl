@@ -78,7 +78,7 @@ Carl checks for a new release once a day. When one is out, it tells you in your 
 - **From a terminal:** `carl update` installs it; `carl update --check` only checks.
 - **Undo:** `carl update --rollback` goes back to the release you had before.
 
-Each update is tested before Carl switches to it: if its dependencies do not install or it does not start, nothing changes and you get the error. Two bots sharing one app folder share a release: the second one to update links the same release folder, keeping its own Node runtime link. Set `"update": {"auto": true}` to install new releases without asking.
+Each update is tested before Carl switches to it: if its dependencies do not install or it does not start, nothing changes and you get the error. Two bots sharing one app folder share a release: the second one to update links the same release folder, keeping its own Node runtime link. Set `"update": {"auto": true}` to install new releases without asking. The gateway keeps its own next-check deadline: `carl update --check`, `/update` and gateway restarts never postpone it. With `auto`, it installs only when nothing is running (retrying in ten minutes if a run is active) and logs a named reason whenever an install is skipped.
 
 ## What you get
 
