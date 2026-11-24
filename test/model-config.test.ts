@@ -83,10 +83,22 @@ if (process.argv[2] === "--scenario") {
     assert.match(result.logs, /starting on the fallback \\"plan-b\/model-y\\"/);
   });
 
-  test("no resolvable model at all still refuses to start, naming the primary", async () => {
+  test("no resolvable model at all still refuses to start, naming the primary and the skipped fallback", async () => {
     const result = await scenario({ model: "router-a/gone-model", fallbackModels: ["plan-b/also-gone"] }, MODELS);
     assert.equal(result.ok, false);
     assert.match(result.error, /router-a\/gone-model.*is not in Pi's registry/);
+    assert.match(result.logs, /fallback model unavailable; skipping it/);
+    assert.match(result.logs, /plan-b\/also-gone/);
+  });
+
+  test("a malformed fallback chain fails with a named config error, never a silent start", () => {
+    const root = mkdtempSync(join(tmpdir(), "carl-bad-chain-"));
+    try {
+      writeFileSync(join(root, "carl.json"), JSON.stringify({ model: "router-a/vendor/model-x:variant", fallbackModels: ["plan-b/model-y", 7] }));
+      assert.throws(() => loadConfig(root), /fallbackModels must be a list of strings/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("modelsPath reads the model catalog from the main Pi registry while logins stay in agentDir (no copied models.json to drift)", async () => {
