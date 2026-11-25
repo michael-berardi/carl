@@ -110,7 +110,7 @@ Each update is tested before Carl switches to it: if its dependencies do not ins
   - Five-field cron in local time, `every 30m`, `@daily` and `once <time>`. Wildcard day fields (including `*/n`) intersect; two restricted day fields match either day. Intervals that overflow integer milliseconds are rejected.
   - Each run starts fresh, so schedules never build up context.
   - Shell-command schedules (created by the operator) deliver their output without a model call.
-  - Built-in schedules (Individuation, feedback and scheduled posts) never message you about their own failures: the cause stays in the log and in `lastError`, which `carl status`, `/schedules` and `carl doctor` show. Their successful output is delivered as before, and your own prompt and command schedules still report failures in chat.
+  - Housekeeping built-in schedules (Individuation and feedback) never message you about their own failures: the cause stays in the log and in `lastError`, which `carl status`, `/schedules` and `carl doctor` show. Their successful output is delivered as before, and failed scheduled posts as well as your own prompt and command schedules still report failures in chat.
   - They run in the shell sandbox. To run one of your own scripts outside it (one that needs a login the sandbox hides, such as `cf`'s), set `"unsandboxed": true` on that job in `~/.carl/schedules.json`. The agent cannot set it.
 - **Models:**
   - A primary model, plus fallbacks used only when the primary provably cannot answer: out of quota or credits, a 5xx outage, or an OpenRouter route with no endpoints (see Routing).

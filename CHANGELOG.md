@@ -2,6 +2,11 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.11 (2026-11-25)
+
+- **Clean source tree and release bundles (removed tracked `node_modules` symlink).** Removed a tracked machine-local `node_modules` symlink that broke fresh clones and release tarball installs, and changed `.gitignore` from `node_modules/` to `node_modules` so symlinked dependency folders are always ignored.
+- **Metadata and docs alignment.** Synchronized `package-lock.json` with `package.json` and updated the built-in schedule failure note in `README.md` to match 0.18.9 behavior (failed scheduled posts still report to the operator).
+
 ## 0.18.10 (2026-11-24)
 
 - **Bounded disk hygiene for spill files, rotated session transcripts, and UltraTerm intake tables.** `sweepSpillDir` (7-day age limit, 50 MB size cap with a 1-hour floor for active turns, symlink-safe) and `sweepSessionsDir` (always preserves the newest transcript per conversation while pruning >30-day rotated transcripts and >1-hour rotated `schedule:*` runs) run on startup and hourly. UltraTerm compat now prunes completed `intake` rows older than 7 days and keeps the last 200 committed `model_selection` rows hourly, refreshes its cached `state.db` schema metadata every 5 minutes instead of querying `PRAGMA table_info` on every message, and logs prune warnings instead of swallowing errors.
