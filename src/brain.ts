@@ -1,5 +1,5 @@
 // The brain: one Pi AgentSession per conversation, created lazily, persisted as Pi JSONL, disposed when idle.
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
@@ -25,7 +25,7 @@ import {
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { type CarlConfig, mcpFile, ConfigError, MODEL_REQUIRED } from "./config.ts";
 import type { Log } from "./log.ts";
-import { resultBudget } from "./budget.ts";
+import { resultBudget, sweepSpillDir } from "./budget.ts";
 import { modelGuidance, withGuidance } from "./model-guidance.ts";
 import { sessionPrograms } from "./post/key.ts";
 import { readOnlyCache, writeReadOnlyCache } from "./post/safety.ts";
@@ -456,6 +456,9 @@ export class Brain extends EventEmitter {
     }
     this.sweeper = setInterval(() => this.disposeIdle(), 60_000);
     this.sweeper.unref();
+    this.sweepStorage();
+    this.storageSweeper = setInterval(() => this.sweepStorage(), 60 * 60_000);
+    this.storageSweeper.unref();
   }
 
   /** Resolve "provider/model" through Pi's registry. */
@@ -750,57 +753,60 @@ export class Brain extends EventEmitter {
       }
     });
     let thrown: Error | undefined;
-    // Pi retries the failures it classifies as transient. A refusal it does not retry (OpenRouter's 402
-    // "insufficient credits" and its 404 "no endpoints available" are not in that set) would end the turn as a
-    // stall, so Carl benches the failed model and runs the same turn again on the next link of the chain. Only
-    // while nothing was written and no tool ran: a partial answer or a started tool call belongs to its model.
-    let attempt = 0;
-    for (;;) {
-      thrown = undefined;
-      lastAssistant = undefined;
-      live = "";
-      attemptTools = 0;
-      try {
-        // Never run Pi extension /commands from message text: a schedule or webhook prompt is data, not a command.
-        await convo.session.prompt(text, { images, source: "rpc", expandPromptTemplates: false } as any);
-      } catch (e) {
-        thrown = e as Error;
-      }
-      if (convo.stopRequested || !this.routerReady) break;
-      const failed = lastAssistant?.stopReason === "error"
-        ? { stopReason: "error" as const, errorMessage: this.namedFailure(lastAssistant) }
-        : undefined;
-      if (!failed || !isExhaustion(failed)) break;
-      const failedRef = this.failedRef(lastAssistant);
-      if (!failedRef) break;
-      const until = Date.now() + cooldownMs(failed.errorMessage ?? "");
-      this.routerState.set(failedRef, until); // benched either way: the next turn starts elsewhere
-      // The failure came after output or after a tool ran: finish this turn on its own model (its words and tool
-      // calls belong to it), never switch mid-turn and duplicate them. The next turn moves on.
-      if (assistantText(lastAssistant).trim() || attemptTools > 0) break;
-      const next = attempt < this.fallbackRefs.length ? this.nextFallback(failedRef) : undefined;
-      if (!next) break;
-      const reason = (failed.errorMessage ?? "").slice(0, 200);
-      this.noteFallback(failedRef, next, reason, until, "primary model unavailable; retrying the turn on the next model in the fallback chain");
-      attempt++;
-    }
-    const check = (reply: string) => this.replyCheck?.(convo.key, reply, completedTools);
-    const correction = !workQueueFailed && !convo.stopRequested && !thrown && lastAssistant && !["error", "aborted"].includes(lastAssistant.stopReason)
-      ? check(assistantText(lastAssistant)) : undefined;
     let withhold = false;
-    if (correction) {
-      this.log.info("reply check: one corrected reply requested", { key: convo.key });
-      try {
-        await convo.session.prompt(correction, { source: "rpc", expandPromptTemplates: false } as any);
-      } catch (e) {
-        thrown = e as Error;
+    const check = (reply: string) => this.replyCheck?.(convo.key, reply, completedTools);
+    try {
+      // Pi retries the failures it classifies as transient. A refusal it does not retry (OpenRouter's 402
+      // "insufficient credits" and its 404 "no endpoints available" are not in that set) would end the turn as a
+      // stall, so Carl benches the failed model and runs the same turn again on the next link of the chain. Only
+      // while nothing was written and no tool ran: a partial answer or a started tool call belongs to its model.
+      let attempt = 0;
+      for (;;) {
+        thrown = undefined;
+        lastAssistant = undefined;
+        live = "";
+        attemptTools = 0;
+        try {
+          // Never run Pi extension /commands from message text: a schedule or webhook prompt is data, not a command.
+          await convo.session.prompt(text, { images, source: "rpc", expandPromptTemplates: false } as any);
+        } catch (e) {
+          thrown = e as Error;
+        }
+        if (convo.stopRequested || !this.routerReady) break;
+        const failed = lastAssistant?.stopReason === "error"
+          ? { stopReason: "error" as const, errorMessage: this.namedFailure(lastAssistant) }
+          : undefined;
+        if (!failed || !isExhaustion(failed)) break;
+        const failedRef = this.failedRef(lastAssistant);
+        if (!failedRef) break;
+        const until = Date.now() + cooldownMs(failed.errorMessage ?? "");
+        this.routerState.set(failedRef, until); // benched either way: the next turn starts elsewhere
+        // The failure came after output or after a tool ran: finish this turn on its own model (its words and tool
+        // calls belong to it), never switch mid-turn and duplicate them. The next turn moves on.
+        if (assistantText(lastAssistant).trim() || attemptTools > 0) break;
+        const next = attempt < this.fallbackRefs.length ? this.nextFallback(failedRef) : undefined;
+        if (!next) break;
+        const reason = (failed.errorMessage ?? "").slice(0, 200);
+        this.noteFallback(failedRef, next, reason, until, "primary model unavailable; retrying the turn on the next model in the fallback chain");
+        attempt++;
       }
-      withhold = !lastAssistant || !!thrown || !!check(assistantText(lastAssistant));
-      if (withhold && lastAssistant && !thrown) {
-        this.psyche.recordShadow({ kind: "unverified_claim", conversation: convo.key, summary: "reply still failed the work reply check", evidence: assistantText(lastAssistant).slice(0, 500) });
+      const correction = !workQueueFailed && !convo.stopRequested && !thrown && lastAssistant && !["error", "aborted"].includes(lastAssistant.stopReason)
+        ? check(assistantText(lastAssistant)) : undefined;
+      if (correction) {
+        this.log.info("reply check: one corrected reply requested", { key: convo.key });
+        try {
+          await convo.session.prompt(correction, { source: "rpc", expandPromptTemplates: false } as any);
+        } catch (e) {
+          thrown = e as Error;
+        }
+        withhold = !lastAssistant || !!thrown || !!check(assistantText(lastAssistant));
+        if (withhold && lastAssistant && !thrown) {
+          this.psyche.recordShadow({ kind: "unverified_claim", conversation: convo.key, summary: "reply still failed the work reply check", evidence: assistantText(lastAssistant).slice(0, 500) });
+        }
       }
+    } finally {
+      unsubscribe();
     }
-    unsubscribe();
     const operatorStop = !!convo.stopRequested;
     const aborted = lastAssistant?.stopReason === "aborted" || operatorStop;
     convo.stopRequested = false;
@@ -885,8 +891,8 @@ export class Brain extends EventEmitter {
     return true;
   }
 
-  /** Start a fresh session for this conversation; the old one stays on disk. */
-  async reset(key: string): Promise<void> {
+  /** Start a fresh session for this conversation; the old one stays on disk unless inMemory is requested. */
+  async reset(key: string, opts?: { inMemory?: boolean }): Promise<void> {
     const inflight = this.creating.get(key);
     if (inflight) await inflight.catch(() => {});
     const convo = this.conversations.get(key);
@@ -898,7 +904,7 @@ export class Brain extends EventEmitter {
         if (convo.busy) await convo.session.abort().catch(() => {});
         await this.closeSession(convo.session);
       }
-      return this.createConversation(key, convo?.source ?? "cli", true);
+      return this.createConversation(key, convo?.source ?? "cli", true, opts?.inMemory === true);
     })().finally(() => this.creating.delete(key));
     this.creating.set(key, pending);
     this.conversations.set(key, await pending);
@@ -998,8 +1004,26 @@ export class Brain extends EventEmitter {
     session.dispose();
   }
 
+  private storageSweeper?: ReturnType<typeof setInterval>;
+
+  /** Sweep expired spill files and aged rotated session transcripts (always keeping each folder's newest transcript). */
+  sweepStorage(now = Date.now(), sessionMaxAgeMs = 30 * 24 * 60 * 60 * 1000): { spillRemoved: number; sessionsRemoved: number } {
+    const spill = sweepSpillDir(join(this.cfg.home, "spill"), { now });
+    const activeFiles = new Set<string>();
+    for (const convo of this.conversations.values()) {
+      const f = (convo.session as any).sessionFile;
+      if (typeof f === "string" && f) activeFiles.add(f);
+    }
+    const sessionsRemoved = sweepSessionsDir(join(this.cfg.home, "sessions"), { activeFiles, now, sessionMaxAgeMs });
+    if (spill.removed || sessionsRemoved) {
+      this.log.info("storage sweep completed", { spillRemoved: spill.removed, spillFreedBytes: spill.freedBytes, sessionsRemoved });
+    }
+    return { spillRemoved: spill.removed, sessionsRemoved };
+  }
+
   async shutdown(timeoutMs = 5_000): Promise<void> {
     if (this.sweeper) clearInterval(this.sweeper);
+    if (this.storageSweeper) clearInterval(this.storageSweeper);
     closeSpares(); // turns finishing below must not pre-start processes nobody will use
     const running = [...this.conversations.values()].filter((c) => c.pending).map((c) => c.pending!);
     if (running.length) {
@@ -1151,6 +1175,64 @@ export function listSessionFiles(home: string): { key: string; dir: string; file
     }
   }
   return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+/**
+ * Remove rotated session transcripts older than `sessionMaxAgeMs` (or `scheduleMaxAgeMs` for `schedule:*` folders).
+ * Always keeps the newest `.jsonl` in each directory so an idle conversation never loses its only transcript,
+ * and skips active open session files and symlinks.
+ */
+export function sweepSessionsDir(
+  sessionsRoot: string,
+  opts?: { activeFiles?: ReadonlySet<string>; now?: number; sessionMaxAgeMs?: number; scheduleMaxAgeMs?: number },
+): number {
+  const now = opts?.now ?? Date.now();
+  const minAge = Math.max(opts?.sessionMaxAgeMs ?? 30 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000);
+  const scheduleAge = opts?.scheduleMaxAgeMs ?? 60 * 60 * 1000;
+  const activeFiles = opts?.activeFiles;
+  let dirs: string[];
+  try {
+    const rootSt = lstatSync(sessionsRoot);
+    if (rootSt.isSymbolicLink() || !rootSt.isDirectory()) return 0;
+    dirs = readdirSync(sessionsRoot);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const d of dirs) {
+    const sub = join(sessionsRoot, d);
+    try {
+      const dst = lstatSync(sub);
+      if (dst.isSymbolicLink() || !dst.isDirectory()) continue;
+      let key = "";
+      try {
+        key = readFileSync(join(sub, "key"), "utf8").trim();
+      } catch {}
+      const cutoff = key.startsWith("schedule:") ? scheduleAge : minAge;
+      const files: { path: string; mtimeMs: number }[] = [];
+      for (const name of readdirSync(sub)) {
+        if (!name.endsWith(".jsonl")) continue;
+        const full = join(sub, name);
+        try {
+          const st = lstatSync(full);
+          if (st.isSymbolicLink() || !st.isFile()) continue;
+          files.push({ path: full, mtimeMs: st.mtimeMs });
+        } catch {}
+      }
+      if (files.length <= 1) continue;
+      files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      for (const f of files.slice(1)) {
+        if (activeFiles?.has(f.path)) continue;
+        if (now - f.mtimeMs > cutoff) {
+          try {
+            unlinkSync(f.path);
+            removed++;
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+  return removed;
 }
 
 export function assistantText(m: any): string {

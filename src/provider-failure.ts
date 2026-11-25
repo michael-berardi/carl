@@ -5,7 +5,7 @@ import { ClaudeCodeError } from "./providers/claude-code.ts";
 
 // Words the providers themselves use, plus the HTTP statuses a Claude Code refusal carries. Quota text matches the
 // router's exhaustion signals so a benchable provider refusal and a shadow infrastructure entry agree.
-const PROVIDER_ACCESS = /\b(?:401|402|429)\b|rate.?limit|usage limit|session limit|weekly limit|limit reached|quota|insufficient_quota|insufficient credits|credit balance|not logged in|not authenticated|token\s+(?:has\s+)?expired|auth(?:entication)?[-_ ]?expired|oauth session expired|login\s+(?:has\s+)?expired|expired or revoked|no credentials|unsupported model|model[^\n]{0,80}(?:is\s+)?not supported|not (?:available|supported) (?:on|for) (?:your|this) (?:plan|account)/i;
+const PROVIDER_ACCESS = /(?:(?:^|(?:HTTP|status|code)\s*[:=]?\s*)\b(?:401|402|429)\b|\b(?:401|402|429)\s+(?:Unauthorized|Payment Required|Too Many Requests)\b)|invalid (?:x-)?api[- ]?key|authentication_error|rate.?limit|usage limit|session limit|weekly limit|limit reached|quota|insufficient_quota|insufficient credits|credit balance|not logged in|not authenticated|token\s+(?:has\s+)?expired|auth(?:entication)?[-_ ]?expired|oauth session expired|login\s+(?:has\s+)?expired|expired or revoked|no credentials|unsupported model|model[^\n]{0,80}(?:is\s+)?not supported|not (?:available|supported) (?:on|for) (?:your|this) (?:plan|account)/i;
 
 /** True when a run failure came from provider access, not from Carl's behaviour. */
 export function isProviderAccessFailure(error: unknown): boolean {

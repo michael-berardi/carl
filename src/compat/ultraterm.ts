@@ -43,6 +43,10 @@ export class UltraTermCompat implements GatewayPlugin {
   private readonly sessions = new Map<string, SessionRow>(); // Pi session id -> compat row
   private readonly startTime = processStartCentiseconds();
   private intake!: DatabaseSync;
+  private sessionCols = new Set<string>();
+  private hasModelUsageTable = false;
+  private schemaRefreshedAt = 0;
+  private pruneTimer?: ReturnType<typeof setInterval>;
 
   private readonly opts: UltraTermCompatOptions;
   private accountCache?: { at: number; order: string[] };
@@ -87,6 +91,7 @@ export class UltraTermCompat implements GatewayPlugin {
     this.db = new DatabaseSync(join(this.opts.home, "state.db"));
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     ensureSchema(this.db);
+    this.refreshSchema(true);
     // Transcripts and tool output live here: owner-only.
     for (const f of ["state.db", "state.db-wal", "state.db-shm"]) {
       try { chmodSync(join(this.opts.home, f), 0o600); } catch {}
@@ -99,6 +104,8 @@ export class UltraTermCompat implements GatewayPlugin {
         state TEXT NOT NULL, receipt TEXT);`);
 
     this.resumeIntake();
+    this.pruneTimer = setInterval(() => this.pruneIntake(), 60 * 60 * 1000);
+    this.pruneTimer.unref();
     gw.emitStatus = (s) => this.writeGatewayState(s);
     const configured = gw.cfg.claude.configDirs;
     gw.brain.claudeAccounts = () => this.claudeAccountOrder(configured);
@@ -116,9 +123,28 @@ export class UltraTermCompat implements GatewayPlugin {
 
   stop(): void {
     if (!this.gw) return; // never started
+    if (this.pruneTimer) clearInterval(this.pruneTimer);
     this.writeGatewayState({ ...this.gw.health(), state: "stopped" });
     try { this.db?.close(); } catch {}
     try { this.intake?.close(); } catch {}
+  }
+
+  private refreshSchema(force = false): void {
+    const now = Date.now();
+    if (!force && now - this.schemaRefreshedAt < 5 * 60 * 1000) return;
+    this.sessionCols = columns(this.db, "sessions");
+    this.hasModelUsageTable = hasTable(this.db, "session_model_usage");
+    this.schemaRefreshedAt = now;
+  }
+
+  private pruneIntake(): void {
+    const cutoff = Date.now() / 1000 - 7 * 86_400;
+    try {
+      this.intake.prepare("DELETE FROM intake WHERE state IN ('done', 'failed', 'route_changed') AND created_at < ?").run(cutoff);
+      this.intake.prepare("DELETE FROM model_selection WHERE state = 'committed' AND rowid NOT IN (SELECT rowid FROM model_selection WHERE state = 'committed' ORDER BY rowid DESC LIMIT 200)").run();
+    } catch (e) {
+      this.gw?.log.warn("intake prune failed", { error: (e as Error).message });
+    }
   }
 
   // ---- gateway_state.json -------------------------------------------------------------------------------------
@@ -173,7 +199,7 @@ export class UltraTermCompat implements GatewayPlugin {
       // The conversation's channel decides the pane: a composer message into the Telegram thread stays Telegram.
       source: telegram ? "telegram" : source,
     };
-    const cols = columns(this.db, "sessions");
+    const cols = this.sessionCols;
     const values: Record<string, unknown> = { id: row.id, source: row.source, started_at: Date.now() / 1000 };
     if (cols.has("session_key")) values.session_key = row.key;
     if (cols.has("chat_id") && telegram) values.chat_id = telegram[2];
@@ -196,13 +222,14 @@ export class UltraTermCompat implements GatewayPlugin {
   }
 
   private mirror(e: TranscriptEvent): void {
+    this.refreshSchema();
     const s = this.sessionFor(e);
     const at = e.at / 1000;
     const toolCalls = e.toolCalls?.length ? JSON.stringify(e.toolCalls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) } }))) : null;
     this.db
       .prepare("INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(s.id, e.role, e.text || null, e.toolCallId ?? null, toolCalls, e.toolName ?? null, at);
-    const cols = columns(this.db, "sessions");
+    const cols = this.sessionCols;
     const sets = ["message_count = COALESCE(message_count,0) + 1"];
     const args: (number | string)[] = [];
     const add = (sql: string, ...v: (number | string)[]) => { sets.push(sql); args.push(...v); };
@@ -221,7 +248,7 @@ export class UltraTermCompat implements GatewayPlugin {
       this.db.prepare("UPDATE sessions SET model = ?, billing_provider = ? WHERE id = ?").run(rest.join("/"), provider, s.id);
     }
     this.db.prepare(`UPDATE sessions SET ${sets.join(", ")} WHERE id = ?`).run(...args, s.id);
-    if (e.role === "assistant" && e.usage && e.model && hasTable(this.db, "session_model_usage")) {
+    if (e.role === "assistant" && e.usage && e.model && this.hasModelUsageTable) {
       const [provider, ...rest] = e.model.split("/");
       const u = e.usage;
       this.db
@@ -349,6 +376,7 @@ export class UltraTermCompat implements GatewayPlugin {
 
   /** Durable intake: requests accepted but never started run now; ones cut off by a restart are reported. */
   private resumeIntake(): void {
+    this.pruneIntake();
     const rows = this.intake.prepare("SELECT request_id, session_id, payload, state FROM intake WHERE state IN ('accepted', 'running')").all() as any[];
     for (const r of rows) {
       const p = JSON.parse(r.payload);

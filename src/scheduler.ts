@@ -375,8 +375,18 @@ export class Scheduler {
       if (job.post) job.attempts = (job.attempts ?? 0) + 1;
       this.save();
       this.log.info("schedule started", { id: job.id, name: job.name });
-      const timed = <T>(p: Promise<T>) =>
-        Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`no result after ${Scheduler.RUN_TIMEOUT_MS / 60_000} minutes`)), Scheduler.RUN_TIMEOUT_MS).unref())]);
+      const timed = <T>(p: Promise<T>) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        return Promise.race([
+          p,
+          new Promise<T>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`no result after ${Scheduler.RUN_TIMEOUT_MS / 60_000} minutes`)), Scheduler.RUN_TIMEOUT_MS);
+            timer.unref();
+          }),
+        ]).finally(() => {
+          if (timer !== undefined) clearTimeout(timer);
+        });
+      };
       if (job.builtin) {
         const run = this.runners.builtin[job.builtin];
         if (!run) throw new Error(`unknown built-in job "${job.builtin}"`);

@@ -2,6 +2,12 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.10 (2026-11-24)
+
+- **Bounded disk hygiene for spill files, rotated session transcripts, and UltraTerm intake tables.** `sweepSpillDir` (7-day age limit, 50 MB size cap with a 1-hour floor for active turns, symlink-safe) and `sweepSessionsDir` (always preserves the newest transcript per conversation while pruning >30-day rotated transcripts and >1-hour rotated `schedule:*` runs) run on startup and hourly. UltraTerm compat now prunes completed `intake` rows older than 7 days and keeps the last 200 committed `model_selection` rows hourly, refreshes its cached `state.db` schema metadata every 5 minutes instead of querying `PRAGMA table_info` on every message, and logs prune warnings instead of swallowing errors.
+- **No more leaked session listeners or scheduler timeouts.** `Brain` unsubscribes per-turn session listeners in `finally`, and `Scheduler` clears per-job timeout timers in `finally`.
+- **Tighter provider-access failure matching.** Bare numbers like `"Error: processed 429 rows"` or `"line 401 had a syntax error"` no longer trigger `provider_failed`, while leading status codes (`"401 invalid api key"`), `HTTP`/`status`/`code` 401/402/429, and `invalid api key` / `authentication_error` remain classified accurately. Regression tests in `test/leaks-and-sweep.test.ts`.
+
 ## 0.18.9 (2026-11-23)
 
 - **Failed scheduled posts still tell you.** 0.18.8 silenced every failed built-in schedule, which also hid a scheduled post that could not go out. Only housekeeping built-ins (Individuation, feedback) stay quiet now; a failed scheduled post reports its cause and its retry note again, as before 0.18.8.

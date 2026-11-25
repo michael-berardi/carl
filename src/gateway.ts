@@ -387,7 +387,7 @@ export class Gateway {
 
   private async runPromptJob(job: Job): Promise<string> {
     const key = `schedule:${job.id}`;
-    await this.brain.reset(key); // every run starts clean: schedules never grow a context
+    await this.brain.reset(key); // every run starts fresh; storage sweep retains only the latest transcript per schedule
     if (job.model) await this.brain.setModel(key, job.model);
     const limit = setTimeout(() => void this.brain.stop(key), Scheduler.RUN_TIMEOUT_MS - 5_000);
     limit.unref();
