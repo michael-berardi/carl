@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checksEnabled, detectInstall, install, isNewer, latestRelease, prune, repoSlug, rollback } from "../src/update.ts";
+import { checksEnabled, detectInstall, install, isNewer, latestRelease, prune, repoSlug, rollback, UpdateError } from "../src/update.ts";
 import { PI_PRIVATE_ENV, CLAUDE_PRIVATE_ENV } from "../src/privacy.ts";
 
 test("versions compare as x.y.z", () => {
@@ -183,5 +183,100 @@ test("a second link on the same app folder shares a release the first already in
     delete process.env.CARL_UPDATE_API;
     server.close();
     rmSync(app, { recursive: true, force: true });
+  }
+});
+
+function gitExec(cwd: string, ...args: string[]): string {
+  const r = spawnSync("git", ["-C", cwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", ...args], { encoding: "utf8" });
+  assert.equal(r.status, 0, `git ${args.join(" ")} failed: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+function writeMinimalCarl(dir: string, version: string): void {
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "carl-gateway", version, repository: { url: "git+https://github.com/o/r.git" } }, null, 2));
+  writeFileSync(join(dir, "package-lock.json"), JSON.stringify({ name: "carl-gateway", version, lockfileVersion: 3, requires: true, packages: { "": { name: "carl-gateway", version } } }, null, 2));
+  writeFileSync(join(dir, "bin", "carl"), `#!/bin/sh\necho "${version} (test)"\n`);
+  chmodSync(join(dir, "bin", "carl"), 0o755);
+}
+
+test("git-checkout update fetches rewritten tags without clobbering and reports a recovery command on rewritten history", async () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "carl-upd-git-")));
+  try {
+    const origin = join(tmp, "origin.git");
+    const upstream = join(tmp, "upstream");
+    const checkout = join(tmp, "checkout");
+    mkdirSync(origin);
+    gitExec(origin, "init", "--bare", "-q", "-b", "main");
+    gitExec(tmp, "clone", "-q", origin, upstream);
+    writeMinimalCarl(upstream, "1.0.0");
+    gitExec(upstream, "add", "-A");
+    gitExec(upstream, "commit", "-qm", "v1.0.0");
+    gitExec(upstream, "tag", "-a", "v1.0.0", "-m", "v1.0.0");
+    gitExec(upstream, "push", "-q", "origin", "main", "--tags");
+
+    gitExec(tmp, "clone", "-q", origin, checkout);
+    const inst = detectInstall(checkout, undefined);
+    assert.equal(inst.kind, "git");
+
+    // Rewrite upstream history and force-move v1.0.0, then tag v1.1.0 on the rewritten line.
+    writeMinimalCarl(upstream, "1.0.0");
+    writeFileSync(join(upstream, "rewritten.txt"), "clean\n");
+    gitExec(upstream, "add", "-A");
+    gitExec(upstream, "commit", "--amend", "-qm", "v1.0.0 rewritten");
+    gitExec(upstream, "tag", "-fa", "v1.0.0", "-m", "v1.0.0 rewritten");
+    writeMinimalCarl(upstream, "1.1.0");
+    gitExec(upstream, "add", "-A");
+    gitExec(upstream, "commit", "-qm", "v1.1.0");
+    gitExec(upstream, "tag", "-a", "v1.1.0", "-m", "v1.1.0");
+    gitExec(upstream, "push", "-q", "--force", "origin", "main", "refs/tags/v1.0.0", "refs/tags/v1.1.0");
+
+    await assert.rejects(
+      install({ tag: "v1.1.0", version: "1.1.0", notes: "", url: "" }, inst, "o/r"),
+      (err: unknown) => {
+        assert.ok(err instanceof UpdateError);
+        assert.doesNotMatch(err.message, /would clobber existing tag/i);
+        assert.match(err.message, /history diverged or was rewritten/i);
+        assert.match(err.message, /git -C .* fetch --force --tags origin && git -C .* reset --hard v1\.1\.0 && npm --prefix .* ci --omit=dev/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("git-checkout update fast-forwards cleanly even after an older tag on origin was force-moved", async () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "carl-upd-git-ff-")));
+  try {
+    const origin = join(tmp, "origin.git");
+    const upstream = join(tmp, "upstream");
+    const checkout = join(tmp, "checkout");
+    mkdirSync(origin);
+    gitExec(origin, "init", "--bare", "-q", "-b", "main");
+    gitExec(tmp, "clone", "-q", origin, upstream);
+    writeMinimalCarl(upstream, "1.0.0");
+    gitExec(upstream, "add", "-A");
+    gitExec(upstream, "commit", "-qm", "v1.0.0");
+    gitExec(upstream, "tag", "-a", "v1.0.0", "-m", "v1.0.0");
+    gitExec(upstream, "push", "-q", "origin", "main", "--tags");
+
+    gitExec(tmp, "clone", "-q", origin, checkout);
+    const inst = detectInstall(checkout, undefined);
+    assert.equal(inst.kind, "git");
+
+    // Add a fast-forwardable v1.0.1 commit AND re-tag v1.0.0 (same commit, new tag object) so plain `git fetch --tags` would fail.
+    writeMinimalCarl(upstream, "1.0.1");
+    gitExec(upstream, "add", "-A");
+    gitExec(upstream, "commit", "-qm", "v1.0.1");
+    gitExec(upstream, "tag", "-fa", "v1.0.0", "-m", "v1.0.0 re-annotated", "HEAD~1");
+    gitExec(upstream, "tag", "-a", "v1.0.1", "-m", "v1.0.1");
+    gitExec(upstream, "push", "-q", "--force", "origin", "main", "refs/tags/v1.0.0", "refs/tags/v1.0.1");
+
+    const done = await install({ tag: "v1.0.1", version: "1.0.1", notes: "", url: "" }, inst, "o/r");
+    assert.equal(done.to, "1.0.1");
+    assert.equal(JSON.parse(readFileSync(join(checkout, "package.json"), "utf8")).version, "1.0.1");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });

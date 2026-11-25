@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.12 (2026-11-25)
+
+- **Hardened git-checkout self-updates across rewritten tags/history.** `carl update` on a git checkout now fetches tags with `--force --tags` so re-annotated or rewritten tags do not fail with "would clobber existing tag", and when `git merge --ff-only` cannot fast-forward because upstream history diverged or was rewritten, it throws a clear `UpdateError` naming the cause and printing the exact recovery command (`git fetch --force --tags origin && git reset --hard <tag> && npm ci --omit=dev`). Regression tests in `test/update.test.ts`.
+
 ## 0.18.11 (2026-11-25)
 
 - **Clean source tree and release bundles (removed tracked `node_modules` symlink).** Removed a tracked machine-local `node_modules` symlink that broke fresh clones and release tarball installs, and changed `.gitignore` from `node_modules/` to `node_modules` so symlinked dependency folders are always ignored.

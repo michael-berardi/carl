@@ -111,8 +111,21 @@ export async function install(rel: Release, inst: Install, slug = repoSlug(inst.
   if (inst.kind === "git") {
     const dirty = run("git", ["status", "--porcelain", "--untracked-files=no"], inst.root).trim();
     if (dirty) throw new UpdateError(`${inst.root} has local changes; commit or stash them, then run carl update again`);
-    run("git", ["fetch", "--quiet", "--tags", "origin"], inst.root, 120_000);
-    run("git", ["merge", "--ff-only", "--quiet", `refs/tags/${rel.tag}`], inst.root);
+    run("git", ["fetch", "--quiet", "--force", "--tags", "origin"], inst.root, 120_000);
+    try {
+      run("git", ["merge", "--ff-only", "--quiet", `refs/tags/${rel.tag}`], inst.root);
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (/not possible to fast-forward|unrelated histories|non-fast-forward/i.test(msg)) {
+        const q = (s: string) => (/[^A-Za-z0-9_./:@+-]/.test(s) ? `'${s.replace(/'/g, `'\\''`)}'` : s);
+        const dir = q(inst.root);
+        throw new UpdateError(
+          `cannot fast-forward ${inst.root} to ${rel.tag} (upstream history diverged or was rewritten). ` +
+          `If you have no local commits to keep, recover with: git -C ${dir} fetch --force --tags origin && git -C ${dir} reset --hard ${q(rel.tag)} && npm --prefix ${dir} ci --omit=dev`,
+        );
+      }
+      throw e;
+    }
     prepare(inst.root, rel.version);
     return { from: VERSION, to: rel.version, path: inst.root };
   }
