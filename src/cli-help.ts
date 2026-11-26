@@ -5,7 +5,7 @@ export const SEND_OPTIONS = { to: { type: "string", short: "t" }, json: { type: 
 export const USAGE: Record<string, string> = {
   gateway: "[--verbose]  run the gateway",
   setup: "  interactive first-time setup",
-  update: "[--check|--rollback]  check, install or roll back a release",
+  update: "[--check|--skip|--auto on|off|status|--rollback]  check, install, skip or configure a release",
   init: "  create a starter configuration",
   status: "[--json]  show gateway status",
   doctor: "  check configuration and connections",
@@ -29,7 +29,7 @@ export function commandHelp(cmd: string, args: string[]): string {
     const verb = args[0];
     return verb && !verb.startsWith("-") ? `Usage: carl post ${verb}\n\n${POST_HELP}\n\nOptions:\n${optionHelp(POST_OPTIONS)}` : `Usage: carl post <command>\n\n${POST_HELP}`;
   }
-  const nested = cmd === "update" && ["--rollback", "--check"].includes(args[0]) || cmd === "reflect" && ["pending", "revert", "--pending", "--revert"].includes(args[0]) ? ` ${args[0]}` : "";
+  const nested = cmd === "update" && ["--rollback", "--check", "--skip", "--auto"].includes(args[0]) || cmd === "reflect" && ["pending", "revert", "--pending", "--revert"].includes(args[0]) ? ` ${args[0]}` : "";
   const options = cmd === "gateway" ? GATEWAY_OPTIONS : cmd === "ask" ? ASK_OPTIONS : cmd === "send" ? SEND_OPTIONS : undefined;
   return `Usage: carl ${cmd}${nested} ${USAGE[cmd]}${options ? `\n\nOptions:\n${optionHelp(options)}` : ""}`;
 }
@@ -41,7 +41,7 @@ export function helpRequested(cmd: string, args: string[]): boolean {
   if (HELP_FLAGS.has(args[0])) return true;
   const verb = args[0];
   const nested = cmd === "post" ? verb !== undefined && !verb.startsWith("-")
-    : cmd === "update" ? verb === "--rollback" || verb === "--check"
+    : cmd === "update" ? ["--rollback", "--check", "--skip", "--auto"].includes(verb ?? "")
     : cmd === "reflect" ? ["pending", "revert", "--pending", "--revert"].includes(verb ?? "")
     : false;
   return nested && HELP_FLAGS.has(args[1]);

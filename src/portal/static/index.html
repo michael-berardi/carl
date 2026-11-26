@@ -98,6 +98,27 @@
 
     <section id="view-status" class="view" hidden>
       <h2>Status</h2>
+      <section class="updates" aria-label="Updates">
+        <div id="update-banner" class="update-banner" hidden>
+          <div class="update-banner-row">
+            <span id="update-banner-text"></span>
+            <span class="update-banner-actions">
+              <button id="update-skip" class="quiet">Skip This Version</button>
+              <button id="update-later" class="quiet">Remind Me Later</button>
+              <button id="update-install">Install Update</button>
+            </span>
+          </div>
+          <div id="update-notes" class="update-notes"></div>
+          <label id="update-auto-next-row"><input type="checkbox" id="update-auto-next"> Automatically download and install updates in the future</label>
+        </div>
+        <h3>Updates</h3>
+        <div class="update-rows">
+          <label class="update-row">Check for updates automatically<input type="checkbox" class="switch" id="update-check-toggle" checked></label>
+          <label class="update-row">Install updates automatically<input type="checkbox" class="switch" id="update-auto-toggle"></label>
+          <div class="update-row"><span id="update-version"></span><button id="update-check-now" class="quiet">Check Now</button></div>
+        </div>
+        <p id="update-result" class="note" role="status" hidden></p>
+      </section>
       <dl id="status-list" class="facts"></dl>
       <h3>Recent log</h3>
       <ol id="log" class="log"></ol>

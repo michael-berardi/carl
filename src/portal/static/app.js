@@ -5,6 +5,8 @@ const store = {
   set key(v) { try { v ? localStorage.setItem("carl.key", v) : localStorage.removeItem("carl.key"); } catch {} },
   get conversation() { try { return localStorage.getItem("carl.conversation") || "web:main"; } catch { return "web:main"; } },
   set conversation(v) { try { localStorage.setItem("carl.conversation", v); } catch {} },
+  get updateLater() { try { return JSON.parse(localStorage.getItem("carl.updateLater") || "{}"); } catch { return {}; } },
+  set updateLater(v) { try { localStorage.setItem("carl.updateLater", JSON.stringify(v)); } catch {} },
 };
 
 class ApiError extends Error {}
@@ -232,6 +234,29 @@ $("#reflect").addEventListener("click", async () => {
 });
 
 // ---- status -------------------------------------------------------------------------------------------------
+// Updates: the banner offers Install Update / Remind Me Later / Skip This Version and the opt-in for automatic installs
+// (unchecked); "later" hides this version's banner in this browser for a day.
+let offered = "";
+async function updateAction(body) {
+  const result = $("#update-result");
+  try { result.textContent = (await api("/carl/update", { method: "POST", body })).message || ""; }
+  catch (err) { result.textContent = err.message; }
+  result.hidden = !result.textContent;
+  await loadStatus();
+}
+async function answerUpdate(body) {
+  if ($("#update-auto-next").checked) await updateAction({ action: "auto", on: true });
+  if (body) return updateAction(body);
+  store.updateLater = { version: offered, at: Date.now() };
+  await loadStatus();
+}
+$("#update-install").addEventListener("click", () => void answerUpdate({ action: "install" }));
+$("#update-later").addEventListener("click", () => void answerUpdate(null));
+$("#update-skip").addEventListener("click", () => void answerUpdate({ action: "skip" }));
+$("#update-check-now").addEventListener("click", () => void updateAction({ action: "check" }));
+$("#update-check-toggle").addEventListener("change", (e) => void updateAction({ action: "checks", on: e.target.checked }));
+$("#update-auto-toggle").addEventListener("change", (e) => void updateAction({ action: "auto", on: e.target.checked }));
+
 async function loadStatus() {
   const [s, logs] = await Promise.all([api("/carl/status"), api("/carl/logs?lines=120")]);
   const facts = [
@@ -240,6 +265,16 @@ async function loadStatus() {
     ["Telegram", `${s.telegram.state}${s.telegram.error ? ` (${s.telegram.error})` : ""}`], ["API", `${s.api.state} :${s.api.port}`],
     ["Runs active", s.activeRuns], ["Conversations open", s.conversations], ["Schedules", s.schedules], ["Lessons", s.lessons], ["Started", time(s.startedAt)],
   ];
+  const later = store.updateLater;
+  offered = s.updateAvailable || "";
+  $("#update-banner").hidden = !offered || (later.version === offered && Date.now() - later.at < 24 * 3600_000);
+  $("#update-banner-text").textContent = offered ? `Carl ${offered} is available — you have ${s.version}.` : "";
+  $("#update-notes").replaceChildren(rich(s.updateNotes || ""));
+  $("#update-notes").hidden = !s.updateNotes;
+  $("#update-auto-next-row").hidden = !!s.updateAuto;
+  $("#update-check-toggle").checked = s.updateCheck !== false;
+  $("#update-auto-toggle").checked = !!s.updateAuto;
+  $("#update-version").textContent = `Version ${s.version}`;
   $("#status-list").replaceChildren(...facts.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, String(v))]));
   $("#log").replaceChildren(...logs.data.reverse().map((l) => el("li", { class: l.level }, `${(l.at || "").slice(11, 19)} ${l.msg}${l.error ? ` · ${l.error}` : ""}`)));
 }

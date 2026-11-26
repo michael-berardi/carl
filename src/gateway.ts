@@ -25,6 +25,7 @@ import { CardDesk } from "./post/cards.ts";
 import { sessionProblems } from "./post/key.ts";
 import { defaultRegistry } from "./post/registry.ts";
 import { realRunner } from "./post/runner.ts";
+import type { UpdateControls } from "./update.ts";
 
 export const ULTRATERM_LEARNING = "Lessons come from UltraTerm Dream and Nightmare: they read Carl's shadow and decision ledgers with every other agent's work, and approved lessons reach Carl through shared memory. Carl runs no separate individuation pass.";
 
@@ -77,6 +78,8 @@ export class Gateway {
   readonly post: PostService;
   private hooks?: { journal: import("./hooks.ts").HookJournal; resume: () => void };
   telegram?: TelegramChannel;
+  /** Set by the update plugin: Telegram /update, its buttons and the portal all use the same actions. */
+  updates?: UpdateControls;
   private asks?: Asks;
   slack?: import("./channels/slack.ts").SlackChannel;
   discord?: import("./channels/discord.ts").DiscordChannel;

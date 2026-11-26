@@ -3,17 +3,23 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checksEnabled, detectInstall, install, isNewer, latestRelease, prune, repoSlug, rollback, UpdateError } from "../src/update.ts";
 import { PI_PRIVATE_ENV, CLAUDE_PRIVATE_ENV } from "../src/privacy.ts";
+
+// Every fixture uses its own cache so a fake release never leaks into another run or into the real cache dir.
+process.env.CARL_UPDATE_CACHE_DIR = mkdtempSync(join(tmpdir(), "carl-upd-cache-"));
+process.on("exit", () => rmSync(process.env.CARL_UPDATE_CACHE_DIR!, { recursive: true, force: true }));
 
 test("versions compare as x.y.z", () => {
   assert.ok(isNewer("0.10.0", "0.9.3"));
   assert.ok(isNewer("v1.0.0", "0.99.99"));
   assert.ok(!isNewer("0.9.3", "0.9.3"));
   assert.ok(!isNewer("0.9.2", "0.9.3"));
+  assert.ok(!isNewer("v1.2.3-rc.1", "0.9.3"), "prereleases are not newer");
 });
 
 test("the update source comes from package.json, not a built-in host", () => {
@@ -25,10 +31,11 @@ test("the update source comes from package.json, not a built-in host", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("checks can be turned off by config or CARL_OFFLINE", () => {
+test("checks can be turned off by config, CARL_OFFLINE or CARL_NO_UPDATE_CHECK", () => {
   assert.equal(checksEnabled({ update: { check: true, auto: false } }, {}), true);
   assert.equal(checksEnabled({ update: { check: false, auto: false } }, {}), false);
   assert.equal(checksEnabled({ update: { check: true, auto: false } }, { CARL_OFFLINE: "1" }), false);
+  assert.equal(checksEnabled({ update: { check: true, auto: false } }, { CARL_NO_UPDATE_CHECK: "1" }), false);
 });
 
 test("private defaults: the Pi SDK is offline with telemetry off, and the Claude CLI sends no telemetry", () => {
@@ -41,18 +48,24 @@ test("private defaults: the Pi SDK is offline with telemetry off, and the Claude
   assert.equal(brain.match(/SettingsManager\.inMemory\(/g)?.length, brain.match(/SettingsManager\.inMemory\(\{ enableInstallTelemetry: false/g)?.length, "every SDK settings object turns attribution off");
 });
 
-/** A release tarball whose bin/carl prints its version and whose lockfile has no dependencies (npm ci runs offline). */
+/** A release bundle laid out like scripts/build-release.sh makes it (files at the root): bin/carl prints its version and the lockfile has no dependencies (npm ci runs offline). */
 function tarball(version: string): Buffer {
   const src = mkdtempSync(join(tmpdir(), "carl-upd-src-"));
   try {
-    const top = join(src, "carl-abc");
-    mkdirSync(join(top, "bin"), { recursive: true });
-    writeFileSync(join(top, "package.json"), JSON.stringify({ name: "carl-gateway", version, repository: { url: "git+https://github.com/o/r.git" } }));
-    writeFileSync(join(top, "package-lock.json"), JSON.stringify({ name: "carl-gateway", version, lockfileVersion: 3, requires: true, packages: { "": { name: "carl-gateway", version } } }));
-    writeFileSync(join(top, "bin", "carl"), `#!/bin/sh\necho "${version} (test)"\n`);
-    chmodSync(join(top, "bin", "carl"), 0o755);
-    return spawnSync("/usr/bin/tar", ["-czf", "-", "-C", src, "carl-abc"]).stdout;
+    mkdirSync(join(src, "bin"), { recursive: true });
+    writeFileSync(join(src, "package.json"), JSON.stringify({ name: "carl-gateway", version, repository: { url: "git+https://github.com/o/r.git" } }));
+    writeFileSync(join(src, "package-lock.json"), JSON.stringify({ name: "carl-gateway", version, lockfileVersion: 3, requires: true, packages: { "": { name: "carl-gateway", version } } }));
+    writeFileSync(join(src, "bin", "carl"), `#!/bin/sh\necho "${version} (test)"\n`);
+    chmodSync(join(src, "bin", "carl"), 0o755);
+    return spawnSync("/usr/bin/tar", ["-czf", "-", "-C", src, "package.json", "package-lock.json", "bin"]).stdout;
   } finally { rmSync(src, { recursive: true, force: true }); }
+}
+
+/** The release assets of tag v9.9.9 as GitHub serves them: SHA256SUMS and carl.tar.gz. */
+function asset(url: string | undefined, tgz: Buffer): Buffer | string | undefined {
+  if (url === "/o/r/releases/download/v9.9.9/SHA256SUMS") return `${createHash("sha256").update(tgz).digest("hex")}  carl.tar.gz\n`;
+  if (url === "/o/r/releases/download/v9.9.9/carl.tar.gz") return tgz;
+  return undefined;
 }
 
 test("a release install unpacks beside the current release, swaps the link, keeps one rollback and prunes the rest", async () => {
@@ -61,13 +74,14 @@ test("a release install unpacks beside the current release, swaps the link, keep
   const server = createServer((q, r) => {
     if (q.url === "/repos/o/r/releases/latest") return r.end(JSON.stringify({ tag_name: "v9.9.9", body: "- new things", html_url: "https://github.com/o/r/releases/v9.9.9" }));
     if (q.url === "/repos/o/r/commits/v9.9.9") return r.end(sha);
-    if (q.url === `/o/r/tar.gz/${sha}`) return r.end(tgz);
+    const file = asset(q.url, tgz);
+    if (file) return r.end(file);
     r.statusCode = 404; r.end("{}");
   });
   await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
   process.env.CARL_UPDATE_API = base;
-  process.env.CARL_UPDATE_CODELOAD = base;
+  process.env.CARL_UPDATE_DOWNLOAD = base;
   const app = realpathSync(mkdtempSync(join(tmpdir(), "carl-upd-app-")));
   try {
     const old = join(app, "release-0.9.3-c266fb42874e");
@@ -100,7 +114,7 @@ test("a release install unpacks beside the current release, swaps the link, keep
     assert.deepEqual(prune(app), []);
   } finally {
     delete process.env.CARL_UPDATE_API;
-    delete process.env.CARL_UPDATE_CODELOAD;
+    delete process.env.CARL_UPDATE_DOWNLOAD;
     server.close();
     rmSync(app, { recursive: true, force: true });
   }
@@ -111,13 +125,14 @@ test("a release whose tarball holds another version is refused and nothing is sw
   const tgz = tarball("1.2.3");
   const server = createServer((q, r) => {
     if (q.url === "/repos/o/r/commits/v9.9.9") return r.end(sha);
-    if (q.url === `/o/r/tar.gz/${sha}`) return r.end(tgz);
+    const file = asset(q.url, tgz);
+    if (file) return r.end(file);
     r.statusCode = 404; r.end("{}");
   });
   await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
   process.env.CARL_UPDATE_API = base;
-  process.env.CARL_UPDATE_CODELOAD = base;
+  process.env.CARL_UPDATE_DOWNLOAD = base;
   const app = realpathSync(mkdtempSync(join(tmpdir(), "carl-upd-app-")));
   try {
     const old = join(app, "release-0.9.3-c266fb42874e");
@@ -126,9 +141,10 @@ test("a release whose tarball holds another version is refused and nothing is sw
     const inst = detectInstall(old, join(app, "current", "bin", "carl"));
     await assert.rejects(install({ tag: "v9.9.9", version: "9.9.9", notes: "", url: "" }, inst, "o/r"), /contains version 1\.2\.3; nothing was switched/);
     assert.equal(readlinkSync(join(app, "current")), old);
+    assert.deepEqual(readdirSync(app).sort(), ["current", "release-0.9.3-c266fb42874e"], "the unpacked download is removed on failure");
   } finally {
     delete process.env.CARL_UPDATE_API;
-    delete process.env.CARL_UPDATE_CODELOAD;
+    delete process.env.CARL_UPDATE_DOWNLOAD;
     server.close();
     rmSync(app, { recursive: true, force: true });
   }

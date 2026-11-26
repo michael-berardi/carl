@@ -27,7 +27,8 @@ const HELP = `carl ${VERSION}: the minimal bot gateway
 
   carl gateway [--verbose]          run the gateway (channels, API, webhooks, schedules)
   carl setup                        interactive first-time setup
-  carl update [--check|--rollback]   check for a new Carl release, install it, or roll back
+  carl update [--check|--skip|--auto on|off|status|--rollback]
+                                    check, install, skip or configure a release
   carl init                         create CARL_HOME (${carlHome()}) with a starter carl.json
   carl status [--json]              the running gateway's status
   carl doctor                       check config, model, credentials and channels
@@ -336,7 +337,7 @@ async function doctor(): Promise<number> {
   }
   await check("updates", async () => {
     const { checksEnabled, latestRelease, isNewer } = await import("./update.ts");
-    if (!checksEnabled(c)) return "checks off (update.check false or CARL_OFFLINE)";
+    if (!checksEnabled(c)) return "checks off (update.check false, CARL_OFFLINE or CARL_NO_UPDATE_CHECK)";
     const rel = await latestRelease();
     return isNewer(rel.version, VERSION) ? `${rel.version} available (you run ${VERSION}): carl update` : `${VERSION} is the latest`;
   }, true);
@@ -552,8 +553,18 @@ function schedules(): number {
   return 0;
 }
 
+// The update notice is looked up while the command runs (cached; at most one 4 s request a day) and printed on stderr
+// after it. update.ts decides when it stays quiet: no TTY, CI, agent sessions, --json, opt-outs.
+const notice = process.stdout.isTTY && process.stderr.isTTY
+  ? import("./update.ts").then((u) => u.commandNotice(process.argv.slice(2))).catch(() => undefined)
+  : undefined;
+
 main(process.argv.slice(2)).then(
-  (code) => { if (code !== 0 || !["gateway"].includes(process.argv[2] ?? "")) process.exit(code); },
+  async (code) => {
+    const text = await notice;
+    if (text) process.stderr.write(`${text}\n`);
+    if (code !== 0 || !["gateway"].includes(process.argv[2] ?? "")) process.exit(code);
+  },
   (e) => {
     console.error(e instanceof ConfigError ? `carl: config error: ${e.message}` : `carl: ${(e as Error).stack ?? e}`);
     process.exit(e instanceof ConfigError ? 78 : 1);

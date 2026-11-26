@@ -1,6 +1,6 @@
 {
   "name": "carl-gateway",
-  "version": "0.18.12",
+  "version": "0.19.0",
   "description": "Carl: a small, fast bot gateway for AI agents. Telegram, Slack, Discord, a web app, an OpenAI-compatible API and schedules, with a kernel sandbox and a self-reflecting psyche.",
   "keywords": [
     "agent",
@@ -34,6 +34,7 @@
     "vendor",
     "scripts",
     "README.md",
+    "PRIVACY.md",
     "LICENSE",
     "SECURITY.md"
   ],

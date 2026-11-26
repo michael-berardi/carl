@@ -12,6 +12,10 @@ import { VERSION } from "../src/version.ts";
 const DAY_MS = 24 * 3600_000;
 const LATEST = "9.9.9";
 
+// A private cache per test process: a gateway tick must never read a real check or another fixture's answer.
+process.env.CARL_UPDATE_CACHE_DIR = mkdtempSync(join(tmpdir(), "carl-autoupdate-cache-"));
+process.on("exit", () => rmSync(process.env.CARL_UPDATE_CACHE_DIR!, { recursive: true, force: true }));
+
 function home(): string {
   return mkdtempSync(join(tmpdir(), "carl-autoupdate-"));
 }

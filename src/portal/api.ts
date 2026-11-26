@@ -1,5 +1,5 @@
 // Portal API (/carl/*) and the static web app (/). The page is public; every API call needs the bearer key.
-import { availableUpdate } from "../update.ts";
+import { availableUpdate, readCheckCache } from "../update.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,8 +67,10 @@ function latestFile(home: string, key: string): string | undefined {
 export function mountPortal(api: ApiServer, gw: Gateway): void {
   const { brain, scheduler, psyche, cfg } = gw;
 
-  api.route("GET", /^\/carl\/status$/, (_q, res) =>
-    json(res, 200, {
+  api.route("GET", /^\/carl\/status$/, (_q, res) => {
+    const available = availableUpdate(cfg.home);
+    const cache = readCheckCache();
+    return json(res, 200, {
       ...gw.health(),
       primary: cfg.model,
       fallbacks: cfg.fallbackModels,
@@ -76,8 +78,30 @@ export function mountPortal(api: ApiServer, gw: Gateway): void {
       conversationsOpen: brain.activeConversations(),
       schedules: scheduler.list().length,
       lessons: psyche.read("integrated.md").split("\n").filter((l) => l.trim().startsWith("-")).length,
-      updateAvailable: availableUpdate(cfg.home) ?? null,
-    }));
+      updateAvailable: available ?? null,
+      updateNotes: available && cache?.version === available ? cache.notes ?? "" : "",
+      updateCheck: cfg.update.check,
+      updateAuto: cfg.update.auto,
+    });
+  });
+
+  // The Updates section's actions: the same controls as /update and the Telegram buttons. An install runs npm in a
+  // child process, so it is started here and reported in the log, not held on the request.
+  api.route("POST", /^\/carl\/update$/, async (_q, res, _u, body) => {
+    const controls = gw.updates;
+    if (!controls) return json(res, 503, { error: { message: "the update plugin is not running" } });
+    const on = body?.on;
+    switch (body?.action) {
+      case "install":
+        void controls.install().then((message) => gw.log.info("update requested from the web app", { message }), (e) => gw.log.warn("update from the web app failed", { error: (e as Error).message }));
+        return json(res, 202, { message: "Installing in the background. Carl restarts on it once nothing is running." });
+      case "check": return json(res, 200, { message: await controls.check().catch((e) => `Check failed: ${(e as Error).message}`) });
+      case "skip": return json(res, 200, { message: controls.skip() });
+      case "auto": if (typeof on === "boolean") return json(res, 200, { message: controls.setAuto(on) }); break;
+      case "checks": if (typeof on === "boolean") return json(res, 200, { message: controls.setCheck(on) }); break;
+    }
+    return json(res, 400, { error: { message: "action must be install, check, skip, or auto/checks with a boolean on" } });
+  });
 
   api.route("GET", /^\/carl\/conversations$/, (_q, res) => {
     const open = new Map(brain.activeConversations().map((c) => [c.key, c]));

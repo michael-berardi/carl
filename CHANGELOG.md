@@ -2,6 +2,14 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.19.0 (2026-11-26)
+
+- **Update notice in the terminal.** After a command, on a terminal, Carl prints `carl <new> available (you have <current>) · run: carl update` and a dim second line with `carl update --auto on` and `carl update --skip`, at most once a day per version. It stays quiet without a TTY, in CI, in agent sessions, with `--json` and after an opt-out (`CARL_NO_UPDATE_CHECK=1`, `CARL_OFFLINE=1`, `"update": {"check": false}`; the gateway honours all three too). The check is cached for a day in one file under the platform cache dir and runs while the command runs; a failure is cached with its cause.
+- **`carl update` asks first.** On a terminal it shows the release notes and asks `Install <new> now? [Y/n]`, then once `Install future updates automatically? [y/N]` (a no is remembered). New: `--check` exits 0 / 10 / 1, `--skip` hides one version, `--auto on|off|status` sets automatic installs in `carl.json`. Automatic installs stay off by default.
+- **Telegram and the web app.** The home-chat notice has Update now / Skip this version / Turn on automatic updates buttons (`/update skip` and `/update auto on|off` as commands). The web app's Status page gets a banner (Install Update, Remind Me Later, Skip This Version, the release notes and an unchecked automatic-install box) and Updates rows with Check Now. A failed automatic install falls back to the notice.
+- **Verified installs only.** A release-folder update downloads the release's `carl.tar.gz` and refuses it unless it matches the release's `SHA256SUMS`; there is no unverified fallback.
+- **No leftovers.** The rollback copy is removed after the new version has run once (or seven days), never while a gateway still runs it; background installs log to one file under 256 KB; `carl update --auto off` removes the check cache. Privacy details moved to `PRIVACY.md`.
+
 ## 0.18.12 (2026-11-25)
 
 - **Hardened git-checkout self-updates across rewritten tags/history.** `carl update` on a git checkout now fetches tags with `--force --tags` so re-annotated or rewritten tags do not fail with "would clobber existing tag", and when `git merge --ff-only` cannot fast-forward because upstream history diverged or was rewritten, it throws a clear `UpdateError` naming the cause and printing the exact recovery command (`git fetch --force --tags origin && git reset --hard <tag> && npm ci --omit=dev`). Regression tests in `test/update.test.ts`.

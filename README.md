@@ -60,25 +60,20 @@ Carl is private, free and neutral.
 
 ## Privacy
 
-Conversations, logs, schedules, files and credentials are stored locally under
-`~/.carl` by default (`CARL_HOME` changes this). Messages still go to the model
-providers and chat platforms you configure. Tools, MCP servers, extensions,
-webhooks and optional integrations can make their own network requests.
-
-Carl checks its GitHub release version once a day. Disable that check with
-`"update": {"check": false}` or `CARL_OFFLINE=1`; this does not block other network
-traffic. The Pi SDK defaults to offline mode, and Carl sets Claude Code's
-telemetry and nonessential-traffic opt-outs. Provider data policies still apply.
+Conversations, logs, schedules, files and credentials stay under `~/.carl` (`CARL_HOME` changes this).
+Messages go to the providers and chat platforms you configure; tools, MCP servers and integrations can make their own requests.
+No telemetry. The update check is one anonymous request a day; turn it off with `CARL_NO_UPDATE_CHECK=1` or `"update": {"check": false}`.
+The Pi SDK runs offline and Claude Code's telemetry opt-outs are set. Details: [PRIVACY.md](PRIVACY.md).
 
 ## Updates
 
-Carl checks for a new release once a day. When one is out, it tells you in your Telegram home chat, in `carl status` and in the web app.
+Carl checks for a new release once a day and tells you after a terminal command, in your Telegram home chat and in the web app. Automatic installs stay off until you turn them on.
 
-- **From your phone:** send `/update`. Carl installs it and restarts on it as soon as nothing is running.
-- **From a terminal:** `carl update` installs it; `carl update --check` only checks.
+- **From your phone:** `/update` installs it, `/update skip` hides this version, `/update auto on` installs future releases automatically.
+- **From a terminal:** `carl update` installs it; `--check` only checks, `--skip` hides this version, `--auto on|off|status` sets automatic installs.
 - **Undo:** `carl update --rollback` goes back to the release you had before.
 
-Each update is tested before Carl switches to it: if its dependencies do not install or it does not start, nothing changes and you get the error. Two bots sharing one app folder share a release: the second one to update links the same release folder, keeping its own Node runtime link. Set `"update": {"auto": true}` to install new releases without asking. The gateway keeps its own next-check deadline: `carl update --check`, `/update` and gateway restarts never postpone it. With `auto`, it installs only when nothing is running (retrying in ten minutes if a run is active) and logs a named reason whenever an install is skipped.
+Downloads are checked against the release's SHA-256 sums and tested before Carl switches; a running gateway restarts on the new release once nothing is running. Details: [docs/updates.md](docs/updates.md).
 
 ## What you get
 
@@ -272,7 +267,7 @@ MCP servers go in `~/.carl/mcp.json` (the same format as Claude Desktop). Give t
 ```
 carl gateway            run Telegram, Slack, Discord, the API, the web app and schedules
 carl setup              guided first run: channel, secrets, model, check
-carl update [--check|--rollback]  install the latest release, only check, or go back
+carl update             install the latest release (--check, --skip, --auto on|off|status, --rollback)
 carl init               create ~/.carl with a starter carl.json
 carl login [provider]   list model providers, or sign in to one
 carl logout <provider>  remove a provider's stored credentials
