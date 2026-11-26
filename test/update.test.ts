@@ -9,6 +9,73 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checksEnabled, detectInstall, install, isNewer, latestRelease, prune, repoSlug, rollback, UpdateError } from "../src/update.ts";
 import { PI_PRIVATE_ENV, CLAUDE_PRIVATE_ENV } from "../src/privacy.ts";
+import { VERSION } from "../src/version.ts";
+
+/** Direct dependencies and shipped source must never gain a tracker package or a telemetry endpoint. */
+const TRACKER_PACKAGE = /(?:^|\/)(?:@[^/]+\/)?[^/]*(?:telemetry|analytics|sentry|posthog|segment|mixpanel|amplitude|bugsnag|datadog|hotjar|plausible|umami|gtag)[^/]*$/i;
+const TRACKER_ENDPOINT = /(?:report-install|latest-version|sentry\.io|api\.posthog\.com|api\.segment\.com|api\.mixpanel\.com|api\.amplitude\.com|bugsnag\.com|google-analytics\.com|googletagmanager\.com)/i;
+
+function shippedSources(dir: URL): URL[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? shippedSources(new URL(`${e.name}/`, dir)) : /\.(ts|js|mjs|sh)$/.test(e.name) ? [new URL(e.name, dir)] : []);
+}
+
+test("no telemetry package or endpoint may be reintroduced", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  for (const group of ["dependencies", "devDependencies"]) {
+    assert.deepEqual(Object.keys(pkg[group] ?? {}).filter((name) => TRACKER_PACKAGE.test(name)), [], `${group} must stay free of trackers`);
+  }
+  const sources = [...shippedSources(new URL("../src/", import.meta.url)), ...shippedSources(new URL("../bin/", import.meta.url)), ...shippedSources(new URL("../scripts/", import.meta.url))];
+  const hits = sources.flatMap((url) => readFileSync(url, "utf8").split("\n").map((line, i) => [url.pathname, i + 1, line] as const))
+    .filter(([, , line]) => TRACKER_ENDPOINT.test(line))
+    .map(([path, n]) => `${path}:${n}`);
+  assert.deepEqual(hits, [], "Carl's shipped code must not call a telemetry endpoint");
+  for (const [file, pattern] of [["../src/update.ts", /DO_NOT_TRACK: "1"/], ["../scripts/install.sh", /DO_NOT_TRACK=1/]] as const) {
+    assert.match(readFileSync(new URL(file, import.meta.url), "utf8"), pattern, `${file} must keep dependency telemetry off`);
+  }
+});
+
+test("the release check carries no identifier", async () => {
+  const seen: Record<string, string | string[] | undefined>[] = [];
+  const server = createServer((q, r) => {
+    seen.push(q.headers as Record<string, string | string[] | undefined>);
+    r.setHeader("content-type", "application/json");
+    r.end(JSON.stringify({ tag_name: "v9.9.9" }));
+  });
+  await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+  const previous = process.env.CARL_UPDATE_API;
+  process.env.CARL_UPDATE_API = `http://127.0.0.1:${(server.address() as any).port}`;
+  try {
+    await latestRelease("o/r");
+    assert.equal(seen.length, 1);
+    const h = seen[0];
+    assert.equal(h["user-agent"], "carl-update-check");
+    assert.equal(h.accept, "application/vnd.github+json");
+    assert.ok(!h.authorization && !h.cookie, "no credentials are sent");
+    assert.deepEqual(Object.keys(h).filter((k) => /^(x-|authorization|cookie|from|referer)/i.test(k)), [], "no identifying headers");
+    assert.ok(!JSON.stringify(h).includes(VERSION), "the running version is not sent");
+  } finally {
+    if (previous === undefined) delete process.env.CARL_UPDATE_API;
+    else process.env.CARL_UPDATE_API = previous;
+    server.close();
+  }
+});
+
+test("the README Privacy section stays short and PRIVACY.md carries the detail", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const section = /\n## Privacy\n([\s\S]*?)\n## /.exec(readme)?.[1] ?? "";
+  const lines = section.split("\n").filter((l) => l.trim());
+  assert.ok(lines.length >= 3 && lines.length <= 6, `README Privacy has ${lines.length} non-empty lines; keep 3 to 6`);
+  assert.match(section, /No telemetry/);
+  assert.match(section, /once a day/i);
+  assert.match(section, /CARL_NO_UPDATE_CHECK=1/);
+  assert.match(section, /\[PRIVACY\.md\]\(PRIVACY\.md\)/);
+  const privacy = readFileSync(new URL("../PRIVACY.md", import.meta.url), "utf8");
+  for (const detail of ["no install ID", "DO_NOT_TRACK=1", "PI_OFFLINE=1", "User-Agent: carl-update-check", "CARL_OFFLINE=1",
+    "0600 files in 0700 directories", "~/.ultraterm/logs/ultrabot-messages", "local storage", "update-check.json", "auto-update.log"]) {
+    assert.ok(privacy.includes(detail), `PRIVACY.md must state ${detail}`);
+  }
+});
 
 // Every fixture uses its own cache so a fake release never leaks into another run or into the real cache dir.
 process.env.CARL_UPDATE_CACHE_DIR = mkdtempSync(join(tmpdir(), "carl-upd-cache-"));
@@ -164,6 +231,7 @@ test("PI_OFFLINE=0 lets an operator put the SDK online; any other value or none 
   const a: NodeJS.ProcessEnv = { PI_OFFLINE: "0" };
   applyPrivateDefaults(a);
   assert.equal(a.PI_OFFLINE, undefined);
+  assert.equal(a.DO_NOT_TRACK, "1");
   assert.equal(a.PI_TELEMETRY, "0");
   const b: NodeJS.ProcessEnv = {};
   applyPrivateDefaults(b);

@@ -9,6 +9,9 @@ Releases are tagged `v<version>`; each entry says what changed for an operator.
 - **Telegram and the web app.** The home-chat notice has Update now / Skip this version / Turn on automatic updates buttons (`/update skip` and `/update auto on|off` as commands). The web app's Status page gets a banner (Install Update, Remind Me Later, Skip This Version, the release notes and an unchecked automatic-install box) and Updates rows with Check Now. A failed automatic install falls back to the notice.
 - **Verified installs only.** A release-folder update downloads the release's `carl.tar.gz` and refuses it unless it matches the release's `SHA256SUMS`; there is no unverified fallback.
 - **No leftovers.** The rollback copy is removed after the new version has run once (or seven days), never while a gateway still runs it; background installs log to one file under 256 KB; `carl update --auto off` removes the check cache. Privacy details moved to `PRIVACY.md`.
+- **Tracking opt-out for child processes.** `DO_NOT_TRACK=1` is now a private default, is passed to npm during install and update, and reaches sandboxed shell commands and the post runner. The Pi SDK stays offline and Claude Code's telemetry stays off.
+- **Privacy documented in one place.** `PRIVACY.md` now says what Carl sends and when, where local data lives and how to delete it, including the UltraTerm receipts log and the web app's browser key; the README keeps a short summary.
+- **Privacy regression tests.** The suite fails if a telemetry or analytics package or a known telemetry endpoint is reintroduced, if the tracking opt-out disappears, if the release check starts sending an identifying header, or if the README Privacy section grows past six lines.
 
 ## 0.18.12 (2026-11-25)
 

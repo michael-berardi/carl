@@ -138,7 +138,7 @@ export function executableChain(p: string): string[] {
 
 /** Environment names a sandboxed command may inherit from Carl (plus the operator's shellEnv list). */
 const ENV_ALLOW = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERM_PROGRAM", "COLORTERM", "LANG", "TZ", "TMPDIR",
-  "PWD", "EDITOR", "VISUAL", "PAGER", "CARL_HOME", "NO_COLOR", "FORCE_COLOR"]);
+  "PWD", "EDITOR", "VISUAL", "PAGER", "CARL_HOME", "NO_COLOR", "FORCE_COLOR", "DO_NOT_TRACK"]);
 const ENV_ALLOW_PREFIX = ["LC_", "XDG_", "HOMEBREW_", "ULTRATERM_"];
 const ENV_ALLOW_NETWORK = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"];

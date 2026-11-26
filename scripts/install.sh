@@ -99,7 +99,7 @@ if [ ! -d "$REL" ]; then
   case "$NODE_BIN" in "$APP"/runtime/*) ln -s "$NODE_BIN" "$REL.tmp/node" ;; esac
   PATH="$(dirname "$NODE_BIN"):$PATH"; export PATH
   NPM="$(dirname "$NODE_BIN")/npm"; [ -x "$NPM" ] || NPM=npm
-  ( cd "$REL.tmp" && npm_config_update_notifier=false npm_config_fund=false npm_config_audit=false \
+  ( cd "$REL.tmp" && DO_NOT_TRACK=1 npm_config_update_notifier=false npm_config_fund=false npm_config_audit=false \
       "$NPM" ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error </dev/null ) || { rm -rf "$REL.tmp"; die "dependencies did not install; nothing was changed"; }
   got=$("$REL.tmp/bin/carl" --version 2>&1 </dev/null) || { rm -rf "$REL.tmp"; die "the new copy does not start: $got"; }
   case "$got" in "$VERSION"*) ;; *) rm -rf "$REL.tmp"; die "the new copy reports '$got', not $VERSION; nothing was changed" ;; esac

@@ -60,10 +60,11 @@ Carl is private, free and neutral.
 
 ## Privacy
 
-Conversations, logs, schedules, files and credentials stay under `~/.carl` (`CARL_HOME` changes this).
-Messages go to the providers and chat platforms you configure; tools, MCP servers and integrations can make their own requests.
-No telemetry. The update check is one anonymous request a day; turn it off with `CARL_NO_UPDATE_CHECK=1` or `"update": {"check": false}`.
-The Pi SDK runs offline and Claude Code's telemetry opt-outs are set. Details: [PRIVACY.md](PRIVACY.md).
+No telemetry, analytics or install ID.
+Messages go only to the model providers, chat platforms, tools and integrations you configure.
+Once a day Carl asks GitHub anonymously for the latest release; `CARL_NO_UPDATE_CHECK=1` turns that off.
+Settings, secrets, transcripts, logs and schedules stay in `~/.carl` (`CARL_HOME`), readable only by you.
+Stop Carl and delete that folder to remove them. Every file and request: [PRIVACY.md](PRIVACY.md).
 
 ## Updates
 
