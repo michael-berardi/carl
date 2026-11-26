@@ -2,6 +2,12 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.18.13 (2026-11-26)
+
+- **Explicit tracking opt-out for children.** `DO_NOT_TRACK=1` is now a private default, is passed to npm during install/update, and reaches sandboxed shell commands and the post runner. The Pi SDK stays offline and Claude Code's telemetry stays off.
+- **Clearer Privacy section.** The README now says what Carl sends and when, where local data lives, and how to delete it, including the UltraTerm receipts log and the web app's browser key.
+- **Regression tests.** The suite now fails if a telemetry/analytics package or a known telemetry endpoint is reintroduced, if the tracking opt-out disappears, or if the release check starts sending an identifying header.
+
 ## 0.18.12 (2026-11-25)
 
 - **Hardened git-checkout self-updates across rewritten tags/history.** `carl update` on a git checkout now fetches tags with `--force --tags` so re-annotated or rewritten tags do not fail with "would clobber existing tag", and when `git merge --ff-only` cannot fast-forward because upstream history diverged or was rewritten, it throws a clear `UpdateError` naming the cause and printing the exact recovery command (`git fetch --force --tags origin && git reset --hard <tag> && npm ci --omit=dev`). Regression tests in `test/update.test.ts`.

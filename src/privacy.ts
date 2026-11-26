@@ -6,6 +6,9 @@
  *  package and tool downloads) and from adding its attribution headers to provider requests. */
 export const PI_PRIVATE_ENV = { PI_OFFLINE: "1", PI_TELEMETRY: "0", PI_SKIP_VERSION_CHECK: "1" } as const;
 
+/** The common opt-out for subprocesses Carl starts (npm, shell tools, local helpers). Operators can still override it. */
+export const DO_NOT_TRACK_ENV = { DO_NOT_TRACK: "1" } as const;
+
 /** Claude Code's documented switches for usage metrics, error reports, surveys, update checks and other nonessential traffic. */
 export const CLAUDE_PRIVATE_ENV = {
   DISABLE_TELEMETRY: "1",
@@ -25,6 +28,7 @@ export function applyPrivateDefaults(env: NodeJS.ProcessEnv = process.env): void
   else env.PI_OFFLINE ??= PI_PRIVATE_ENV.PI_OFFLINE;
   env.PI_TELEMETRY ??= PI_PRIVATE_ENV.PI_TELEMETRY;
   env.PI_SKIP_VERSION_CHECK ??= PI_PRIVATE_ENV.PI_SKIP_VERSION_CHECK;
+  env.DO_NOT_TRACK ??= DO_NOT_TRACK_ENV.DO_NOT_TRACK;
 }
 
 applyPrivateDefaults();

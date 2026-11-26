@@ -60,15 +60,29 @@ Carl is private, free and neutral.
 
 ## Privacy
 
-Conversations, logs, schedules, files and credentials are stored locally under
-`~/.carl` by default (`CARL_HOME` changes this). Messages still go to the model
-providers and chat platforms you configure. Tools, MCP servers, extensions,
-webhooks and optional integrations can make their own network requests.
+Carl sends no telemetry, analytics, crash reports or usage data. There is no
+account with us and no install ID.
 
-Carl checks its GitHub release version once a day. Disable that check with
-`"update": {"check": false}` or `CARL_OFFLINE=1`; this does not block other network
-traffic. The Pi SDK defaults to offline mode, and Carl sets Claude Code's
-telemetry and nonessential-traffic opt-outs. Provider data policies still apply.
+Prompts, files and tool results go only to the model providers, chat platforms,
+tools and integrations you configure. Carl's only unprompted request to a
+service it chooses itself is a daily GET to GitHub for the latest release tag:
+it sends the literal User-Agent `carl`, no version, no install ID and no
+machine fingerprint. `carl doctor` and `carl update` make the same GET when you
+run them. Set
+`"update": {"check": false}` in `carl.json` or `CARL_OFFLINE=1` to stop it. A local
+model you configured works without any network access.
+
+Carl keeps settings, `.env` secrets, transcripts, logs, schedules and state in
+`CARL_HOME` (`~/.carl` by default), written with owner-only permissions (0600
+files in 0700 directories); it rotates logs and prunes old transcripts. With
+UltraTerm configured, Telegram delivery receipts are also kept in
+`~/.ultraterm/logs/ultrabot-messages`; the web app keeps its API key in browser
+local storage. Stop Carl, then delete your `CARL_HOME` directory and that
+receipts folder, or clear the web app's site data, to remove what Carl wrote.
+Accounts and credentials you configured outside `CARL_HOME` are not removed.
+
+The Pi SDK runs offline and does not report installs or add attribution headers;
+Claude Code's telemetry, error reports, surveys and update checks are off.
 
 ## Updates
 

@@ -80,7 +80,7 @@ export function detectInstall(root = ROOT, entry = process.env.CARL_ENTRY): Inst
 
 function run(cmd: string, args: string[], cwd: string, timeoutMs = 600_000, input?: Buffer): string {
   const r = spawnSync(cmd, args, { cwd, input, timeout: timeoutMs, maxBuffer: 64 << 20,
-    env: { ...process.env, PATH: `${dirname(realpathSync(process.execPath))}:${process.env.PATH ?? "/usr/bin:/bin"}`, npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" } });
+    env: { ...process.env, PATH: `${dirname(realpathSync(process.execPath))}:${process.env.PATH ?? "/usr/bin:/bin"}`, DO_NOT_TRACK: "1", npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" } });
   if (r.error) throw new UpdateError(`${basename(cmd)} ${args[0]} failed: ${r.error.message}`);
   if (r.status !== 0) throw new UpdateError(`${basename(cmd)} ${args.join(" ").slice(0, 80)} failed (exit ${r.status}): ${String(r.stderr).trim().slice(-600)}`);
   return String(r.stdout);
