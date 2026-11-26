@@ -6,5 +6,9 @@ Carl-local differences kept here: snapshots use ULTRACOMPRESS_STATE_ROOT, recall
 confined to ULTRACOMPRESS_SESSION_ROOT and receives the checked realpath, and command
 integration follows Carl's config and command names. ULTRACOMPRESS_SETTINGS_PATH is an
 explicit test-only switch, and TextKeyCache uses explicit fields instead of TypeScript
-parameter properties so Carl's strip-types loader can run it. Carl's version and
-CHANGELOG are independent of this adapter.
+parameter properties so Carl's strip-types loader can run it. src/payload.ts is also
+Carl-local: it is not in upstream extension/src, and rewrites data-URL image parts to
+the `{type:"file", file:{file_data}}` shape z.ai-style endpoints expect, plus detects
+image rejection errors. No Carl caller imports it today; it is kept as a provider
+payload-compatibility helper rather than treated as part of the vendored upstream set.
+Carl's loader gate is in src/brain.ts: this adapter is added only when Carl's `ultracompress` config is not `off`, a binary is found, and the vendored entry file exists; otherwise Carl uses Pi's built-in summary. The upstream Pi adapter package is 0.6.1 at tag v0.7.1, so `/ultracompress-stats` showing 0.6.1 is expected, not a version mismatch. Carl's version and CHANGELOG are independent of this adapter.

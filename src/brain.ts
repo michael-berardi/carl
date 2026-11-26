@@ -370,8 +370,8 @@ export class Brain extends EventEmitter {
       if (bin && existsSync(ext)) {
         this.ultracompressExt = ext;
         this.log.info("compaction: UltraCompress", { bin });
-        // UltraCompress keeps up to ~25k tokens of the newest turns verbatim; below about 40k there is often nothing
-        // left to condense, it declines every time, and the context grows past the budget.
+        // UltraCompress keeps up to ~25k tokens of the newest turns verbatim, so a small contextBudget may leave
+        // little for it to condense and the context can still grow past the budget.
         if (this.cfg.contextBudget < 40_000)
           this.log.warn("contextBudget is below 40k tokens: UltraCompress keeps up to 25k tokens of recent turns verbatim and may find nothing to compact", { contextBudget: this.cfg.contextBudget });
       } else {

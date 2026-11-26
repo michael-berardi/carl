@@ -2,6 +2,12 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.19.1 (2026-11-26)
+
+- **UltraCompress image snapshots work again.** Carl's vendored Pi adapter now reads the frame field the 0.7.1 CLI actually writes, so a snap frame reaches the model as a real PNG with the archived tool text preserved instead of an empty image. A block the engine leaves as text is remembered and is not re-sent on every later request, and a text-only model no longer starts the engine. An end-to-end test drives the adapter with a fake CLI and fails on the old frame spelling. The adapter is re-vendored from upstream v0.7.1 with Carl's state-root, recall-fence and command integration kept; `vendor/ultracompress/UPSTREAM.txt` records the exact upstream commit.
+- **Bounded compaction with fewer surprises.** Pre-compaction snapshots keep the newest 10 within 14 days. Automatic summaries are capped at 16 KiB, with a recall hint for the omitted text; an explicit `/ultracompress` still asks for the full brief. The old "no estimated gain" cancellation is gone: it could leave a full context uncompacted, and UltraCompress now produces its brief instead. Free-text instructions after `/ultracompress` are dropped with a warning because the brief is deterministic; `keep:N` and `policy:auto|vcc|snap` still work.
+- `vcc` no longer starts the CLI on the live path; the settings `snapshot.maxCount`, `snapshot.maxAgeDays` and `summaryMaxBytes` are configurable in `~/.pi/agent/ultracompress.json`; debug dumps use the OS temp directory; `/ultracompress-stats` shows adapter 0.6.1, `(not found)`, the summary cap and retention; a block whose transform fails twice stays text for the session.
+
 ## 0.19.0 (2026-11-26)
 
 - **Update notice in the terminal.** After a command, on a terminal, Carl prints `carl <new> available (you have <current>) · run: carl update` and a dim second line with `carl update --auto on` and `carl update --skip`, at most once a day per version. It stays quiet without a TTY, in CI, in agent sessions, with `--json` and after an opt-out (`CARL_NO_UPDATE_CHECK=1`, `CARL_OFFLINE=1`, `"update": {"check": false}`; the gateway honours all three too). The check is cached for a day in one file under the platform cache dir and runs while the command runs; a failure is cached with its cause.
