@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { DEFAULT_SNAPSHOT_RETENTION, normalizeSnapshotRetention, type SnapshotRetention } from "./snapshot";
 
 export interface SnapSettings {
   enabled: boolean;
@@ -19,7 +21,9 @@ export interface UltraCompressSettings {
   keepUserTurns: number | null;
   ultracompressBin: string;
   snap: SnapSettings;
-  snapshot: { enabled: boolean };
+  snapshot: { enabled: boolean } & SnapshotRetention;
+  /** Byte ceiling for automatically generated summaries; explicit compaction is never capped. */
+  summaryMaxBytes: number;
   debug: boolean;
 }
 
@@ -30,12 +34,19 @@ export const DEFAULT_SETTINGS: UltraCompressSettings = {
   keepUserTurns: null,
   ultracompressBin: "",
   snap: { enabled: true, minChars: 6000, placement: "nextUser", imageTokensPerFrame: null, providers: ["anthropic", "google"] },
-  snapshot: { enabled: true },
+  snapshot: { enabled: true, ...DEFAULT_SNAPSHOT_RETENTION },
+  summaryMaxBytes: 16384,
   debug: false,
 };
 
-export const SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "ultracompress.json");
-export const LEGACY_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "rapid-compact.json");
+// Carl: an explicit path keeps embedded tests off the operator's live settings file.
+const SETTINGS_OVERRIDE = process.env.ULTRACOMPRESS_SETTINGS_PATH;
+export const SETTINGS_PATH = SETTINGS_OVERRIDE
+  ? path.resolve(SETTINGS_OVERRIDE)
+  : path.join(os.homedir(), ".pi", "agent", "ultracompress.json");
+export const LEGACY_SETTINGS_PATH = SETTINGS_OVERRIDE
+  ? path.join(path.dirname(SETTINGS_PATH), "rapid-compact.json")
+  : path.join(os.homedir(), ".pi", "agent", "rapid-compact.json");
 
 /** Merge partial user JSON over defaults; unknown keys ignored, types coerced. */
 export function mergeSettings(raw: unknown): UltraCompressSettings {
@@ -54,6 +65,9 @@ export function mergeSettings(raw: unknown): UltraCompressSettings {
   // One-release migration alias; new files always write ultracompressBin.
   else if (typeof obj.rcBin === "string") out.ultracompressBin = obj.rcBin;
   if (typeof obj.debug === "boolean") out.debug = obj.debug;
+  if (typeof obj.summaryMaxBytes === "number" && Number.isFinite(obj.summaryMaxBytes)) {
+    out.summaryMaxBytes = Math.max(1024, Math.min(65536, Math.floor(obj.summaryMaxBytes)));
+  }
   if (obj.snap && typeof obj.snap === "object") {
     const snap = obj.snap as Record<string, unknown>;
     if (typeof snap.enabled === "boolean") out.snap.enabled = snap.enabled;
@@ -68,6 +82,7 @@ export function mergeSettings(raw: unknown): UltraCompressSettings {
   if (obj.snapshot && typeof obj.snapshot === "object") {
     const sn = obj.snapshot as Record<string, unknown>;
     if (typeof sn.enabled === "boolean") out.snapshot.enabled = sn.enabled;
+    Object.assign(out.snapshot, normalizeSnapshotRetention(sn));
   }
   return out;
 }
@@ -103,8 +118,23 @@ export function loadSettings(settingsPath = SETTINGS_PATH): UltraCompressSetting
   }
 }
 
+/** Directory of a module URL; percent-decoded so paths with spaces resolve. */
+export function moduleDir(url: string): string {
+  return path.dirname(fileURLToPath(url));
+}
+
+/** Extension package version, read from package.json so reporting never drifts. */
+export function packageVersion(url: string = import.meta.url): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(moduleDir(url), "..", "package.json"), "utf8")) as { version?: unknown };
+    return typeof pkg.version === "string" && pkg.version ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 /** Resolve the UltraCompress binary: env → config → UltraTerm-managed → local → dev → PATH. */
-export function resolveUltraCompressBin(settings: UltraCompressSettings, extensionDir = path.dirname(new URL(import.meta.url).pathname)): string {
+export function resolveUltraCompressBin(settings: UltraCompressSettings, extensionDir = moduleDir(import.meta.url)): string {
   const candidates: string[] = [];
   if (process.env.ULTRACOMPRESS_BIN) candidates.push(process.env.ULTRACOMPRESS_BIN);
   if (settings.ultracompressBin) {
@@ -129,4 +159,22 @@ export function resolveUltraCompressBin(settings: UltraCompressSettings, extensi
     }
   }
   return "ultracompress"; // final fallback: PATH
+}
+
+/** Whether `bin` resolves to an executable file, directly or through PATH. */
+export function isUltraCompressBinAvailable(bin: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const executable = (candidate: string) => {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return fs.statSync(candidate).isFile();
+    } catch {
+      return false;
+    }
+  };
+  if (bin.includes(path.sep)) return executable(bin);
+  const exts = process.platform === "win32" ? (env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
+  return (env.PATH ?? "")
+    .split(path.delimiter)
+    .filter(Boolean)
+    .some((dir) => exts.some((ext) => executable(path.join(dir, bin + ext))));
 }
