@@ -2,6 +2,10 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
+## 0.19.2 (2026-11-27)
+
+- **Stronger UltraCompress release checks.** Regression tests now prove that a `vcc` request and a model outside the configured image providers never start the CLI, and mutation checks confirm the frame-data and no-resend tests fail on the broken adapter. `vendor/ultracompress/UPSTREAM.txt` now describes the real Carl differences: snapshots and stats use `ULTRACOMPRESS_STATE_ROOT`, recall is confined to Carl's session root, and the settings-path override is test-only. Command names remain the same as upstream. No runtime behavior changed in this release.
+
 ## 0.19.1 (2026-11-26)
 
 - **UltraCompress image snapshots work again.** Carl's vendored Pi adapter now reads the frame field the 0.7.1 CLI actually writes, so a snap frame reaches the model as a real PNG with the archived tool text preserved instead of an empty image. A block the engine leaves as text is remembered and is not re-sent on every later request, and a text-only model no longer starts the engine. An end-to-end test drives the adapter with a fake CLI and fails on the old frame spelling. The adapter is re-vendored from upstream v0.7.1 with Carl's state-root, recall-fence and command integration kept; `vendor/ultracompress/UPSTREAM.txt` records the exact upstream commit.
