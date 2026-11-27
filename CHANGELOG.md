@@ -2,9 +2,9 @@
 
 Releases are tagged `v<version>`; each entry says what changed for an operator.
 
-## 0.19.2 (2026-11-27)
+## 0.19.2 (2026-11-26)
 
-- **Stronger UltraCompress release checks.** Regression tests now prove that a `vcc` request and a model outside the configured image providers never start the CLI, and mutation checks confirm the frame-data and no-resend tests fail on the broken adapter. `vendor/ultracompress/UPSTREAM.txt` now describes the real Carl differences: snapshots and stats use `ULTRACOMPRESS_STATE_ROOT`, recall is confined to Carl's session root, and the settings-path override is test-only. Command names remain the same as upstream. No runtime behavior changed in this release.
+- **Stronger UltraCompress release checks.** Regression tests now prove that, on the live path, the `vcc` policy and a model outside the configured image providers never start the CLI, and mutation checks confirm the frame-data and no-resend tests fail on the broken adapter. `vendor/ultracompress/UPSTREAM.txt` now describes the real Carl differences: snapshots and stats use `ULTRACOMPRESS_STATE_ROOT`, recall is confined to Carl's session root, and the settings-path override is test-only. Command names remain the same as upstream. No runtime behavior changed in this release.
 
 ## 0.19.1 (2026-11-26)
 
