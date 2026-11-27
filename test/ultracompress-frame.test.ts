@@ -240,3 +240,19 @@ test("a text-only model leaves the context alone and never starts the CLI", asyn
   assert.equal(await context({ messages: original }, ctx), undefined, "no transform is returned");
   assert.ok(!existsSync(calls), "the fake CLI was never spawned");
 });
+
+test("the text-only vcc policy never starts the CLI on the live path, even for a vision model", async () => {
+  const context = registerContext({ policy: "vcc" });
+  const ctx = { model: { provider: "anthropic", input: ["text", "image"] } };
+
+  assert.equal(await context({ messages: inlineMessages() }, ctx), undefined, "no transform is returned");
+  assert.ok(!existsSync(calls), "the fake CLI was never spawned");
+});
+
+test("a vision model on a provider outside snap.providers never starts the CLI", async () => {
+  const context = registerContext({ provider: "google" });
+  const ctx = { model: { provider: "anthropic", input: ["text", "image"] } };
+
+  assert.equal(await context({ messages: inlineMessages() }, ctx), undefined, "no transform is returned");
+  assert.ok(!existsSync(calls), "the fake CLI was never spawned");
+});

@@ -2,9 +2,9 @@ Vendored from https://github.com/michael-berardi/ultracompress (extension/)
 at tag v0.7.1, commit 1dd9f22b14f41133d0cbfbc904d10ebc3d426a3c, MIT.
 The Pi adapter only; the engine is the `ultracompress` binary (install it separately).
 Update by copying extension/index.ts, extension/src/*.ts and extension/package.json.
-Carl-local differences kept here: snapshots use ULTRACOMPRESS_STATE_ROOT, recall is
-confined to ULTRACOMPRESS_SESSION_ROOT and receives the checked realpath, and command
-integration follows Carl's config and command names. ULTRACOMPRESS_SETTINGS_PATH is an
+Carl-local differences kept here: snapshots use ULTRACOMPRESS_STATE_ROOT (the `/snaps`
+and `/ultracompress-stats` commands read the same root; command names are upstream's), and
+recall is confined to ULTRACOMPRESS_SESSION_ROOT and receives the checked realpath. ULTRACOMPRESS_SETTINGS_PATH is an
 explicit test-only switch, and TextKeyCache uses explicit fields instead of TypeScript
 parameter properties so Carl's strip-types loader can run it. src/payload.ts is also
 Carl-local: it is not in upstream extension/src, and rewrites data-URL image parts to
